@@ -15,6 +15,19 @@ export interface CommandRunner {
   run(file: string, args: readonly string[], options?: CommandRunOptions): Promise<CommandResult>;
 }
 
+export class CommandExecutionError extends Error {
+  public readonly stdout: string;
+  public readonly stderr: string;
+
+  constructor(cause: Error, stdout: string, stderr: string) {
+    super(cause.message, { cause });
+    this.name = "CommandExecutionError";
+    // Non-enumerable to prevent accidental leakage of raw subprocess output
+    Object.defineProperty(this, "stdout", { value: stdout, enumerable: false });
+    Object.defineProperty(this, "stderr", { value: stderr, enumerable: false });
+  }
+}
+
 export class NodeCommandRunner implements CommandRunner {
   public async run(file: string, args: readonly string[], options: CommandRunOptions = {}): Promise<CommandResult> {
     return await new Promise<CommandResult>((resolve, reject) => {
@@ -37,7 +50,7 @@ export class NodeCommandRunner implements CommandRunner {
             );
             return;
           }
-          reject(error);
+          reject(new CommandExecutionError(error, stdout, stderr));
           return;
         }
         resolve({ stdout, stderr });
