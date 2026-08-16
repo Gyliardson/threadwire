@@ -11,10 +11,10 @@ $ErrorActionPreference = 'Stop'
 $pkgs = @(Get-AppxPackage -Name 'OpenAI.ChatGPT-Desktop' -ErrorAction Stop)
 $result = @()
 foreach ($pkg in $pkgs) {
-  $exe = Join-Path $pkg.InstallLocation 'ChatGPT Classic.exe'
-  if (Test-Path -LiteralPath $exe -PathType Leaf) {
+  $exeMatches = @(Get-ChildItem -LiteralPath $pkg.InstallLocation -Filter 'ChatGPT Classic.exe' -Recurse -File -ErrorAction SilentlyContinue)
+  foreach ($exe in $exeMatches) {
     $result += [pscustomobject]@{
-      executablePath = [string]$exe
+      executablePath = [string]$exe.FullName
       packageVersion = $pkg.Version.ToString()
       packageFullName = [string]$pkg.PackageFullName
     }
@@ -106,10 +106,24 @@ export class ClassicInstallationResolver implements ClassicInstallationSource {
         throw new ClassicInstallationQueryFailedError();
       }
       const installations = parseClassicInstallationOutput(output);
-      const selected = installations[0];
-      if (!selected) {
+      if (installations.length === 0) {
         throw new ClassicInstallationNotFoundError();
       }
+
+      const selected = installations[0]!;
+      
+      const ambiguousTies = installations.filter(
+        (inst) =>
+          inst.packageVersion === selected.packageVersion &&
+          inst.packageFullName === selected.packageFullName,
+      );
+
+      if (ambiguousTies.length > 1) {
+        throw new ClassicInstallationNotFoundError(
+          "Ambiguous installation: multiple executables found for the highest Appx version.",
+        );
+      }
+
       return selected;
     } catch (error) {
       if (

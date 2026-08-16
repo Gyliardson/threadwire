@@ -79,3 +79,31 @@ test("installation parsing rejects non-absolute paths and invalid Appx versions"
     ClassicInstallationQueryFailedError,
   );
 });
+
+test("installation resolver rejects ambiguous ties for the same Appx version", async () => {
+  const ambiguous = new ClassicInstallationResolver(
+    new StaticRunner(
+      JSON.stringify([
+        {
+          executablePath: "C:\\Apps\\app\\ChatGPT Classic.exe",
+          packageVersion: "1.2026.190.0",
+          packageFullName: "OpenAI.ChatGPT-Desktop_ambiguous",
+        },
+        {
+          executablePath: "C:\\Apps\\backup\\ChatGPT Classic.exe",
+          packageVersion: "1.2026.190.0",
+          packageFullName: "OpenAI.ChatGPT-Desktop_ambiguous",
+        },
+      ]),
+    ),
+  );
+
+  await assert.rejects(
+    () => ambiguous.resolve(),
+    (error: unknown) => {
+      assert.ok(error instanceof ClassicInstallationNotFoundError);
+      assert.match(error.message, /Ambiguous installation/);
+      return true;
+    },
+  );
+});
