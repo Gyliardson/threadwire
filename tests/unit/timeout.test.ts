@@ -1,21 +1,39 @@
+import assert from "node:assert/strict";
 import test from "node:test";
-import assert from "node:assert";
-import { withTimeout, TimeoutError, delay } from "../../src/utils/timeout.js";
+import { OperationAbortedError, OperationTimeoutError } from "../../src/domain/errors.js";
+import { delay, withTimeout } from "../../src/utils/timeout.js";
 
-test("withTimeout resolves if promise completes in time", async () => {
-  const p = Promise.resolve("success");
-  const result = await withTimeout(p, 100);
-  assert.strictEqual(result, "success");
+test("withTimeout resolves when the operation finishes before its deadline", async () => {
+  const result = await withTimeout(async () => "success", 100);
+  assert.equal(result, "success");
 });
 
-test("withTimeout rejects if promise does not complete in time", async () => {
-  const p = delay(200);
+test("withTimeout aborts the operation signal when the deadline expires", async () => {
+  let observedAbort = false;
   await assert.rejects(
-    () => withTimeout(p, 50, "Custom timeout message"),
-    (err: any) => {
-      assert.strictEqual(err instanceof TimeoutError, true);
-      assert.strictEqual(err.message, "Custom timeout message");
-      return true;
-    }
+    () =>
+      withTimeout(async (signal) => {
+        signal.addEventListener("abort", () => {
+          observedAbort = true;
+        });
+        await delay(200, signal);
+      }, 20),
+    OperationTimeoutError,
   );
+  assert.equal(observedAbort, true);
+});
+
+test("withTimeout propagates parent cancellation as a stable Threadwire error", async () => {
+  const controller = new AbortController();
+  const promise = withTimeout(async (signal) => await delay(200, signal), 1000, {
+    signal: controller.signal,
+  });
+  controller.abort(new Error("synthetic parent reason"));
+  await assert.rejects(promise, OperationAbortedError);
+});
+
+test("delay is AbortSignal-aware", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(() => delay(1, controller.signal), OperationAbortedError);
 });
