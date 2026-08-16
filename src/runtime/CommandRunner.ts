@@ -22,6 +22,8 @@ export class CommandExecutionError extends Error {
   constructor(cause: Error, stdout: string, stderr: string) {
     super(cause.message, { cause });
     this.name = "CommandExecutionError";
+    this.stdout = stdout;
+    this.stderr = stderr;
     // Non-enumerable to prevent accidental leakage of raw subprocess output
     Object.defineProperty(this, "stdout", { value: stdout, enumerable: false });
     Object.defineProperty(this, "stderr", { value: stderr, enumerable: false });
