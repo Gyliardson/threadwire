@@ -16,17 +16,15 @@ export interface CommandRunner {
 }
 
 export class CommandExecutionError extends Error {
-  public readonly stdout: string;
-  public readonly stderr: string;
+  public readonly stdout!: string;
+  public readonly stderr!: string;
 
   constructor(cause: Error, stdout: string, stderr: string) {
     super(cause.message, { cause });
     this.name = "CommandExecutionError";
-    this.stdout = stdout;
-    this.stderr = stderr;
     // Non-enumerable to prevent accidental leakage of raw subprocess output
-    Object.defineProperty(this, "stdout", { value: stdout, enumerable: false });
-    Object.defineProperty(this, "stderr", { value: stderr, enumerable: false });
+    Object.defineProperty(this, "stdout", { value: stdout, enumerable: false, writable: false });
+    Object.defineProperty(this, "stderr", { value: stderr, enumerable: false, writable: false });
   }
 }
 
