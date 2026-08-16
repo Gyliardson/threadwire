@@ -182,6 +182,8 @@ test("stop accepts creation times that differ only below WMI microsecond precisi
     stopScript,
     /\$actualCanonicalTicks = \[long\]\(\$actualCreationTicks - \(\$actualCreationTicks % 10\)\)/,
   );
+  assert.match(stopScript, /\$expectedProcesses = \$env:THREADWIRE_CLASSIC_IDENTITIES \| ConvertFrom-Json -ErrorAction Stop/);
+  assert.doesNotMatch(stopScript, /@\(\$env:THREADWIRE_CLASSIC_IDENTITIES/);
   assert.match(
     stopScript,
     /\$expectedCanonicalTicks = \[long\]\(\$expectedCreationTicks - \(\$expectedCreationTicks % 10\)\)/,

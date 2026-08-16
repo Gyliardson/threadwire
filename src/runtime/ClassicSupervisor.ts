@@ -37,7 +37,7 @@ const DEFAULT_PROCESS_START_TIMEOUT_MS = 10000;
 
 const STOP_PROCESS_SCRIPT = `
 $ErrorActionPreference = 'Stop'
-$expectedProcesses = @($env:THREADWIRE_CLASSIC_IDENTITIES | ConvertFrom-Json -ErrorAction Stop)
+$expectedProcesses = $env:THREADWIRE_CLASSIC_IDENTITIES | ConvertFrom-Json -ErrorAction Stop
 foreach ($expected in $expectedProcesses) {
   $process = Get-Process -Id ([int]$expected.pid) -ErrorAction SilentlyContinue
   if ($null -eq $process) {
