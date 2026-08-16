@@ -8,7 +8,7 @@ import {
   runtimeGenerationNumber,
   sameRuntimeIdentity,
 } from "../domain/RuntimeGeneration.js";
-import { ClassicProcessInfo, ClassicRuntimeSnapshot } from "../domain/RuntimeState.js";
+import { ClassicProcessObservation, ClassicRuntimeSnapshot } from "../domain/RuntimeState.js";
 import {
   ClassicStartFailedError,
   ClassicStopFailedError,
@@ -25,6 +25,7 @@ import {
 import { buildClassicLaunchInvocation } from "./ClassicLaunchCommand.js";
 import { CommandRunner, NodeCommandRunner } from "./CommandRunner.js";
 import {
+  ClassicProcessInfo,
   ClassicProcessInspector,
   ProcessInspector,
   selectUniqueMainProcess,
@@ -36,8 +37,27 @@ const DEFAULT_PROCESS_START_TIMEOUT_MS = 10000;
 
 const STOP_PROCESS_SCRIPT = `
 $ErrorActionPreference = 'Stop'
-$pids = @($env:THREADWIRE_CLASSIC_PIDS.Split(',') | ForEach-Object { [int]$_ })
-Get-Process -Id $pids -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
+$expectedProcesses = @($env:THREADWIRE_CLASSIC_IDENTITIES | ConvertFrom-Json -ErrorAction Stop)
+foreach ($expected in $expectedProcesses) {
+  $process = Get-Process -Id ([int]$expected.pid) -ErrorAction SilentlyContinue
+  if ($null -eq $process) {
+    continue
+  }
+
+  $actualCreationTicks = $process.StartTime.ToUniversalTime().Ticks
+  $expectedCreationTicks = [DateTimeOffset]::Parse([string]$expected.creationTime).UtcDateTime.Ticks
+  if ($actualCreationTicks -ne $expectedCreationTicks) {
+    throw "Classic process identity changed before termination."
+  }
+
+  try {
+    $process.Kill()
+  } catch {
+    if (-not $process.HasExited) {
+      throw
+    }
+  }
+}
 `;
 
 export interface ClassicSupervisorOptions {
@@ -55,6 +75,15 @@ function runtimeIdentity(process: ClassicProcessInfo): RuntimeIdentity {
 
 function processMatchesIdentity(process: ClassicProcessInfo, identity: RuntimeIdentity): boolean {
   return sameRuntimeIdentity(runtimeIdentity(process), identity);
+}
+
+function processObservation(process: ClassicProcessInfo): ClassicProcessObservation {
+  return {
+    pid: process.pid,
+    parentPid: process.parentPid,
+    creationTime: process.creationTime,
+    role: process.role,
+  };
 }
 
 export class ClassicSupervisor implements RuntimeLeaseSource {
@@ -98,8 +127,8 @@ export class ClassicSupervisor implements RuntimeLeaseSource {
       isRunning: mainProcess !== null,
       pid: mainProcess?.pid ?? null,
       generation,
-      mainProcess,
-      processes: processes.map((process) => ({ ...process })),
+      mainProcess: mainProcess ? processObservation(mainProcess) : null,
+      processes: processes.map(processObservation),
     };
   }
 
@@ -124,7 +153,7 @@ export class ClassicSupervisor implements RuntimeLeaseSource {
     }
 
     const previousIdentities = processes.map(runtimeIdentity);
-    const pidList = processes.map((process) => process.pid).join(",");
+    const serializedIdentities = JSON.stringify(previousIdentities);
 
     try {
       await this.runner.run(
@@ -132,7 +161,7 @@ export class ClassicSupervisor implements RuntimeLeaseSource {
         ["-NoProfile", "-NonInteractive", "-Command", STOP_PROCESS_SCRIPT],
         {
           ...(signal ? { signal } : {}),
-          env: { ...process.env, THREADWIRE_CLASSIC_PIDS: pidList },
+          env: { ...process.env, THREADWIRE_CLASSIC_IDENTITIES: serializedIdentities },
         },
       );
     } catch (error) {
