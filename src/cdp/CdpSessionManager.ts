@@ -188,10 +188,12 @@ export class CdpSessionManager {
     throwIfAborted(signal);
     const session = this.requireSessionForLease(lease);
     try {
-      const snapshot = await session.getReadinessSnapshot(expectedLocator);
-      throwIfAborted(signal);
-      this.assertSessionForLeaseCurrent(session, lease);
-      return snapshot;
+      return await this.runReadinessSessionOperation(
+        session,
+        lease,
+        () => session.getReadinessSnapshot(expectedLocator),
+        signal,
+      );
     } catch (error) {
       this.rethrowReadinessLifecycleError(error, session, lease, signal);
     }
@@ -209,13 +211,71 @@ export class CdpSessionManager {
     throwIfAborted(signal);
     const session = this.requireSessionForLease(lease);
     try {
-      this.assertSessionForLeaseCurrent(session, lease);
-      await session.focusBackendNode(backendDOMNodeId);
-      throwIfAborted(signal);
-      this.assertSessionForLeaseCurrent(session, lease);
+      await this.runReadinessSessionOperation(
+        session,
+        lease,
+        () => session.focusBackendNode(backendDOMNodeId),
+        signal,
+      );
     } catch (error) {
       this.rethrowReadinessLifecycleError(error, session, lease, signal);
     }
+  }
+
+  private async runReadinessSessionOperation<T>(
+    session: CdpTransportSession,
+    lease: RuntimeLease,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    this.assertSessionForLeaseCurrent(session, lease);
+    throwIfAborted(signal);
+
+    const operationPromise = operation();
+    if (!signal) {
+      const result = await operationPromise;
+      this.assertSessionForLeaseCurrent(session, lease);
+      return result;
+    }
+
+    let onAbort: (() => void) | null = null;
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        this.invalidateSessionAfterInFlightAbort(session);
+        try {
+          throwIfAborted(signal);
+          reject(new OperationAbortedError());
+        } catch (error) {
+          reject(error);
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+
+    try {
+      const result = await Promise.race([operationPromise, abortPromise]);
+      throwIfAborted(signal);
+      this.assertSessionForLeaseCurrent(session, lease);
+      return result;
+    } finally {
+      if (onAbort) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
+  }
+
+  private invalidateSessionAfterInFlightAbort(session: CdpTransportSession): void {
+    if (this.session !== session) {
+      return;
+    }
+
+    this.unsubscribeDisconnect?.();
+    this.unsubscribeDisconnect = null;
+    this.session = null;
+    this.boundLease = null;
+    this.selectedTargetId = null;
+    this.currentState = "DISCONNECTED";
+    void session.close().catch(() => undefined);
   }
 
   private requireSessionForLease(lease: RuntimeLease): CdpTransportSession {

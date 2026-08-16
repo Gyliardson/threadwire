@@ -9,93 +9,14 @@ import {
   ExistingReadinessSnapshot,
   ReadinessEditableTarget,
 } from "../readiness/types.js";
-import { CdpTransport, CdpTransportConnectOptions, CdpTransportSession } from "./CdpTransport.js";
+import {
+  CdpTransport,
+  CdpTransportConnectOptions,
+  CdpTransportSession,
+} from "./CdpTransport.js";
 
-interface CriNavigateResult {
-  readonly errorText?: string;
-}
-
-interface CriFrame {
-  readonly id: string;
-  readonly loaderId: string;
-  readonly url: string;
-}
-
-interface CriFrameTree {
-  readonly frame: CriFrame;
-}
-
-interface CriPageLike {
-  navigate(params: { readonly url: string }): Promise<CriNavigateResult>;
-  getFrameTree(): Promise<{ readonly frameTree: CriFrameTree }>;
-}
-
-interface CriAxValue {
-  readonly value?: unknown;
-}
-
-interface CriAxProperty {
-  readonly name: string;
-  readonly value: CriAxValue;
-}
-
-interface CriAxNode {
-  readonly ignored: boolean;
-  readonly role?: CriAxValue;
-  readonly properties?: readonly CriAxProperty[];
-  readonly backendDOMNodeId?: number;
-}
-
-interface CriAccessibilityLike {
-  getFullAXTree(params: { readonly frameId: string }): Promise<{
-    readonly nodes: readonly CriAxNode[];
-  }>;
-}
-
-interface CriDomLike {
-  focus(params: { readonly backendNodeId: number }): Promise<void>;
-}
-
-interface CriRequestWillBeSentEvent {
-  readonly requestId: string;
-  readonly request: Readonly<{ url: string }>;
-}
-
-interface CriLoadingFinishedEvent {
-  readonly requestId: string;
-}
-
-interface CriLoadingFailedEvent {
-  readonly requestId: string;
-}
-
-type CriUnsubscribe = () => unknown;
-
-interface CriNetworkLike {
-  enable(): Promise<void>;
-  requestWillBeSent(listener: (event: CriRequestWillBeSentEvent) => void): CriUnsubscribe;
-  loadingFinished(listener: (event: CriLoadingFinishedEvent) => void): CriUnsubscribe;
-  loadingFailed(listener: (event: CriLoadingFailedEvent) => void): CriUnsubscribe;
-}
-
-interface CriClientLike {
-  readonly Page: CriPageLike;
-  readonly Accessibility: CriAccessibilityLike;
-  readonly DOM: CriDomLike;
-  readonly Network: CriNetworkLike;
-  close(): Promise<void>;
-  on(event: "disconnect", listener: () => void): unknown;
-  removeListener(event: "disconnect", listener: () => void): unknown;
-}
-
-interface CriConnectOptions {
-  readonly host: string;
-  readonly port: number;
-  readonly target: string;
-}
-
-type CriConnect = (options: CriConnectOptions) => Promise<unknown>;
-const connectCri = CDP as unknown as CriConnect;
+type CriClient = Awaited<ReturnType<typeof CDP>>;
+type CriAxNode = Awaited<ReturnType<CriClient["Accessibility"]["getFullAXTree"]>>["nodes"][number];
 
 export interface ChromeRemoteInterfaceTransportOptions {
   readonly connect?: (options: Readonly<{ host: string; port: number; target: string }>) => Promise<unknown>;
@@ -109,7 +30,7 @@ function hasFunction(value: unknown, name: string): boolean {
   return isObject(value) && typeof value[name] === "function";
 }
 
-function isCriClient(value: unknown): value is CriClientLike {
+function isCriClient(value: unknown): value is CriClient {
   if (!isObject(value)) {
     return false;
   }
@@ -117,7 +38,6 @@ function isCriClient(value: unknown): value is CriClientLike {
   return (
     typeof value.close === "function" &&
     typeof value.on === "function" &&
-    typeof value.removeListener === "function" &&
     hasFunction(value.Page, "navigate") &&
     hasFunction(value.Page, "getFrameTree") &&
     hasFunction(value.Accessibility, "getFullAXTree") &&
@@ -133,7 +53,10 @@ function getAxProperty(node: CriAxNode, name: string): unknown {
   return node.properties?.find((property) => property.name === name)?.value.value;
 }
 
-function axBoolean(node: CriAxNode, name: string): boolean {
+function axBoolean(
+  node: CriAxNode,
+  name: string,
+): boolean {
   return getAxProperty(node, name) === true;
 }
 
@@ -141,7 +64,9 @@ function isEditableValue(value: unknown): boolean {
   return value === true || value === "plaintext" || value === "richtext";
 }
 
-function toEligibleEditable(node: CriAxNode): ReadinessEditableTarget | null {
+function toEligibleEditable(
+  node: CriAxNode,
+): ReadinessEditableTarget | null {
   const backendDOMNodeId = node.backendDOMNodeId;
   if (
     node.ignored ||
@@ -185,12 +110,13 @@ function isRelevantBackendUrl(rawUrl: string): boolean {
 
 class ChromeRemoteInterfaceSession implements CdpTransportSession {
   private readonly activeRelevantRequestIds = new Set<string>();
+  private readonly disconnectListeners = new Set<() => void>();
   private activityEpoch = 0;
   private readinessInitialized = false;
-  private readinessUnsubscribers: CriUnsubscribe[] = [];
+  private readinessUnsubscribers: Array<() => unknown> = [];
   private closed = false;
 
-  public constructor(private readonly client: CriClientLike) {
+  public constructor(private readonly client: CriClient) {
     this.client.on("disconnect", this.handleDisconnect);
   }
 
@@ -199,15 +125,20 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
       return;
     }
     this.closed = true;
-    this.client.removeListener("disconnect", this.handleDisconnect);
+    this.disconnectListeners.clear();
     this.disposeReadinessObservation();
     await this.client.close();
   }
 
   public onDisconnect(listener: () => void): () => void {
-    this.client.on("disconnect", listener);
+    if (this.closed) {
+      queueMicrotask(listener);
+      return () => undefined;
+    }
+
+    this.disconnectListeners.add(listener);
     return () => {
-      this.client.removeListener("disconnect", listener);
+      this.disconnectListeners.delete(listener);
     };
   }
 
@@ -220,7 +151,9 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
     }
 
     const unsubscribers = [
-      this.client.Network.requestWillBeSent((event) => this.onRequestWillBeSent(event)),
+      this.client.Network.requestWillBeSent((event) =>
+        this.onRequestWillBeSent(event.requestId, event.request.url),
+      ),
       this.client.Network.loadingFinished((event) => this.onRequestSettled(event.requestId)),
       this.client.Network.loadingFailed((event) => this.onRequestSettled(event.requestId)),
     ];
@@ -236,6 +169,10 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
   }
 
   public async navigate(url: string): Promise<void> {
+    if (this.closed) {
+      throw new Error("CDP session is closed.");
+    }
+
     const result = await this.client.Page.navigate({ url });
     if (typeof result.errorText === "string" && result.errorText.length > 0) {
       throw new Error("CDP Page.navigate reported a navigation error.");
@@ -245,8 +182,8 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
   public async getReadinessSnapshot(
     expectedLocator: ConversationLocator,
   ): Promise<ExistingReadinessSnapshot> {
-    if (!this.readinessInitialized) {
-      throw new Error("CDP readiness observation is not initialized.");
+    if (this.closed || !this.readinessInitialized) {
+      throw new Error("CDP readiness observation is unavailable.");
     }
 
     const frameTree = await this.client.Page.getFrameTree();
@@ -271,25 +208,37 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
   }
 
   public async focusBackendNode(backendDOMNodeId: number): Promise<void> {
+    if (this.closed) {
+      throw new Error("CDP session is closed.");
+    }
     await this.client.DOM.focus({ backendNodeId: backendDOMNodeId });
   }
 
   private readonly handleDisconnect = (): void => {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
     this.disposeReadinessObservation();
+    const listeners = [...this.disconnectListeners];
+    this.disconnectListeners.clear();
+    for (const listener of listeners) {
+      listener();
+    }
   };
 
-  private onRequestWillBeSent(event: CriRequestWillBeSentEvent): void {
-    const relevant = isRelevantBackendUrl(event.request.url);
-    const wasRelevant = this.activeRelevantRequestIds.has(event.requestId);
+  private onRequestWillBeSent(requestId: string, rawUrl: string): void {
+    const relevant = isRelevantBackendUrl(rawUrl);
+    const wasRelevant = this.activeRelevantRequestIds.has(requestId);
 
     if (relevant && !wasRelevant) {
-      this.activeRelevantRequestIds.add(event.requestId);
+      this.activeRelevantRequestIds.add(requestId);
       this.activityEpoch += 1;
       return;
     }
 
     if (!relevant && wasRelevant) {
-      this.activeRelevantRequestIds.delete(event.requestId);
+      this.activeRelevantRequestIds.delete(requestId);
       this.activityEpoch += 1;
     }
   }
@@ -326,10 +275,10 @@ async function closeLateClient(promise: Promise<unknown>): Promise<void> {
 }
 
 export class ChromeRemoteInterfaceTransport implements CdpTransport {
-  private readonly connectClient: CriConnect;
+  private readonly connectClient: NonNullable<ChromeRemoteInterfaceTransportOptions["connect"]>;
 
   public constructor(options: ChromeRemoteInterfaceTransportOptions = {}) {
-    this.connectClient = options.connect ?? connectCri;
+    this.connectClient = options.connect ?? (async (connectOptions) => await CDP(connectOptions));
   }
 
   public async connect(options: CdpTransportConnectOptions): Promise<CdpTransportSession> {

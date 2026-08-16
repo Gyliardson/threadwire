@@ -78,6 +78,9 @@ class FakeCriClient {
   public emitFinished(requestId: string): void { for (const listener of this.finishedListeners) listener({ requestId }); }
   public emitFailed(requestId: string): void { for (const listener of this.failedListeners) listener({ requestId }); }
   public emitDisconnect(): void { for (const listener of [...this.disconnectListeners]) listener(); }
+  public networkListenerCount(): number {
+    return this.requestListeners.size + this.finishedListeners.size + this.failedListeners.size;
+  }
 }
 
 async function createSession(client = new FakeCriClient()) {
@@ -161,13 +164,15 @@ test("typed DOM.focus delegates with backendNodeId and no generic mutation surfa
   assert.equal("reload" in session, false);
 });
 
-test("disconnect clears readiness request tracking and listeners", async () => {
+test("disconnect clears readiness request tracking/listeners and closes the observation lifecycle", async () => {
   const { client, session } = await createSession(); await session.initializeReadinessObservation();
   client.emitRequest("req-3", "https://chatgpt.com/backend-api/models");
   assert.equal((await session.getReadinessSnapshot(expected)).backendActivity.activeCount, 1);
+  assert.equal(client.networkListenerCount(), 3);
+
   client.emitDisconnect();
+
+  assert.equal(client.networkListenerCount(), 0);
   await assert.rejects(() => session.getReadinessSnapshot(expected));
-  client.emitFinished("req-3");
-  await session.initializeReadinessObservation();
-  assert.equal((await session.getReadinessSnapshot(expected)).backendActivity.activeCount, 0);
+  await assert.rejects(() => session.initializeReadinessObservation());
 });

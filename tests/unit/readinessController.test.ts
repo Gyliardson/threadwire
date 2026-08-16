@@ -8,7 +8,10 @@ import {
   RuntimeGenerationChangedError,
 } from "../../src/domain/errors.js";
 import { ExistingReadinessPolicy } from "../../src/readiness/ExistingReadinessPolicy.js";
-import { ReadinessController } from "../../src/readiness/ReadinessController.js";
+import {
+  ReadinessController,
+  ReadinessDeadlineScheduler,
+} from "../../src/readiness/ReadinessController.js";
 import {
   ExistingReadinessObservationPort,
   ExistingReadinessSnapshot,
@@ -186,6 +189,38 @@ test("replacement after focus but before final verification fails stale", async 
     RuntimeGenerationChangedError,
   );
   assert.deepEqual(observation.focuses, [101]);
+});
+
+test("deadline timer is cancelled when readiness settles successfully", async () => {
+  const { lease } = createRuntime();
+  const observation = new QueueObservation([snapshot(), snapshot({ focused: true })]);
+  const handles: unknown[] = [];
+  const cancelled: unknown[] = [];
+  const scheduler: ReadinessDeadlineScheduler = {
+    schedule: (_callback, _delayMs) => {
+      const handle = Object.freeze({ syntheticTimer: handles.length + 1 });
+      handles.push(handle);
+      return handle;
+    },
+    cancel: (handle) => {
+      cancelled.push(handle);
+    },
+  };
+  const controller = new ReadinessController(
+    observation,
+    new ExistingReadinessPolicy({ frameStableObservations: 1, focusStableObservations: 1 }),
+    {
+      timeoutMs: 100,
+      pollIntervalMs: 0,
+      sleep: async () => undefined,
+      deadlineScheduler: scheduler,
+    },
+  );
+
+  await controller.waitForExistingRoute(locator, lease);
+
+  assert.equal(handles.length, 1);
+  assert.deepEqual(cancelled, handles);
 });
 
 test("no observation or focus continues after ready result settles", async () => {
