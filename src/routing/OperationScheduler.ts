@@ -3,7 +3,10 @@ import { OperationAbortedError } from "../domain/errors.js";
 import { throwIfAborted } from "../utils/timeout.js";
 
 export type MutationOperationKind = "ROUTE" | "TURN";
-export type MutationOperation<T> = (signal?: AbortSignal) => Promise<T> | T;
+export type MutationOperation<T> = (
+  signal: AbortSignal | undefined,
+  lease: RuntimeLease,
+) => Promise<T> | T;
 
 export interface ScheduleOperationOptions {
   readonly signal?: AbortSignal;
@@ -59,7 +62,7 @@ export class OperationScheduler {
           try {
             throwIfAborted(options.signal);
             this.runtime.assertRuntimeLeaseCurrent(entry.lease);
-            const result = await operation(options.signal);
+            const result = await operation(options.signal, entry.lease);
             entry.settled = true;
             resolve(result);
           } catch (error) {
