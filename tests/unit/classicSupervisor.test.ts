@@ -22,6 +22,11 @@ function child(pid: number, parentPid: number, creationTime: string): ClassicPro
   };
 }
 
+function canonicalizeStopCreationTime(creationTime: string): string {
+  const match = /^(.*\.\d{6})\d+(Z)$/.exec(creationTime);
+  return match ? `${match[1]}${match[2]}` : creationTime;
+}
+
 class MutableInspector implements ClassicProcessInspector {
   public processes: ClassicProcessInfo[] = [];
   public async getClassicProcesses(): Promise<ClassicProcessInfo[]> {
@@ -41,6 +46,7 @@ class StaticResolver implements ClassicInstallationSource {
 
 class SupervisorRunner implements CommandRunner {
   public readonly stopIdentityPayloads: string[] = [];
+  public readonly stopScripts: string[] = [];
 
   public constructor(
     private readonly inspector: MutableInspector,
@@ -52,6 +58,10 @@ class SupervisorRunner implements CommandRunner {
     const identitiesJson = options.env?.THREADWIRE_CLASSIC_IDENTITIES;
     if (identitiesJson) {
       this.stopIdentityPayloads.push(identitiesJson);
+      const stopScript = _args[_args.length - 1];
+      if (stopScript) {
+        this.stopScripts.push(stopScript);
+      }
       if (this.replaceBeforeStop) {
         this.inspector.processes = this.replaceBeforeStop.map((process) => ({ ...process }));
       }
@@ -59,7 +69,10 @@ class SupervisorRunner implements CommandRunner {
       const expected = JSON.parse(identitiesJson) as Array<{ pid: number; creationTime: string }>;
       const identitiesStillMatch = expected.every((identity) =>
         this.inspector.processes.some(
-          (process) => process.pid === identity.pid && process.creationTime === identity.creationTime,
+          (process) =>
+            process.pid === identity.pid &&
+            canonicalizeStopCreationTime(process.creationTime) ===
+              canonicalizeStopCreationTime(identity.creationTime),
         ),
       );
       if (!identitiesStillMatch) {
@@ -146,6 +159,60 @@ test("outward runtime snapshots omit raw Classic command lines", async () => {
   assert.deepEqual(Object.keys(snapshot.mainProcess ?? {}).sort(), ["creationTime", "parentPid", "pid", "role"]);
   assert.equal(snapshot.processes.every((process) => !("commandLine" in process)), true);
   assert.equal(JSON.stringify(snapshot).includes("synthetic-sensitive-argument"), false);
+});
+
+test("stop accepts creation times that differ only below WMI microsecond precision", async () => {
+  const inspector = new MutableInspector();
+  const expectedCreationTime = "2026-08-16T15:24:48.9563720Z";
+  const actualCreationTime = "2026-08-16T15:24:48.9563724Z";
+  inspector.processes = [main(100, expectedCreationTime)];
+  const runner = new SupervisorRunner(inspector, [main(200, "B")], [main(100, actualCreationTime)]);
+  const supervisor = createSupervisor(inspector, [main(200, "B")], runner);
+
+  await supervisor.stop();
+
+  assert.deepEqual(inspector.processes, []);
+  assert.equal(runner.stopIdentityPayloads.length, 1);
+  assert.deepEqual(JSON.parse(runner.stopIdentityPayloads[0]!), [
+    { pid: 100, creationTime: expectedCreationTime },
+  ]);
+  assert.equal(runner.stopScripts.length, 1);
+  const stopScript = runner.stopScripts[0]!;
+  assert.match(
+    stopScript,
+    /\$actualCanonicalTicks = \[long\]\(\$actualCreationTicks - \(\$actualCreationTicks % 10\)\)/,
+  );
+  assert.match(
+    stopScript,
+    /\$expectedCanonicalTicks = \[long\]\(\$expectedCreationTicks - \(\$expectedCreationTicks % 10\)\)/,
+  );
+  assert.match(stopScript, /if \(\$actualCanonicalTicks -ne \$expectedCanonicalTicks\)/);
+  assert.doesNotMatch(stopScript, /if \(\$actualCreationTicks -ne \$expectedCreationTicks\)/);
+  assert.ok(
+    stopScript.indexOf("$process.Kill()") >
+      stopScript.indexOf("if ($actualCanonicalTicks -ne $expectedCanonicalTicks)"),
+  );
+});
+
+test("stop fails closed when creation times differ by one complete microsecond", async () => {
+  const inspector = new MutableInspector();
+  const expectedCreationTime = "2026-08-16T15:24:48.9563720Z";
+  const actualCreationTime = "2026-08-16T15:24:48.9563730Z";
+  inspector.processes = [main(100, expectedCreationTime)];
+  const runner = new SupervisorRunner(inspector, [main(200, "B")], [main(100, actualCreationTime)]);
+  const supervisor = createSupervisor(inspector, [main(200, "B")], runner);
+
+  await assert.rejects(
+    () => supervisor.stop(),
+    (error: unknown) => {
+      assert.equal(error instanceof Error && error.name, "ClassicStopFailedError");
+      return true;
+    },
+  );
+
+  assert.equal(inspector.processes.length, 1);
+  assert.equal(inspector.processes[0]?.pid, 100);
+  assert.equal(inspector.processes[0]?.creationTime, actualCreationTime);
 });
 
 test("stop fails closed when a captured PID is replaced by a different process identity", async () => {
