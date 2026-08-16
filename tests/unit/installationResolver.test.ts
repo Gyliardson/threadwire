@@ -10,10 +10,28 @@ import {
 } from "../../src/runtime/ClassicInstallationResolver.js";
 import { CommandRunner } from "../../src/runtime/CommandRunner.js";
 
-class StaticRunner implements CommandRunner {
-  public constructor(private readonly stdout: string) {}
-  public async run(): Promise<{ stdout: string; stderr: string }> {
-    return { stdout: this.stdout, stderr: "" };
+class RecordingRunner implements CommandRunner {
+  public file: string | undefined;
+  public args: readonly string[] | undefined;
+  public options: unknown;
+
+  public constructor(
+    private readonly stdoutOrError: string | Error,
+  ) {}
+
+  public async run(
+    file: string,
+    args: readonly string[],
+    options?: unknown,
+  ): Promise<{ stdout: string; stderr: string }> {
+    this.file = file;
+    this.args = args;
+    this.options = options;
+
+    if (this.stdoutOrError instanceof Error) {
+      throw this.stdoutOrError;
+    }
+    return { stdout: this.stdoutOrError, stderr: "" };
   }
 }
 
@@ -43,10 +61,10 @@ test("installation parsing selects the highest Appx version deterministically", 
 });
 
 test("installation resolver distinguishes no installation from malformed query output", async () => {
-  const missing = new ClassicInstallationResolver(new StaticRunner("[]"));
+  const missing = new ClassicInstallationResolver(new RecordingRunner("[]"));
   await assert.rejects(() => missing.resolve(), ClassicInstallationNotFoundError);
 
-  const malformed = new ClassicInstallationResolver(new StaticRunner('{"executablePath": 5}'));
+  const malformed = new ClassicInstallationResolver(new RecordingRunner('{"executablePath": 5}'));
   await assert.rejects(() => malformed.resolve(), ClassicInstallationQueryFailedError);
 });
 
@@ -82,7 +100,7 @@ test("installation parsing rejects non-absolute paths and invalid Appx versions"
 
 test("installation resolver rejects ambiguous ties for the same Appx version", async () => {
   const ambiguous = new ClassicInstallationResolver(
-    new StaticRunner(
+    new RecordingRunner(
       JSON.stringify([
         {
           executablePath: "C:\\Apps\\app\\ChatGPT Classic.exe",
@@ -103,6 +121,43 @@ test("installation resolver rejects ambiguous ties for the same Appx version", a
     (error: unknown) => {
       assert.ok(error instanceof ClassicInstallationNotFoundError);
       assert.match(error.message, /Ambiguous installation/);
+      return true;
+    },
+  );
+});
+
+test("installation resolver uses fail-closed recursive query semantics", async () => {
+  const runner = new RecordingRunner(
+    JSON.stringify([
+      {
+        executablePath: "C:\\Apps\\app\\ChatGPT Classic.exe",
+        packageVersion: "1.2026.190.0",
+        packageFullName: "OpenAI.ChatGPT-Desktop_test",
+      },
+    ]),
+  );
+  const resolver = new ClassicInstallationResolver(runner);
+  await resolver.resolve();
+
+  assert.equal(runner.file, "powershell.exe");
+  const commandArg = runner.args?.[runner.args.length - 1];
+  assert.ok(commandArg);
+
+  assert.match(commandArg, /Get-ChildItem.*-Recurse/);
+  assert.match(commandArg, /Get-ChildItem.*-ErrorAction Stop/);
+  assert.doesNotMatch(commandArg, /-ErrorAction SilentlyContinue/);
+});
+
+test("installation resolver maps subprocess failure to ClassicInstallationQueryFailedError", async () => {
+  const failingRunner = new RecordingRunner(new Error("Simulated subprocess failure"));
+  const resolver = new ClassicInstallationResolver(failingRunner);
+
+  await assert.rejects(
+    () => resolver.resolve(),
+    (error: unknown) => {
+      assert.ok(error instanceof ClassicInstallationQueryFailedError);
+      assert.ok((error as Error).cause instanceof Error);
+      assert.equal(((error as Error).cause as Error).message, "Simulated subprocess failure");
       return true;
     },
   );

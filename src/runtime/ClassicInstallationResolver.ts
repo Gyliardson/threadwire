@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $pkgs = @(Get-AppxPackage -Name 'OpenAI.ChatGPT-Desktop' -ErrorAction Stop)
 $result = @()
 foreach ($pkg in $pkgs) {
-  $exeMatches = @(Get-ChildItem -LiteralPath $pkg.InstallLocation -Filter 'ChatGPT Classic.exe' -Recurse -File -ErrorAction SilentlyContinue)
+  $exeMatches = @(Get-ChildItem -LiteralPath $pkg.InstallLocation -Filter 'ChatGPT Classic.exe' -Recurse -File -ErrorAction Stop)
   foreach ($exe in $exeMatches) {
     $result += [pscustomobject]@{
       executablePath = [string]$exe.FullName
