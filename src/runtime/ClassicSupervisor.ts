@@ -44,9 +44,11 @@ foreach ($expected in $expectedProcesses) {
     continue
   }
 
-  $actualCreationTicks = $process.StartTime.ToUniversalTime().Ticks
-  $expectedCreationTicks = [DateTimeOffset]::Parse([string]$expected.creationTime).UtcDateTime.Ticks
-  if ($actualCreationTicks -ne $expectedCreationTicks) {
+  $actualCreationTicks = [long]$process.StartTime.ToUniversalTime().Ticks
+  $expectedCreationTicks = [long]([DateTimeOffset]::Parse([string]$expected.creationTime).UtcDateTime.Ticks)
+  $actualCanonicalTicks = [long]($actualCreationTicks - ($actualCreationTicks % 10))
+  $expectedCanonicalTicks = [long]($expectedCreationTicks - ($expectedCreationTicks % 10))
+  if ($actualCanonicalTicks -ne $expectedCanonicalTicks) {
     throw "Classic process identity changed before termination."
   }
 
