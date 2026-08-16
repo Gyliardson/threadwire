@@ -58,8 +58,10 @@ class FakeCriClient {
     focus: async ({ backendNodeId }: { backendNodeId: number }) => { this.focusIds.push(backendNodeId); this.events.push("dom.focus"); },
   };
 
+  public enableOptions: unknown[] = [];
+
   public readonly Network = {
-    enable: async () => { this.events.push("network.enable"); },
+    enable: async (options: {}) => { this.enableOptions.push(options); this.events.push("network.enable"); },
     requestWillBeSent: (listener: RequestListener) => {
       this.events.push("subscribe.request"); this.requestListeners.add(listener); return () => this.requestListeners.delete(listener);
     },
@@ -96,6 +98,7 @@ test("Network listeners and Network.enable are established before route navigati
   assert.deepEqual(client.events.slice(0, 5), [
     "subscribe.request", "subscribe.finished", "subscribe.failed", "network.enable", `navigate:${expected}`,
   ]);
+  assert.deepEqual(client.enableOptions, [{}]);
 });
 
 test("relevant backend request IDs are metadata-only and loadingFinished clears them", async () => {

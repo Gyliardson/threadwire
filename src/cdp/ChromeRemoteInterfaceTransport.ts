@@ -160,7 +160,7 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
     this.readinessUnsubscribers = unsubscribers;
 
     try {
-      await this.client.Network.enable();
+      await this.client.Network.enable({});
       this.readinessInitialized = true;
     } catch (error) {
       this.disposeReadinessObservation();
