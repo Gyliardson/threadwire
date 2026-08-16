@@ -1,93 +1,160 @@
-import CDP from "chrome-remote-interface";
-import { CdpConnectionState } from "../domain/RuntimeState.js";
-import { RuntimeGeneration } from "../domain/RuntimeGeneration.js";
-import { CdpTargetDiscovery } from "./CdpTargetDiscovery.js";
 import { ControllerConfig } from "../config/ControllerConfig.js";
-import { CdpAttachFailedError, CdpDisconnectedError, RuntimeGenerationChangedError } from "../domain/errors.js";
+import {
+  RuntimeGeneration,
+  RuntimeLease,
+  RuntimeLeaseSource,
+  sameRuntimeLease,
+} from "../domain/RuntimeGeneration.js";
+import { CdpConnectionState } from "../domain/RuntimeState.js";
+import {
+  CdpAttachFailedError,
+  CdpDisconnectedError,
+  OperationAbortedError,
+  RuntimeGenerationChangedError,
+  ThreadwireError,
+} from "../domain/errors.js";
+import { withTimeout } from "../utils/timeout.js";
+import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
+import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
+import { CdpTransport, CdpTransportSession } from "./CdpTransport.js";
+
+const DEFAULT_ATTACH_TIMEOUT_MS = 5000;
+
+export interface CdpTargetDiscoveryLike {
+  findPrimaryTarget(options?: FindPrimaryTargetOptions): ReturnType<CdpTargetDiscovery["findPrimaryTarget"]>;
+}
+
+export interface CdpSessionManagerOptions {
+  readonly discovery?: CdpTargetDiscoveryLike;
+  readonly transport?: CdpTransport;
+  readonly attachTimeoutMs?: number;
+}
 
 export class CdpSessionManager {
   private currentState: CdpConnectionState = "DISCONNECTED";
-  private client: any = null;
-  private currentGeneration: RuntimeGeneration | null = null;
-  private discovery: CdpTargetDiscovery;
-  private config: ControllerConfig;
+  private session: CdpTransportSession | null = null;
+  private boundLease: RuntimeLease | null = null;
+  private selectedTargetId: string | null = null;
+  private unsubscribeDisconnect: (() => void) | null = null;
+  private readonly discovery: CdpTargetDiscoveryLike;
+  private readonly transport: CdpTransport;
+  private readonly attachTimeoutMs: number;
 
-  constructor(config: ControllerConfig) {
-    this.config = config;
-    this.discovery = new CdpTargetDiscovery(config);
+  public constructor(
+    private readonly config: ControllerConfig,
+    private readonly runtime: RuntimeLeaseSource,
+    options: CdpSessionManagerOptions = {},
+  ) {
+    this.discovery = options.discovery ?? new CdpTargetDiscovery(config);
+    this.transport = options.transport ?? new ChromeRemoteInterfaceTransport();
+    this.attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
   }
 
   public get state(): CdpConnectionState {
     return this.currentState;
   }
 
-  public async connect(generation: RuntimeGeneration): Promise<void> {
-    if (this.currentState === "CONNECTED" && this.currentGeneration === generation) {
+  public get boundGeneration(): RuntimeGeneration | null {
+    return this.boundLease?.generation ?? null;
+  }
+
+  public get targetId(): string | null {
+    return this.selectedTargetId;
+  }
+
+  public async connect(signal?: AbortSignal): Promise<void> {
+    const lease = this.runtime.getCurrentRuntimeLease();
+    if (this.currentState === "CONNECTED" && this.boundLease && sameRuntimeLease(this.boundLease, lease)) {
       return;
     }
 
-    this.currentState = "DISCOVERING";
-    const target = await this.discovery.findPrimaryTarget();
-
-    this.currentState = "ATTACHING";
     try {
-      this.client = await CDP({
-        host: this.config.cdpHost,
-        port: this.config.cdpPort,
-        target: target.webSocketDebuggerUrl,
-      });
-
-      this.currentGeneration = generation;
-      this.currentState = "CONNECTED";
-
-      this.client.on("disconnect", () => {
-        this.currentState = "DISCONNECTED";
-        this.client = null;
-      });
-
-    } catch (err: any) {
+      await this.disposeSession();
+    } catch (error) {
       this.currentState = "FAILED";
-      throw new CdpAttachFailedError(`Failed to attach CDP to target: ${err.message}`);
+      throw new CdpDisconnectedError("Failed to replace the previous CDP session cleanly.", { cause: error });
+    }
+    this.currentState = "DISCOVERING";
+
+    try {
+      const target = await this.discovery.findPrimaryTarget(signal ? { signal } : {});
+      this.runtime.assertRuntimeLeaseCurrent(lease);
+      this.currentState = "ATTACHING";
+
+      const session = await withTimeout(
+        async (attachSignal) =>
+          await this.transport.connect({
+            host: this.config.cdpHost,
+            port: this.config.cdpPort,
+            target,
+            signal: attachSignal,
+          }),
+        this.attachTimeoutMs,
+        signal ? { signal, message: "Timed out attaching to the selected CDP target." } : { message: "Timed out attaching to the selected CDP target." },
+      );
+
+      try {
+        this.runtime.assertRuntimeLeaseCurrent(lease);
+      } catch (error) {
+        await session.close().catch(() => undefined);
+        throw error;
+      }
+
+      this.session = session;
+      this.boundLease = lease;
+      this.selectedTargetId = target.id;
+      this.currentState = "CONNECTED";
+      this.unsubscribeDisconnect = session.onDisconnect(() => {
+        if (this.session !== session) {
+          return;
+        }
+        this.unsubscribeDisconnect = null;
+        this.session = null;
+        this.boundLease = null;
+        this.selectedTargetId = null;
+        this.currentState = "DISCONNECTED";
+      });
+    } catch (error) {
+      this.currentState = "FAILED";
+      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+        throw error;
+      }
+      if (error instanceof ThreadwireError && error.code.startsWith("CDP_") && error.code !== "CDP_ATTACH_FAILED") {
+        throw error;
+      }
+      if (error instanceof CdpAttachFailedError) {
+        throw error;
+      }
+      throw new CdpAttachFailedError(undefined, { cause: error });
     }
   }
 
   public async disconnect(): Promise<void> {
-    if (this.client) {
-      await this.client.close();
-      this.client = null;
+    try {
+      await this.disposeSession();
+    } catch (error) {
+      this.currentState = "DISCONNECTED";
+      throw new CdpDisconnectedError("Failed to close the CDP session cleanly.", { cause: error });
     }
     this.currentState = "DISCONNECTED";
-    this.currentGeneration = null;
   }
 
-  public async command<T>(method: string, params?: unknown): Promise<T> {
-    this.ensureConnected();
-    try {
-      return (await this.client.send(method, params)) as T;
-    } catch (err: any) {
-      throw new Error(`CDP command ${method} failed: ${err.message}`, { cause: err });
-    }
-  }
-
-  public onEvent(method: string, listener: (payload: unknown) => void): () => void {
-    this.ensureConnected();
-    this.client.on(method, listener);
-    return () => {
-      if (this.client) {
-        this.client.removeListener(method, listener);
-      }
-    };
-  }
-
-  public checkGeneration(generation: RuntimeGeneration) {
-    if (this.currentGeneration !== generation) {
-      throw new RuntimeGenerationChangedError();
-    }
-  }
-
-  private ensureConnected() {
-    if (this.currentState !== "CONNECTED" || !this.client) {
+  public assertCurrentRuntime(): void {
+    if (this.currentState !== "CONNECTED" || this.boundLease === null || this.session === null) {
       throw new CdpDisconnectedError();
+    }
+    this.runtime.assertRuntimeLeaseCurrent(this.boundLease);
+  }
+
+  private async disposeSession(): Promise<void> {
+    this.unsubscribeDisconnect?.();
+    this.unsubscribeDisconnect = null;
+    const session = this.session;
+    this.session = null;
+    this.boundLease = null;
+    this.selectedTargetId = null;
+    if (session) {
+      await session.close();
     }
   }
 }
