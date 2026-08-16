@@ -94,7 +94,7 @@ export class ExistingReadinessGate {
 
     if (!target.focused) {
       this.resetReadyEpoch();
-      return { kind: "WAIT" };
+      return { kind: "FOCUS", backendDOMNodeId: target.backendDOMNodeId };
     }
 
     if (this.readyActivityEpoch !== snapshot.backendActivity.activityEpoch) {

@@ -104,7 +104,26 @@ test("focus command acceptance alone does not establish readiness", () => {
     backendDOMNodeId: 101,
   });
   assert.deepEqual(gate.observe(snapshot({ targets: oneTarget(101, false) })), {
+    kind: "FOCUS",
+    backendDOMNodeId: 101,
+  });
+});
+
+test("focus regression on the same eligible target reissues DOM.focus before readiness", () => {
+  const gate = stableGate();
+  gate.observe(snapshot({ targets: oneTarget() }));
+  gate.observe(snapshot({ targets: oneTarget() }));
+  gate.observe(snapshot({ targets: oneTarget(101, true) }));
+
+  assert.deepEqual(gate.observe(snapshot({ targets: oneTarget(101, false) })), {
+    kind: "FOCUS",
+    backendDOMNodeId: 101,
+  });
+  assert.deepEqual(gate.observe(snapshot({ targets: oneTarget(101, true) })), {
     kind: "WAIT",
+  });
+  assert.deepEqual(gate.observe(snapshot({ targets: oneTarget(101, true) })), {
+    kind: "READY",
   });
 });
 
