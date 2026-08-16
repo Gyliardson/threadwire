@@ -7,6 +7,7 @@ import { RuntimeGenerationTracker, runtimeGenerationNumber } from "../../src/dom
 import {
   CdpAttachFailedError,
   CdpDisconnectedError,
+  CdpNavigationFailedError,
   RuntimeGenerationChangedError,
 } from "../../src/domain/errors.js";
 
@@ -30,6 +31,8 @@ class StaticDiscovery implements CdpTargetDiscoveryLike {
 
 class FakeSession implements CdpTransportSession {
   public closeCalls = 0;
+  public readonly navigations: string[] = [];
+  public navigationFailure: Error | null = null;
   private listeners = new Set<() => void>();
 
   public async close(): Promise<void> {
@@ -39,6 +42,13 @@ class FakeSession implements CdpTransportSession {
   public onDisconnect(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  public async navigate(url: string): Promise<void> {
+    this.navigations.push(url);
+    if (this.navigationFailure) {
+      throw this.navigationFailure;
+    }
   }
 
   public emitDisconnect(): void {
@@ -185,4 +195,56 @@ test("attach timeout aborts the underlying transport signal", async () => {
   await assert.rejects(() => manager.connect(), CdpAttachFailedError);
   assert.equal(transport.observedAbort, true);
   assert.equal(manager.state, "FAILED");
+});
+
+test("navigate refuses disconnected sessions", async () => {
+  const manager = new CdpSessionManager(config, createRuntime(), {
+    discovery: new StaticDiscovery(),
+    transport: new FakeTransport(),
+    attachTimeoutMs: 50,
+  });
+
+  await assert.rejects(() => manager.navigate("https://chatgpt.com/"), CdpDisconnectedError);
+});
+
+test("navigate revalidates runtime lease and delegates only through the typed transport primitive", async () => {
+  const runtime = createRuntime();
+  const transport = new FakeTransport();
+  const manager = new CdpSessionManager(config, runtime, {
+    discovery: new StaticDiscovery(),
+    transport,
+    attachTimeoutMs: 50,
+  });
+  await manager.connect();
+
+  await manager.navigate("https://chatgpt.com/c/synthetic-route");
+  assert.deepEqual(transport.sessions[0]!.navigations, ["https://chatgpt.com/c/synthetic-route"]);
+
+  runtime.observe({ pid: 200, creationTime: "B" });
+  await assert.rejects(
+    () => manager.navigate("https://chatgpt.com/c/should-not-run"),
+    RuntimeGenerationChangedError,
+  );
+  assert.deepEqual(transport.sessions[0]!.navigations, ["https://chatgpt.com/c/synthetic-route"]);
+});
+
+test("transport navigation failures are normalized at the CDP boundary", async () => {
+  const runtime = createRuntime();
+  const transport = new FakeTransport();
+  const manager = new CdpSessionManager(config, runtime, {
+    discovery: new StaticDiscovery(),
+    transport,
+    attachTimeoutMs: 50,
+  });
+  await manager.connect();
+  transport.sessions[0]!.navigationFailure = new Error("synthetic upstream details");
+
+  await assert.rejects(
+    () => manager.navigate("https://chatgpt.com/c/synthetic-route"),
+    (error: unknown) =>
+      error instanceof CdpNavigationFailedError &&
+      error.code === "CDP_NAVIGATION_FAILED" &&
+      !error.message.includes("synthetic-route") &&
+      !error.message.includes("upstream details"),
+  );
 });

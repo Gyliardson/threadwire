@@ -10,6 +10,7 @@ export interface CdpTransportConnectOptions {
 export interface CdpTransportSession {
   close(): Promise<void>;
   onDisconnect(listener: () => void): () => void;
+  navigate(url: string): Promise<void>;
 }
 
 export interface CdpTransport {
