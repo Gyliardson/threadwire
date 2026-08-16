@@ -6,10 +6,10 @@ import {
   runtimeGenerationNumber,
   sameRuntimeIdentity,
 } from "../../src/domain/RuntimeGeneration.js";
-import { ClassicProcessInfo } from "../../src/domain/RuntimeState.js";
+import { ClassicProcessObservation } from "../../src/domain/RuntimeState.js";
 import { ClassicSupervisor } from "../../src/runtime/ClassicSupervisor.js";
 
-function identity(process: ClassicProcessInfo) {
+function identity(process: ClassicProcessObservation) {
   return { pid: process.pid, creationTime: process.creationTime };
 }
 
@@ -53,7 +53,7 @@ test(
       if (after.mainProcess === null) {
         throw new Error("A new Main process must be observed.");
       }
-      const afterMain: ClassicProcessInfo = after.mainProcess;
+      const afterMain: ClassicProcessObservation = after.mainProcess;
       assert.equal(after.pid, afterMain.pid);
       assert.equal(after.generation, generation);
 
