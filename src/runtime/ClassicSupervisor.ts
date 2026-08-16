@@ -60,6 +60,7 @@ foreach ($expected in $expectedProcesses) {
     }
   }
 }
+exit 0
 `;
 
 export interface ClassicSupervisorOptions {

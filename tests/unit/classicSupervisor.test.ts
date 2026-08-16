@@ -194,6 +194,19 @@ test("stop accepts creation times that differ only below WMI microsecond precisi
     stopScript.indexOf("$process.Kill()") >
       stopScript.indexOf("if ($actualCanonicalTicks -ne $expectedCanonicalTicks)"),
   );
+  assert.match(stopScript, /exit 0\s*$/);
+  assert.ok(
+    stopScript.indexOf("exit 0") >
+      stopScript.indexOf("if ($actualCanonicalTicks -ne $expectedCanonicalTicks) {"),
+  );
+  assert.ok(
+    stopScript.indexOf("exit 0") >
+      stopScript.indexOf("$process.Kill()"),
+  );
+  assert.ok(
+    stopScript.indexOf("exit 0") >
+      stopScript.indexOf("if (-not $process.HasExited) {"),
+  );
 });
 
 test("stop fails closed when creation times differ by one complete microsecond", async () => {
