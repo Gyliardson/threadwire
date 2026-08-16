@@ -9,10 +9,9 @@ export type CdpConnectionState =
 
 export type ClassicProcessRole = "MAIN" | "CHILD";
 
-export interface ClassicProcessInfo {
+export interface ClassicProcessObservation {
   readonly pid: number;
   readonly parentPid: number;
-  readonly commandLine: string | null;
   readonly creationTime: string;
   readonly role: ClassicProcessRole;
 }
@@ -21,6 +20,6 @@ export interface ClassicRuntimeSnapshot {
   readonly isRunning: boolean;
   readonly pid: number | null;
   readonly generation: RuntimeGeneration;
-  readonly mainProcess: ClassicProcessInfo | null;
-  readonly processes: readonly ClassicProcessInfo[];
+  readonly mainProcess: ClassicProcessObservation | null;
+  readonly processes: readonly ClassicProcessObservation[];
 }
