@@ -1,13 +1,18 @@
-import {
-  ClassicProcessInfo,
-  ClassicProcessRole,
-} from "../domain/RuntimeState.js";
+import { ClassicProcessRole } from "../domain/RuntimeState.js";
 import {
   ClassicProcessTopologyError,
   OperationAbortedError,
   ProcessInspectionFailedError,
 } from "../domain/errors.js";
 import { CommandRunner, NodeCommandRunner } from "./CommandRunner.js";
+
+export interface ClassicProcessInfo {
+  readonly pid: number;
+  readonly parentPid: number;
+  readonly commandLine: string | null;
+  readonly creationTime: string;
+  readonly role: ClassicProcessRole;
+}
 
 const PROCESS_QUERY_SCRIPT = `
 $ErrorActionPreference = 'Stop'
