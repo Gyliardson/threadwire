@@ -9,11 +9,12 @@ import { CdpConnectionState } from "../domain/RuntimeState.js";
 import {
   CdpAttachFailedError,
   CdpDisconnectedError,
+  CdpNavigationFailedError,
   OperationAbortedError,
   RuntimeGenerationChangedError,
   ThreadwireError,
 } from "../domain/errors.js";
-import { withTimeout } from "../utils/timeout.js";
+import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
 import { CdpTransport, CdpTransportSession } from "./CdpTransport.js";
@@ -144,6 +145,17 @@ export class CdpSessionManager {
       throw new CdpDisconnectedError();
     }
     this.runtime.assertRuntimeLeaseCurrent(this.boundLease);
+  }
+
+  public async navigate(url: string, signal?: AbortSignal): Promise<void> {
+    this.assertCurrentRuntime();
+    throwIfAborted(signal);
+    const session = this.session!;
+    try {
+      await session.navigate(url);
+    } catch (error) {
+      throw new CdpNavigationFailedError(undefined, { cause: error });
+    }
   }
 
   private async disposeSession(): Promise<void> {

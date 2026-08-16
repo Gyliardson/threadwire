@@ -2,7 +2,16 @@ import CDP from "chrome-remote-interface";
 import { OperationAbortedError } from "../domain/errors.js";
 import { CdpTransport, CdpTransportConnectOptions, CdpTransportSession } from "./CdpTransport.js";
 
+interface CriNavigateResult {
+  readonly errorText?: string;
+}
+
+interface CriPageLike {
+  navigate(params: { readonly url: string }): Promise<CriNavigateResult>;
+}
+
 interface CriClientLike {
+  readonly Page: CriPageLike;
   close(): Promise<void>;
   on(event: "disconnect", listener: () => void): unknown;
   removeListener(event: "disconnect", listener: () => void): unknown;
@@ -25,7 +34,10 @@ function isCriClient(value: unknown): value is CriClientLike {
   return (
     typeof candidate.close === "function" &&
     typeof candidate.on === "function" &&
-    typeof candidate.removeListener === "function"
+    typeof candidate.removeListener === "function" &&
+    typeof candidate.Page === "object" &&
+    candidate.Page !== null &&
+    typeof candidate.Page.navigate === "function"
   );
 }
 
@@ -41,6 +53,13 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
     return () => {
       this.client.removeListener("disconnect", listener);
     };
+  }
+
+  public async navigate(url: string): Promise<void> {
+    const result = await this.client.Page.navigate({ url });
+    if (typeof result.errorText === "string" && result.errorText.length > 0) {
+      throw new Error("CDP Page.navigate reported a navigation error.");
+    }
   }
 }
 

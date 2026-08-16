@@ -16,9 +16,14 @@ export type ThreadwireErrorCode =
   | "CDP_TARGET_AMBIGUOUS"
   | "CDP_ATTACH_FAILED"
   | "CDP_DISCONNECTED"
+  | "CDP_NAVIGATION_FAILED"
   | "RUNTIME_GENERATION_CHANGED"
   | "OPERATION_TIMEOUT"
-  | "OPERATION_ABORTED";
+  | "OPERATION_ABORTED"
+  | "CONVERSATION_LOCATOR_INVALID"
+  | "THREAD_NOT_FOUND"
+  | "THREAD_HANDLE_COLLISION"
+  | "ROUTE_NAVIGATION_FAILED";
 
 export class ThreadwireError extends Error {
   public readonly code: ThreadwireErrorCode;
@@ -149,6 +154,13 @@ export class CdpDisconnectedError extends ThreadwireError {
   }
 }
 
+export class CdpNavigationFailedError extends ThreadwireError {
+  constructor(message: string = "CDP navigation command failed.", options?: ErrorOptions) {
+    super(message, "CDP_NAVIGATION_FAILED", options);
+    this.name = "CdpNavigationFailedError";
+  }
+}
+
 export class RuntimeGenerationChangedError extends ThreadwireError {
   constructor(message: string = "The ChatGPT Classic runtime generation changed during the operation.", options?: ErrorOptions) {
     super(message, "RUNTIME_GENERATION_CHANGED", options);
@@ -167,5 +179,33 @@ export class OperationAbortedError extends ThreadwireError {
   constructor(message: string = "Operation aborted.", options?: ErrorOptions) {
     super(message, "OPERATION_ABORTED", options);
     this.name = "OperationAbortedError";
+  }
+}
+
+export class ConversationLocatorInvalidError extends ThreadwireError {
+  constructor(message: string = "Conversation locator is invalid for the Threadwire MVP route contract.", options?: ErrorOptions) {
+    super(message, "CONVERSATION_LOCATOR_INVALID", options);
+    this.name = "ConversationLocatorInvalidError";
+  }
+}
+
+export class ThreadNotFoundError extends ThreadwireError {
+  constructor(message: string = "Thread handle is not known to Threadwire.", options?: ErrorOptions) {
+    super(message, "THREAD_NOT_FOUND", options);
+    this.name = "ThreadNotFoundError";
+  }
+}
+
+export class ThreadHandleCollisionError extends ThreadwireError {
+  constructor(message: string = "Unable to allocate a unique Threadwire thread handle.", options?: ErrorOptions) {
+    super(message, "THREAD_HANDLE_COLLISION", options);
+    this.name = "ThreadHandleCollisionError";
+  }
+}
+
+export class RouteNavigationFailedError extends ThreadwireError {
+  constructor(message: string = "Threadwire route navigation failed.", options?: ErrorOptions) {
+    super(message, "ROUTE_NAVIGATION_FAILED", options);
+    this.name = "RouteNavigationFailedError";
   }
 }
