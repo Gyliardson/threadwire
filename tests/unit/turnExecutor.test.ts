@@ -15,6 +15,7 @@ import {
   FreshConversationNotCreatedError,
   OperationAbortedError,
   RuntimeGenerationChangedError,
+  TurnInputFailedError,
   TurnStateUncertainError,
   TurnWriteFailedError,
 } from "../../src/domain/errors.js";
@@ -87,6 +88,7 @@ class FakePreflight implements TurnComposerPreflightPort {
 class FakeCdp implements TurnCdpPort {
   public readonly events: string[] = [];
   public composer: CdpTurnComposerState = Object.freeze({
+    expectedRoute: true,
     eligible: true,
     focused: true,
     empty: true,
@@ -102,7 +104,10 @@ class FakeCdp implements TurnCdpPort {
 
   public constructor(private readonly runtime: RuntimeGenerationTracker) {}
 
-  public async getTurnComposerState(lease: RuntimeLease): Promise<CdpTurnComposerState> {
+  public async getTurnComposerState(
+    _expectedRoute: RouteExpectation,
+    lease: RuntimeLease,
+  ): Promise<CdpTurnComposerState> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     this.events.push("composer-state");
     return this.composer;
@@ -230,6 +235,23 @@ test("existing turn preflights, arms observation before input, and returns the e
   assert.ok(f.cdp.events.indexOf("arm-observer") < f.cdp.events.indexOf("insert-text"));
   assert.ok(f.cdp.events.indexOf("insert-text") < f.cdp.events.indexOf("enter-down"));
   assert.ok(f.cdp.events.indexOf("enter-down") < f.cdp.events.indexOf("enter-up"));
+});
+
+test("final composer validation rejects expected-route drift before observation or input", async () => {
+  const f = fixture();
+  f.cdp.composer = Object.freeze({
+    expectedRoute: false,
+    eligible: true,
+    focused: true,
+    empty: true,
+  });
+
+  await assert.rejects(
+    () => f.executor.execute({ kind: "THREAD", threadHandle: f.existingHandle }, "synthetic prompt"),
+    TurnInputFailedError,
+  );
+  assert.equal(f.cdp.insertCalls, 0);
+  assert.equal(f.cdp.events.includes("arm-observer"), false);
 });
 
 test("prepare observation is independent and zero prepares do not replace the mandatory write signal", async () => {
