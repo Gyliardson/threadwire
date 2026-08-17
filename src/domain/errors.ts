@@ -25,7 +25,8 @@ export type ThreadwireErrorCode =
   | "THREAD_NOT_FOUND"
   | "THREAD_HANDLE_COLLISION"
   | "ROUTE_NAVIGATION_FAILED"
-  | "EXISTING_ROUTE_READINESS_TIMEOUT";
+  | "EXISTING_ROUTE_READINESS_TIMEOUT"
+  | "FRESH_ROUTE_READINESS_TIMEOUT";
 
 export class ThreadwireError extends Error {
   public readonly code: ThreadwireErrorCode;
@@ -164,7 +165,7 @@ export class CdpNavigationFailedError extends ThreadwireError {
 }
 
 export class CdpReadinessFailedError extends ThreadwireError {
-  constructor(message: string = "CDP existing-route readiness observation failed.", options?: ErrorOptions) {
+  constructor(message: string = "CDP readiness observation failed.", options?: ErrorOptions) {
     super(message, "CDP_READINESS_FAILED", options);
     this.name = "CdpReadinessFailedError";
   }
@@ -223,5 +224,12 @@ export class ExistingRouteReadinessTimeoutError extends ThreadwireError {
   constructor(message: string = "Existing conversation route did not become ready before the deadline.", options?: ErrorOptions) {
     super(message, "EXISTING_ROUTE_READINESS_TIMEOUT", options);
     this.name = "ExistingRouteReadinessTimeoutError";
+  }
+}
+
+export class FreshRouteReadinessTimeoutError extends ThreadwireError {
+  constructor(message: string = "Fresh conversation route did not become ready before the deadline.", options?: ErrorOptions) {
+    super(message, "FRESH_ROUTE_READINESS_TIMEOUT", options);
+    this.name = "FreshRouteReadinessTimeoutError";
   }
 }

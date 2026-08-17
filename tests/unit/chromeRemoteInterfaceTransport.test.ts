@@ -104,11 +104,11 @@ test("Network listeners and Network.enable are established before route navigati
 test("relevant backend request IDs are metadata-only and loadingFinished clears them", async () => {
   const { client, session } = await createSession(); await session.initializeReadinessObservation();
   client.emitRequest("req-1", "https://chatgpt.com/backend-api/models?authorization=QUERY_SECRET#fragment");
-  const active = await session.getReadinessSnapshot(expected);
+  const active = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
   assert.equal(active.backendActivity.activeCount, 1);
   assert.equal(JSON.stringify(active).includes("QUERY_SECRET"), false);
   client.emitFinished("req-1");
-  const settled = await session.getReadinessSnapshot(expected);
+  const settled = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
   assert.equal(settled.backendActivity.activeCount, 0);
   assert.ok(settled.backendActivity.activityEpoch > active.backendActivity.activityEpoch);
 });
@@ -116,36 +116,67 @@ test("relevant backend request IDs are metadata-only and loadingFinished clears 
 test("loadingFailed clears relevant activity and ignored traffic never blocks", async () => {
   const { client, session } = await createSession(); await session.initializeReadinessObservation();
   client.emitRequest("ignored", "https://example.com/backend-api/ignored?secret=1");
-  assert.equal((await session.getReadinessSnapshot(expected)).backendActivity.activeCount, 0);
+  assert.equal((await session.getReadinessSnapshot({ kind: "THREAD", locator: expected })).backendActivity.activeCount, 0);
   client.emitRequest("req-2", "https://chatgpt.com/backend-api/conversations");
-  assert.equal((await session.getReadinessSnapshot(expected)).backendActivity.activeCount, 1);
+  assert.equal((await session.getReadinessSnapshot({ kind: "THREAD", locator: expected })).backendActivity.activeCount, 1);
   client.emitFailed("req-2");
-  assert.equal((await session.getReadinessSnapshot(expected)).backendActivity.activeCount, 0);
+  assert.equal((await session.getReadinessSnapshot({ kind: "THREAD", locator: expected })).backendActivity.activeCount, 0);
 });
 
 test("main-frame route is normalized internally without exposing current URL or query", async () => {
   const { session } = await createSession(); await session.initializeReadinessObservation();
-  const snapshot = await session.getReadinessSnapshot(expected);
+  const snapshot = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
   assert.equal(snapshot.mainFrame.expectedRoute, true);
   const serialized = JSON.stringify(snapshot);
-  assert.equal(serialized.includes("synthetic-a"), false);
   assert.equal(serialized.includes("locator_canary"), false);
+  assert.equal(serialized.includes("synthetic-a"), false);
+});
+
+test("FRESH_ROOT route matching semantics", async () => {
+  const { client, session } = await createSession();
+  await session.initializeReadinessObservation();
+
+  // Canonical root matches
+  client.frame.url = "https://chatgpt.com/";
+  let snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
+  assert.equal(snapshot.mainFrame.expectedRoute, true);
+
+  // Root with query/fragment matches, but does not leak
+  client.frame.url = "https://chatgpt.com/?synthetic=1#fragment";
+  snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
+  assert.equal(snapshot.mainFrame.expectedRoute, true);
+  assert.equal(JSON.stringify(snapshot).includes("synthetic=1"), false);
+
+  // Thread locator URL does NOT match FRESH_ROOT
+  client.frame.url = "https://chatgpt.com/c/synthetic";
+  snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
+  assert.equal(snapshot.mainFrame.expectedRoute, false);
+
+  // Other synthetic pathnames do NOT match FRESH_ROOT
+  client.frame.url = "https://chatgpt.com/g/g-some-gpt";
+  snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
+  assert.equal(snapshot.mainFrame.expectedRoute, false);
+
+  // THREAD expectation works with thread locator URL
+  client.frame.url = "https://chatgpt.com/c/synthetic-a";
+  snapshot = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
+  assert.equal(snapshot.mainFrame.expectedRoute, true);
 });
 
 test("wrong and transient main-frame routes are simply not ready", async () => {
   const { client, session } = await createSession(); await session.initializeReadinessObservation();
   client.frame = { id: "main", loaderId: "loader-a", url: "https://chatgpt.com/c/synthetic-other?secret=WRONG_ROUTE" };
-  let snapshot = await session.getReadinessSnapshot(expected);
+  let snapshot = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
   assert.equal(snapshot.mainFrame.expectedRoute, false);
   assert.equal(JSON.stringify(snapshot).includes("WRONG_ROUTE"), false);
   client.frame = { id: "main", loaderId: "loader-b", url: "about:blank" };
-  snapshot = await session.getReadinessSnapshot(expected);
+  snapshot = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
   assert.equal(snapshot.mainFrame.expectedRoute, false);
 });
 
 test("Accessibility mapping retains only eligible state and omits accessible text", async () => {
   const { session } = await createSession(); await session.initializeReadinessObservation();
-  const snapshot = await session.getReadinessSnapshot(expected);
+  const snapshot = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
   assert.deepEqual(snapshot.eligibleEditables, [{ backendDOMNodeId: 101, focused: false }]);
   assert.equal(JSON.stringify(snapshot).includes("ACCESSIBLE_TEXT_CANARY"), false);
 });
@@ -156,7 +187,7 @@ test("Accessibility classification requires exactly the narrow multiline editabl
     { ignored: false, role: { value: "textbox" }, backendDOMNodeId: 1, properties: [] },
     { ignored: false, role: { value: "button" }, backendDOMNodeId: 2, properties: [] },
   ];
-  assert.deepEqual((await session.getReadinessSnapshot(expected)).eligibleEditables, []);
+  assert.deepEqual((await session.getReadinessSnapshot({ kind: "THREAD", locator: expected })).eligibleEditables, []);
 });
 
 test("typed DOM.focus delegates with backendNodeId and no generic mutation surface", async () => {
@@ -170,12 +201,12 @@ test("typed DOM.focus delegates with backendNodeId and no generic mutation surfa
 test("disconnect clears readiness request tracking/listeners and closes the observation lifecycle", async () => {
   const { client, session } = await createSession(); await session.initializeReadinessObservation();
   client.emitRequest("req-3", "https://chatgpt.com/backend-api/models");
-  assert.equal((await session.getReadinessSnapshot(expected)).backendActivity.activeCount, 1);
+  assert.equal((await session.getReadinessSnapshot({ kind: "THREAD", locator: expected })).backendActivity.activeCount, 1);
   assert.equal(client.networkListenerCount(), 3);
 
   client.emitDisconnect();
 
   assert.equal(client.networkListenerCount(), 0);
-  await assert.rejects(() => session.getReadinessSnapshot(expected));
+  await assert.rejects(() => session.getReadinessSnapshot({ kind: "THREAD", locator: expected }));
   await assert.rejects(() => session.initializeReadinessObservation());
 });

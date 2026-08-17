@@ -4,10 +4,12 @@ import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
 import { RuntimeGenerationTracker, RuntimeLease } from "../../src/domain/RuntimeGeneration.js";
 import {
   ExistingRouteReadinessTimeoutError,
+  FreshRouteReadinessTimeoutError,
   OperationAbortedError,
   RuntimeGenerationChangedError,
 } from "../../src/domain/errors.js";
 import { ExistingReadinessPolicy } from "../../src/readiness/ExistingReadinessPolicy.js";
+import { FreshReadinessPolicy } from "../../src/readiness/FreshReadinessPolicy.js";
 import {
   ReadinessController,
   ReadinessDeadlineScheduler,
@@ -15,6 +17,7 @@ import {
 import {
   ExistingReadinessObservationPort,
   ExistingReadinessSnapshot,
+  RouteExpectation,
 } from "../../src/readiness/types.js";
 
 const locator = createConversationLocator("https://chatgpt.com/c/synthetic-readiness");
@@ -58,8 +61,9 @@ class QueueObservation implements ExistingReadinessObservationPort {
   ) {}
 
   public async getReadinessSnapshot(
-    _expectedLocator: typeof locator,
+    _expectedRoute: RouteExpectation,
     _lease: RuntimeLease,
+    _signal?: AbortSignal,
   ): Promise<ExistingReadinessSnapshot> {
     this.snapshotCalls += 1;
     this.onSnapshot?.(this.snapshotCalls);
@@ -82,6 +86,7 @@ function fastController(
   return new ReadinessController(
     observation,
     new ExistingReadinessPolicy({ frameStableObservations: 1, focusStableObservations: 1 }),
+    undefined, // freshPolicy
     {
       timeoutMs: options.timeoutMs ?? 100,
       pollIntervalMs: 0,
@@ -143,7 +148,7 @@ test("abort while waiting stops further observation", async () => {
 test("deadline produces stable existing-route readiness timeout without locator leakage", async () => {
   const { lease } = createRuntime();
   const observation = new QueueObservation([], snapshot({ expectedRoute: false }));
-  const controller = new ReadinessController(observation, new ExistingReadinessPolicy(), {
+  const controller = new ReadinessController(observation, new ExistingReadinessPolicy(), undefined, {
     timeoutMs: 15,
     pollIntervalMs: 2,
   });
@@ -209,6 +214,7 @@ test("deadline timer is cancelled when readiness settles successfully", async ()
   const controller = new ReadinessController(
     observation,
     new ExistingReadinessPolicy({ frameStableObservations: 1, focusStableObservations: 1 }),
+    undefined,
     {
       timeoutMs: 100,
       pollIntervalMs: 0,
@@ -235,4 +241,191 @@ test("no observation or focus continues after ready result settles", async () =>
 
   assert.equal(observation.snapshotCalls, snapshotCalls);
   assert.equal(observation.focuses.length, focusCalls);
+});
+
+// FRESH ROUTE TESTS
+
+function fastFreshController(
+  observation: ExistingReadinessObservationPort,
+  options: { timeoutMs?: number; sleep?: (ms: number, signal?: AbortSignal) => Promise<void> } = {},
+): ReadinessController {
+  return new ReadinessController(
+    observation,
+    undefined,
+    new FreshReadinessPolicy({ frameStableObservations: 1, focusStableObservations: 1, guardDurationMs: 0 }),
+    {
+      timeoutMs: options.timeoutMs ?? 100,
+      pollIntervalMs: 0,
+      sleep: options.sleep ?? (async () => undefined),
+    },
+  );
+}
+
+test("waitForFreshRoute passes FRESH_ROOT RouteExpectation and resolves when FreshReadinessGate resolves", async () => {
+  const { lease } = createRuntime();
+  let passedRouteExpectation: RouteExpectation | undefined;
+  const observation = new QueueObservation([snapshot(), snapshot({ focused: true })]);
+  const originalGet = observation.getReadinessSnapshot.bind(observation);
+  observation.getReadinessSnapshot = async (exp, l, s) => {
+    passedRouteExpectation = exp;
+    return originalGet(exp, l, s);
+  };
+  const controller = fastFreshController(observation);
+
+  await controller.waitForFreshRoute(lease);
+  assert.deepEqual(passedRouteExpectation, { kind: "FRESH_ROOT" });
+  assert.equal(observation.focuses.length, 1);
+});
+
+test("waitForFreshRoute abort before start", async () => {
+  const { lease } = createRuntime();
+  const observation = new QueueObservation([snapshot()]);
+  const controller = fastFreshController(observation);
+  const ac = new AbortController();
+  ac.abort(new Error("pre-aborted"));
+
+  await assert.rejects(
+    controller.waitForFreshRoute(lease, ac.signal),
+    OperationAbortedError,
+  );
+  assert.equal(observation.snapshotCalls, 0);
+});
+
+test("waitForFreshRoute abort while Gate C/guard is pending", async () => {
+  const { lease } = createRuntime();
+  const observation = new QueueObservation([snapshot()]);
+  const ac = new AbortController();
+
+  observation.onSnapshot = () => ac.abort(new Error("mid-abort"));
+  const controller = fastFreshController(observation);
+
+  await assert.rejects(
+    controller.waitForFreshRoute(lease, ac.signal),
+    OperationAbortedError,
+  );
+  assert.equal(observation.snapshotCalls, 1);
+});
+
+test("waitForFreshRoute deadline during fresh readiness becomes FreshRouteReadinessTimeoutError", async () => {
+  const { lease } = createRuntime();
+  const observation = new QueueObservation([], snapshot({ expectedRoute: false }));
+  const handles: unknown[] = [];
+  const cancelled: unknown[] = [];
+  let fireDeadline: (() => void) | null = null;
+  let deadlineFired = false;
+  let sleepCalls = 0;
+  const scheduler: ReadinessDeadlineScheduler = {
+    schedule: (callback, delayMs) => {
+      assert.equal(delayMs, 10);
+      const handle = Object.freeze({ syntheticTimer: 1 });
+      handles.push(handle);
+      fireDeadline = () => {
+        deadlineFired = true;
+        callback();
+      };
+      return handle;
+    },
+    cancel: (handle) => {
+      cancelled.push(handle);
+    },
+  };
+  const controller = new ReadinessController(
+    observation,
+    undefined,
+    new FreshReadinessPolicy({ frameStableObservations: 1, focusStableObservations: 1, guardDurationMs: 0 }),
+    {
+      timeoutMs: 10,
+      pollIntervalMs: 0,
+      sleep: async () => {
+        sleepCalls += 1;
+        assert.equal(observation.snapshotCalls, 1);
+        assert.ok(fireDeadline);
+        fireDeadline();
+      },
+      deadlineScheduler: scheduler,
+    },
+  );
+
+  await assert.rejects(
+    () => controller.waitForFreshRoute(lease),
+    (error: unknown) =>
+      error instanceof FreshRouteReadinessTimeoutError &&
+      error.code === "FRESH_ROUTE_READINESS_TIMEOUT",
+  );
+
+  assert.equal(observation.snapshotCalls, 1);
+  assert.deepEqual(observation.focuses, []);
+  assert.equal(sleepCalls, 1);
+  assert.equal(deadlineFired, true);
+  assert.equal(handles.length, 1);
+  assert.deepEqual(cancelled, handles);
+});
+
+test("waitForFreshRoute timer is cancelled on fresh success", async () => {
+  const { lease } = createRuntime();
+  const observation = new QueueObservation([snapshot(), snapshot({ focused: true })]);
+  const handles: unknown[] = [];
+  const cancelled: unknown[] = [];
+  const scheduler: ReadinessDeadlineScheduler = {
+    schedule: (_callback, _delayMs) => {
+      const handle = Object.freeze({ syntheticTimer: handles.length + 1 });
+      handles.push(handle);
+      return handle;
+    },
+    cancel: (handle) => {
+      cancelled.push(handle);
+    },
+  };
+  const controller = new ReadinessController(
+    observation,
+    undefined,
+    new FreshReadinessPolicy({ frameStableObservations: 1, focusStableObservations: 1, guardDurationMs: 0 }),
+    { timeoutMs: 100, pollIntervalMs: 0, sleep: async () => undefined, deadlineScheduler: scheduler },
+  );
+
+  await controller.waitForFreshRoute(lease);
+  assert.equal(handles.length, 1);
+  assert.deepEqual(cancelled, handles);
+});
+
+test("waitForFreshRoute no observations/focus continue after settlement", async () => {
+  const { lease } = createRuntime();
+  const observation = new QueueObservation([snapshot(), snapshot({ focused: true })]);
+  const controller = fastFreshController(observation);
+
+  await controller.waitForFreshRoute(lease);
+  const snapshotCalls = observation.snapshotCalls;
+  const focusCalls = observation.focuses.length;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.equal(observation.snapshotCalls, snapshotCalls);
+  assert.equal(observation.focuses.length, focusCalls);
+});
+
+test("waitForFreshRoute runtime generation failure is preserved", async () => {
+  const { lease } = createRuntime();
+  const observation = new QueueObservation([snapshot()]);
+  observation.getReadinessSnapshot = async () => {
+    throw new RuntimeGenerationChangedError("changed");
+  };
+  const controller = fastFreshController(observation);
+
+  await assert.rejects(
+    controller.waitForFreshRoute(lease),
+    RuntimeGenerationChangedError,
+  );
+});
+
+test("waitForFreshRoute generic observation error becomes safe CdpReadinessFailedError", async () => {
+  const { lease } = createRuntime();
+  const observation = new QueueObservation([snapshot()]);
+  observation.getReadinessSnapshot = async () => {
+    throw new Error("some generic websocket crash");
+  };
+  const controller = fastFreshController(observation);
+
+  await assert.rejects(
+    controller.waitForFreshRoute(lease),
+    (err: unknown) => err instanceof Error && err.name === "CdpReadinessFailedError" && (err as { cause?: { message?: string } }).cause?.message === "some generic websocket crash",
+  );
 });

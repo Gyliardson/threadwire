@@ -1,5 +1,5 @@
 import { ControllerConfig } from "../config/ControllerConfig.js";
-import { ConversationLocator } from "../domain/ThreadIdentity.js";
+
 import {
   RuntimeGeneration,
   RuntimeLease,
@@ -16,7 +16,7 @@ import {
   RuntimeGenerationChangedError,
   ThreadwireError,
 } from "../domain/errors.js";
-import { ExistingReadinessSnapshot } from "../readiness/types.js";
+import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
@@ -181,7 +181,7 @@ export class CdpSessionManager {
   }
 
   public async getReadinessSnapshot(
-    expectedLocator: ConversationLocator,
+    expectedRoute: RouteExpectation,
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<ExistingReadinessSnapshot> {
@@ -191,7 +191,7 @@ export class CdpSessionManager {
       return await this.runReadinessSessionOperation(
         session,
         lease,
-        () => session.getReadinessSnapshot(expectedLocator),
+        () => session.getReadinessSnapshot(expectedRoute),
         signal,
       );
     } catch (error) {

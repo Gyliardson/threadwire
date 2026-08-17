@@ -1,4 +1,4 @@
-import { ExistingReadinessSnapshot } from "./types.js";
+import { ExistingReadinessSnapshot, ReadinessAction, ReadinessGate } from "./types.js";
 
 export const DEFAULT_EXISTING_FRAME_STABLE_OBSERVATIONS = 2;
 export const DEFAULT_EXISTING_FOCUS_STABLE_OBSERVATIONS = 2;
@@ -8,10 +8,7 @@ export interface ExistingReadinessPolicyOptions {
   readonly focusStableObservations?: number;
 }
 
-export type ExistingReadinessAction =
-  | Readonly<{ kind: "WAIT" }>
-  | Readonly<{ kind: "FOCUS"; backendDOMNodeId: number }>
-  | Readonly<{ kind: "READY" }>;
+export type ExistingReadinessAction = ReadinessAction;
 
 function positiveInteger(value: number, name: string): number {
   if (!Number.isInteger(value) || value <= 0) {
@@ -40,7 +37,7 @@ export class ExistingReadinessPolicy {
   }
 }
 
-export class ExistingReadinessGate {
+export class ExistingReadinessGate implements ReadinessGate {
   private frameKey: string | null = null;
   private frameStableCount = 0;
   private focusTargetId: number | null = null;

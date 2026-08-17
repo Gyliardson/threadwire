@@ -3,13 +3,15 @@ import { RuntimeLease } from "../domain/RuntimeGeneration.js";
 import {
   CdpReadinessFailedError,
   ExistingRouteReadinessTimeoutError,
+  FreshRouteReadinessTimeoutError,
   OperationAbortedError,
   OperationTimeoutError,
   RuntimeGenerationChangedError,
 } from "../domain/errors.js";
 import { delay, throwIfAborted } from "../utils/timeout.js";
 import { ExistingReadinessPolicy } from "./ExistingReadinessPolicy.js";
-import { ExistingReadinessObservationPort } from "./types.js";
+import { FreshReadinessPolicy } from "./FreshReadinessPolicy.js";
+import { ExistingReadinessObservationPort, ReadinessGate, RouteExpectation } from "./types.js";
 
 export const DEFAULT_EXISTING_READINESS_TIMEOUT_MS = 20_000;
 export const DEFAULT_EXISTING_READINESS_POLL_INTERVAL_MS = 100;
@@ -51,7 +53,7 @@ function createDeadlineSignal(
   parent?: AbortSignal,
 ): DeadlineSignal {
   const controller = new AbortController();
-  const timeoutError = new OperationTimeoutError("Timed out waiting for existing-route readiness.");
+  const timeoutError = new OperationTimeoutError("Timed out waiting for route readiness.");
   const timer = scheduler.schedule(() => controller.abort(timeoutError), timeoutMs);
 
   const onParentAbort = (): void => {
@@ -82,7 +84,8 @@ export class ReadinessController {
 
   public constructor(
     private readonly observation: ExistingReadinessObservationPort,
-    private readonly policy: ExistingReadinessPolicy = new ExistingReadinessPolicy(),
+    private readonly existingPolicy: ExistingReadinessPolicy = new ExistingReadinessPolicy(),
+    private readonly freshPolicy: FreshReadinessPolicy = new FreshReadinessPolicy(),
     options: ReadinessControllerOptions = {},
   ) {
     this.timeoutMs = positiveFinite(
@@ -105,15 +108,54 @@ export class ReadinessController {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
+    try {
+      await this.waitForRoute(
+        this.existingPolicy.createGate(),
+        { kind: "THREAD", locator: expectedLocator },
+        lease,
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof OperationTimeoutError) {
+        throw new ExistingRouteReadinessTimeoutError(undefined, { cause: error });
+      }
+      throw error;
+    }
+  }
+
+  public async waitForFreshRoute(
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    try {
+      await this.waitForRoute(
+        this.freshPolicy.createGate(),
+        { kind: "FRESH_ROOT" },
+        lease,
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof OperationTimeoutError) {
+        throw new FreshRouteReadinessTimeoutError(undefined, { cause: error });
+      }
+      throw error;
+    }
+  }
+
+  private async waitForRoute(
+    gate: ReadinessGate,
+    expectedRoute: RouteExpectation,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
     throwIfAborted(signal);
     const deadline = createDeadlineSignal(this.timeoutMs, this.deadlineScheduler, signal);
 
     try {
-      const gate = this.policy.createGate();
       while (true) {
         throwIfAborted(deadline.signal);
         const snapshot = await this.observation.getReadinessSnapshot(
-          expectedLocator,
+          expectedRoute,
           lease,
           deadline.signal,
         );
@@ -137,12 +179,10 @@ export class ReadinessController {
       if (
         error instanceof OperationAbortedError ||
         error instanceof RuntimeGenerationChangedError ||
-        error instanceof CdpReadinessFailedError
+        error instanceof CdpReadinessFailedError ||
+        error instanceof OperationTimeoutError
       ) {
         throw error;
-      }
-      if (error instanceof OperationTimeoutError) {
-        throw new ExistingRouteReadinessTimeoutError(undefined, { cause: error });
       }
       throw new CdpReadinessFailedError(undefined, { cause: error });
     } finally {

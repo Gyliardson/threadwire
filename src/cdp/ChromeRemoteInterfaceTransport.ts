@@ -8,6 +8,7 @@ import { OperationAbortedError } from "../domain/errors.js";
 import {
   ExistingReadinessSnapshot,
   ReadinessEditableTarget,
+  RouteExpectation,
 } from "../readiness/types.js";
 import {
   CdpTransport,
@@ -89,14 +90,23 @@ function toEligibleEditable(
   });
 }
 
-function routeMatchesExpected(rawUrl: string, expectedLocator: ConversationLocator): boolean {
+function routeMatchesExpected(rawUrl: string, expectedRoute: RouteExpectation): boolean {
+  if (expectedRoute.kind === "FRESH_ROOT") {
+    try {
+      const url = new URL(rawUrl);
+      return url.origin === CHATGPT_ORIGIN && url.pathname === "/";
+    } catch {
+      return false;
+    }
+  }
+
   let normalized: ConversationLocator;
   try {
     normalized = createConversationLocator(rawUrl);
   } catch {
     return false;
   }
-  return normalized === expectedLocator;
+  return normalized === expectedRoute.locator;
 }
 
 function isRelevantBackendUrl(rawUrl: string): boolean {
@@ -180,7 +190,7 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
   }
 
   public async getReadinessSnapshot(
-    expectedLocator: ConversationLocator,
+    expectedRoute: RouteExpectation,
   ): Promise<ExistingReadinessSnapshot> {
     if (this.closed || !this.readinessInitialized) {
       throw new Error("CDP readiness observation is unavailable.");
@@ -197,7 +207,7 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
       mainFrame: Object.freeze({
         frameId: mainFrame.id,
         loaderId: mainFrame.loaderId,
-        expectedRoute: routeMatchesExpected(mainFrame.url, expectedLocator),
+        expectedRoute: routeMatchesExpected(mainFrame.url, expectedRoute),
       }),
       eligibleEditables: Object.freeze(eligibleEditables),
       backendActivity: Object.freeze({

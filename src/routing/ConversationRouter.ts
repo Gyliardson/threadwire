@@ -18,9 +18,13 @@ export interface ConversationNavigationPort {
   navigate(url: string, signal?: AbortSignal): Promise<void>;
 }
 
-export interface ExistingRouteReadinessPort {
+export interface ConversationReadinessPort {
   waitForExistingRoute(
     expectedLocator: ConversationLocator,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  waitForFreshRoute(
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void>;
@@ -38,7 +42,7 @@ export class ConversationRouter {
     private readonly registry: ThreadRegistry,
     private readonly scheduler: OperationScheduler,
     private readonly navigation: ConversationNavigationPort,
-    private readonly existingReadiness: ExistingRouteReadinessPort,
+    private readonly readiness: ConversationReadinessPort,
   ) {}
 
   public async routeToThread(
@@ -50,7 +54,7 @@ export class ConversationRouter {
       "ROUTE",
       async (operationSignal, lease) => {
         await this.navigate(locator, operationSignal);
-        await this.existingReadiness.waitForExistingRoute(locator, lease, operationSignal);
+        await this.readiness.waitForExistingRoute(locator, lease, operationSignal);
         return Object.freeze({ kind: "THREAD" as const, threadHandle: handle });
       },
       signal ? { signal } : {},
@@ -60,8 +64,9 @@ export class ConversationRouter {
   public async routeFresh(signal?: AbortSignal): Promise<FreshConversationRouteResult> {
     return await this.scheduler.schedule(
       "ROUTE",
-      async (operationSignal) => {
+      async (operationSignal, lease) => {
         await this.navigate(CHATGPT_FRESH_ROUTE, operationSignal);
+        await this.readiness.waitForFreshRoute(lease, operationSignal);
         return Object.freeze({ kind: "FRESH" as const });
       },
       signal ? { signal } : {},
