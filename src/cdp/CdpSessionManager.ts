@@ -347,9 +347,14 @@ export class CdpSessionManager {
     operation: () => Promise<T>,
   ): Promise<T> {
     this.assertSessionForLeaseCurrent(session, lease);
-    const result = await operation();
-    this.assertSessionForLeaseCurrent(session, lease);
-    return result;
+    try {
+      const result = await operation();
+      this.assertSessionForLeaseCurrent(session, lease);
+      return result;
+    } catch (error) {
+      this.assertSessionForLeaseCurrent(session, lease);
+      throw error;
+    }
   }
 
   private invalidateSessionAfterInFlightAbort(session: CdpTransportSession): void {
