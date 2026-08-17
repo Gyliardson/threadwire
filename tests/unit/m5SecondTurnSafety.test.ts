@@ -13,7 +13,6 @@ import {
   RuntimeLease,
 } from "../../src/domain/RuntimeGeneration.js";
 import {
-  OperationAbortedError,
   TurnInputFailedError,
   TurnStateUncertainError,
   TurnWriteFailedError,
