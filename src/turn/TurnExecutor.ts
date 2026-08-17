@@ -154,7 +154,6 @@ export class TurnExecutor {
     }
 
     let committed = false;
-    let inputFailure: TurnInputFailedError | null = null;
     let callerCancelled = false;
     const onAbort = (): void => {
       if (committed) {
@@ -172,8 +171,6 @@ export class TurnExecutor {
           this.commandTimeoutMs,
           { message: "Timed out waiting for the CDP input command." },
         );
-        committed = true;
-        callerCancelled = signal?.aborted ?? false;
       } catch (error) {
         if (error instanceof RuntimeGenerationChangedError) {
           throw error;
@@ -184,18 +181,25 @@ export class TurnExecutor {
         throw new TurnInputFailedError(undefined, { cause: error });
       }
 
+      // Composition alone is not submission. Honor cancellation before the first
+      // command that may submit the composed prompt.
+      throwIfAborted(signal);
+      committed = true;
+      callerCancelled = signal?.aborted ?? false;
+
+      let keyDownAccepted = false;
       try {
         await withTimeout(
           async () => await this.cdp.dispatchEnterKeyDown(lease),
           this.commandTimeoutMs,
           { message: "Timed out waiting for Enter keyDown." },
         );
+        keyDownAccepted = true;
       } catch (error) {
         this.rethrowPostCommitCommand(error, lease);
-        inputFailure = new TurnInputFailedError(undefined, { cause: error });
       }
 
-      if (inputFailure === null) {
+      if (keyDownAccepted) {
         try {
           await withTimeout(
             async () => await this.cdp.dispatchEnterKeyUp(lease),
@@ -204,7 +208,6 @@ export class TurnExecutor {
           );
         } catch (error) {
           this.rethrowPostCommitCommand(error, lease);
-          inputFailure = new TurnInputFailedError(undefined, { cause: error });
         }
       }
 
@@ -214,7 +217,6 @@ export class TurnExecutor {
         lease,
         signal,
         callerCancelled,
-        inputFailure,
       );
     } finally {
       signal?.removeEventListener("abort", onAbort);
@@ -228,7 +230,6 @@ export class TurnExecutor {
     lease: RuntimeLease,
     signal: AbortSignal | undefined,
     initiallyCancelled: boolean,
-    inputFailure: TurnInputFailedError | null,
   ): Promise<TurnResult> {
     const committedAt = this.clock();
     let writeObservedAt: number | null = null;
@@ -276,9 +277,6 @@ export class TurnExecutor {
         if (writeLifecycle === "FAILED") {
           throw new TurnWriteFailedError();
         }
-        if (inputFailure !== null) {
-          throw inputFailure;
-        }
         if (target.kind === "THREAD") {
           return Object.freeze({
             kind: "THREAD" as const,
@@ -314,12 +312,19 @@ export class TurnExecutor {
       }
 
       if (writeLifecycle === "FINISHED" && freshLocator !== null) {
-        const threadHandle = this.registry.register(freshLocator);
+        const registration = this.registry.registerWithStatus(freshLocator);
+        if (registration.created) {
+          return Object.freeze({
+            kind: "THREAD" as const,
+            threadHandle: registration.threadHandle,
+            created: true as const,
+          }) satisfies FreshTurnResult;
+        }
         return Object.freeze({
           kind: "THREAD" as const,
-          threadHandle,
-          created: true as const,
-        }) satisfies FreshTurnResult;
+          threadHandle: registration.threadHandle,
+          created: false as const,
+        }) satisfies ExistingTurnResult;
       }
 
       if (
@@ -379,6 +384,8 @@ export class TurnExecutor {
     if (error instanceof CdpDisconnectedError || error instanceof OperationTimeoutError) {
       this.failClosed(lease, error);
     }
+    // A generic key event rejection is weaker evidence than a subsequently
+    // observed, unambiguous legitimate write reaching loadingFinished.
   }
 
   private failClosed(lease: RuntimeLease, cause: unknown): never {
