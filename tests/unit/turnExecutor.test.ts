@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CdpResponseObservationHandle,
   CdpTurnComposerState,
   CdpTurnObservationHandle,
   CdpTurnObservationSnapshot,
@@ -51,7 +50,6 @@ function createRuntime(): RuntimeGenerationTracker {
   return runtime;
 }
 
-const responseHandle = Object.freeze({}) as unknown as CdpResponseObservationHandle;
 const observationHandle = Object.freeze({}) as unknown as CdpTurnObservationHandle;
 
 function observation(
@@ -63,7 +61,7 @@ function observation(
     write:
       lifecycle === null
         ? null
-        : Object.freeze({ responseHandle, lifecycle }),
+        : Object.freeze({ lifecycle }),
   });
 }
 
@@ -101,6 +99,7 @@ class FakeCdp implements TurnCdpPort {
   public onInsert: (() => void) | null = null;
   public onKeyDown: (() => void) | null = null;
   public observationError: Error | null = null;
+  private submitted = false;
 
   public constructor(private readonly runtime: RuntimeGenerationTracker) {}
 
@@ -126,6 +125,9 @@ class FakeCdp implements TurnCdpPort {
   ): CdpTurnObservationSnapshot {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     this.events.push("observe");
+    if (!this.submitted) {
+      return observation(null);
+    }
     if (this.observationError) {
       throw this.observationError;
     }
@@ -149,6 +151,7 @@ class FakeCdp implements TurnCdpPort {
   public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     this.events.push("enter-down");
+    this.submitted = true;
     this.onKeyDown?.();
     this.runtime.assertRuntimeLeaseCurrent(lease);
   }
@@ -224,10 +227,11 @@ test("existing turn preflights, arms observation before input, and returns the e
     created: false,
   });
   assert.equal(f.preflight.lastExpectation?.kind, "THREAD");
-  assert.deepEqual(f.cdp.events.slice(0, 5), [
+  assert.deepEqual(f.cdp.events.slice(0, 6), [
     "composer-state",
     "arm-observer",
     "insert-text",
+    "observe",
     "enter-down",
     "enter-up",
   ]);
