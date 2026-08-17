@@ -34,7 +34,10 @@ export interface TurnComposerPreflightPort {
 }
 
 export interface TurnCdpPort {
-  getTurnComposerState(lease: RuntimeLease): Promise<CdpTurnComposerState>;
+  getTurnComposerState(
+    expectedRoute: RouteExpectation,
+    lease: RuntimeLease,
+  ): Promise<CdpTurnComposerState>;
   armTurnObservation(lease: RuntimeLease): CdpTurnObservationHandle;
   getTurnObservation(
     handle: CdpTurnObservationHandle,
