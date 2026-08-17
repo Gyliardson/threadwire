@@ -14,11 +14,6 @@ export type CdpTurnObservationHandle = Readonly<{
   readonly [cdpTurnObservationBrand]: true;
 }>;
 
-declare const cdpResponseObservationBrand: unique symbol;
-export type CdpResponseObservationHandle = Readonly<{
-  readonly [cdpResponseObservationBrand]: true;
-}>;
-
 export interface CdpTurnComposerState {
   readonly expectedRoute: boolean;
   readonly eligible: boolean;
@@ -29,7 +24,6 @@ export interface CdpTurnComposerState {
 export type CdpWriteLifecycleState = "ACTIVE" | "FINISHED" | "FAILED";
 
 export interface CdpTurnWriteObservation {
-  readonly responseHandle: CdpResponseObservationHandle;
   readonly lifecycle: CdpWriteLifecycleState;
 }
 
