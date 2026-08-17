@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CdpSessionManager, CdpTargetDiscoveryLike } from "../../src/cdp/CdpSessionManager.js";
 import {
-  CdpResponseObservationHandle,
   CdpTransport,
   CdpTransportConnectOptions,
   CdpTurnObservationHandle,
@@ -28,7 +27,6 @@ const target: CdpTargetInfo = {
 };
 const locator = createConversationLocator("https://chatgpt.com/c/synthetic-turn");
 const observationHandle = Object.freeze({}) as unknown as CdpTurnObservationHandle;
-const responseHandle = Object.freeze({}) as unknown as CdpResponseObservationHandle;
 
 class Discovery implements CdpTargetDiscoveryLike {
   public async findPrimaryTarget(): Promise<CdpTargetInfo> {
@@ -82,7 +80,7 @@ class FakeTurnSession implements CdpTurnTransportSession {
     this.events.push("observe");
     return Object.freeze({
       prepareCount: 1,
-      write: Object.freeze({ responseHandle, lifecycle: "ACTIVE" as const }),
+      write: Object.freeze({ lifecycle: "ACTIVE" as const }),
     });
   }
 
