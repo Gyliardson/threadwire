@@ -22,13 +22,15 @@ test("ROUTE queued while safe is rejected at callback start if active TURN later
   runtime.observe({ pid: 700, creationTime: "scheduler-a" });
   const scheduler = new OperationScheduler(runtime);
   const turnStarted = deferred<void>();
+  const requestUncertain = deferred<void>();
+  const uncertainMarked = deferred<void>();
   const releaseTurn = deferred<void>();
-  const markUncertain = deferred<void>();
 
   const activeTurn = scheduler.schedule("TURN", async (_signal, lease) => {
     turnStarted.resolve();
-    await markUncertain.promise;
+    await requestUncertain.promise;
     scheduler.markRuntimeMutationStateUncertain(lease);
+    uncertainMarked.resolve();
     await releaseTurn.promise;
   });
   await turnStarted.promise;
@@ -38,10 +40,11 @@ test("ROUTE queued while safe is rejected at callback start if active TURN later
     routeCallbackCount += 1;
   });
   await Promise.resolve();
-  assert.equal(routeCallbackCount, 0, "ROUTE is queued while lease is still safe");
+  assert.equal(routeCallbackCount, 0, "ROUTE is genuinely queued while lease is still safe");
 
-  markUncertain.resolve();
-  await Promise.resolve();
+  requestUncertain.resolve();
+  await uncertainMarked.promise;
+  assert.equal(routeCallbackCount, 0, "queued ROUTE remains blocked after uncertainty is marked");
   releaseTurn.resolve();
   await activeTurn;
 
