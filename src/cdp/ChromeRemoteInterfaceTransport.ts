@@ -103,7 +103,7 @@ function toEligibleComposer(node: CriAxNode): EligibleComposerTarget | null {
   return Object.freeze({
     backendDOMNodeId,
     focused: axBoolean(node, "focused"),
-    empty: editableValue === undefined || editableValue === null || editableValue === "",
+    empty: editableValue === "",
   });
 }
 
