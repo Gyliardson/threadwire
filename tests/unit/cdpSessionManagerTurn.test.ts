@@ -68,9 +68,9 @@ class FakeTurnSession implements CdpTurnTransportSession {
 
   public async focusBackendNode(_backendDOMNodeId: number): Promise<void> {}
 
-  public async getTurnComposerState() {
+  public async getTurnComposerState(_expectedRoute: RouteExpectation) {
     this.events.push("composer");
-    return Object.freeze({ eligible: true, focused: true, empty: true });
+    return Object.freeze({ expectedRoute: true, eligible: true, focused: true, empty: true });
   }
 
   public armTurnObservation(): CdpTurnObservationHandle {
@@ -139,8 +139,10 @@ test("manager delegates typed M5 primitives only for the scheduler-provided curr
   });
   await manager.connect();
   const lease = runtime.getCurrentRuntimeLease();
+  const expectedRoute: RouteExpectation = { kind: "THREAD", locator };
 
-  assert.deepEqual(await manager.getTurnComposerState(lease), {
+  assert.deepEqual(await manager.getTurnComposerState(expectedRoute, lease), {
+    expectedRoute: true,
     eligible: true,
     focused: true,
     empty: true,
