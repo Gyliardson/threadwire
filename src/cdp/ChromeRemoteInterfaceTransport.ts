@@ -11,7 +11,6 @@ import {
   RouteExpectation,
 } from "../readiness/types.js";
 import {
-  CdpResponseObservationHandle,
   CdpTransport,
   CdpTransportConnectOptions,
   CdpTransportSession,
@@ -35,7 +34,7 @@ interface ActiveTurnObservation {
   readonly handle: CdpTurnObservationHandle;
   prepareCount: number;
   writeRequestId: string | null;
-  responseHandle: CdpResponseObservationHandle | null;
+  successfulResponseObserved: boolean | null;
   lifecycle: CdpWriteLifecycleState | null;
   ambiguousWrite: boolean;
 }
@@ -64,8 +63,11 @@ function isCriClient(value: unknown): value is CriClient {
     hasFunction(value.Page, "getFrameTree") &&
     hasFunction(value.Accessibility, "getFullAXTree") &&
     hasFunction(value.DOM, "focus") &&
+    hasFunction(value.Input, "insertText") &&
+    hasFunction(value.Input, "dispatchKeyEvent") &&
     hasFunction(value.Network, "enable") &&
     hasFunction(value.Network, "requestWillBeSent") &&
+    hasFunction(value.Network, "responseReceived") &&
     hasFunction(value.Network, "loadingFinished") &&
     hasFunction(value.Network, "loadingFailed")
   );
@@ -166,6 +168,10 @@ function classifyTurnRequest(rawUrl: string, method: string | undefined): TurnRe
   return null;
 }
 
+function isSuccessfulHttpStatus(status: number): boolean {
+  return Number.isFinite(status) && status >= 200 && status < 300;
+}
+
 class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
   private readonly activeRelevantRequestIds = new Set<string>();
   private readonly disconnectListeners = new Set<() => void>();
@@ -212,6 +218,9 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
     const unsubscribers = [
       this.client.Network.requestWillBeSent((event) =>
         this.onRequestWillBeSent(event.requestId, event.request.url, event.request.method),
+      ),
+      this.client.Network.responseReceived((event) =>
+        this.onResponseReceived(event.requestId, event.response.status),
       ),
       this.client.Network.loadingFinished((event) => this.onRequestSettled(event.requestId, false)),
       this.client.Network.loadingFailed((event) => this.onRequestSettled(event.requestId, true)),
@@ -320,7 +329,7 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
       handle,
       prepareCount: 0,
       writeRequestId: null,
-      responseHandle: null,
+      successfulResponseObserved: null,
       lifecycle: null,
       ambiguousWrite: false,
     };
@@ -332,18 +341,13 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
     if (observation.ambiguousWrite) {
       throw new Error("The scoped turn observation contains multiple distinct conversation writes.");
     }
-    if (
-      observation.writeRequestId === null ||
-      observation.responseHandle === null ||
-      observation.lifecycle === null
-    ) {
+    if (observation.writeRequestId === null || observation.lifecycle === null) {
       return Object.freeze({ prepareCount: observation.prepareCount, write: null });
     }
 
     return Object.freeze({
       prepareCount: observation.prepareCount,
       write: Object.freeze({
-        responseHandle: observation.responseHandle,
         lifecycle: observation.lifecycle,
       }),
     });
@@ -443,14 +447,30 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
 
     if (observation.writeRequestId === null) {
       observation.writeRequestId = requestId;
-      observation.responseHandle = Object.freeze({}) as unknown as CdpResponseObservationHandle;
+      observation.successfulResponseObserved = null;
       observation.lifecycle = "ACTIVE";
       return;
     }
 
-    if (observation.writeRequestId !== requestId) {
-      observation.ambiguousWrite = true;
+    if (observation.writeRequestId === requestId) {
+      observation.successfulResponseObserved = null;
+      observation.lifecycle = "ACTIVE";
+      return;
     }
+
+    observation.ambiguousWrite = true;
+  }
+
+  private onResponseReceived(requestId: string, status: number): void {
+    const observation = this.activeTurnObservation;
+    if (
+      observation === null ||
+      observation.writeRequestId !== requestId ||
+      observation.lifecycle !== "ACTIVE"
+    ) {
+      return;
+    }
+    observation.successfulResponseObserved = isSuccessfulHttpStatus(status);
   }
 
   private onRequestSettled(requestId: string, failed: boolean): void {
@@ -460,7 +480,8 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
 
     const observation = this.activeTurnObservation;
     if (observation?.writeRequestId === requestId) {
-      observation.lifecycle = failed ? "FAILED" : "FINISHED";
+      observation.lifecycle =
+        failed || observation.successfulResponseObserved !== true ? "FAILED" : "FINISHED";
     }
   }
 
