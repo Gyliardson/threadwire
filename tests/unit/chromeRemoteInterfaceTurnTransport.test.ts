@@ -19,9 +19,9 @@ type RequestListener = (event: {
   requestId: string;
   request: {
     url: string;
-    method?: string;
-    headers?: Record<string, string>;
-    postData?: string;
+    method: string;
+    headers: Record<string, string> | undefined;
+    postData: string | undefined;
   };
 }) => void;
 type SettledListener = (event: { requestId: string }) => void;
