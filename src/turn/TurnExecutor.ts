@@ -326,7 +326,6 @@ export class TurnExecutor {
         }
         if (afterRoute.lifecycle === "ACTIVE") {
           previousLifecycle = "ACTIVE";
-          writeObservedAt = this.clock();
           await this.sleep(this.pollIntervalMs);
           continue;
         }
