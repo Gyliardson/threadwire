@@ -1,5 +1,5 @@
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
-import { RuntimeLease } from "../domain/RuntimeGeneration.js";
+import { RuntimeLease, sameRuntimeLease } from "../domain/RuntimeGeneration.js";
 import {
   CdpReadinessFailedError,
   ExistingRouteReadinessTimeoutError,
@@ -11,7 +11,12 @@ import {
 import { delay, throwIfAborted } from "../utils/timeout.js";
 import { ExistingReadinessPolicy } from "./ExistingReadinessPolicy.js";
 import { FreshReadinessPolicy } from "./FreshReadinessPolicy.js";
-import { ExistingReadinessObservationPort, ReadinessGate, RouteExpectation } from "./types.js";
+import {
+  ExistingReadinessObservationPort,
+  ExistingReadinessSnapshot,
+  ReadinessGate,
+  RouteExpectation,
+} from "./types.js";
 
 export const DEFAULT_EXISTING_READINESS_TIMEOUT_MS = 20_000;
 export const DEFAULT_EXISTING_READINESS_POLL_INTERVAL_MS = 100;
@@ -31,6 +36,12 @@ export interface ReadinessControllerOptions {
 interface DeadlineSignal {
   readonly signal: AbortSignal;
   dispose(): void;
+}
+
+interface FreshReadinessProof {
+  readonly lease: RuntimeLease;
+  readonly frameId: string;
+  readonly loaderId: string;
 }
 
 function positiveFinite(value: number, name: string): number {
@@ -81,6 +92,7 @@ export class ReadinessController {
   private readonly pollIntervalMs: number;
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly deadlineScheduler: ReadinessDeadlineScheduler;
+  private freshReadinessProof: FreshReadinessProof | null = null;
 
   public constructor(
     private readonly observation: ExistingReadinessObservationPort,
@@ -108,6 +120,7 @@ export class ReadinessController {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
+    this.freshReadinessProof = null;
     try {
       await this.waitForRoute(
         this.existingPolicy.createGate(),
@@ -127,13 +140,19 @@ export class ReadinessController {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
+    this.freshReadinessProof = null;
     try {
-      await this.waitForRoute(
+      const snapshot = await this.waitForRoute(
         this.freshPolicy.createGate(),
         { kind: "FRESH_ROOT" },
         lease,
         signal,
       );
+      this.freshReadinessProof = Object.freeze({
+        lease,
+        frameId: snapshot.mainFrame.frameId,
+        loaderId: snapshot.mainFrame.loaderId,
+      });
     } catch (error) {
       if (error instanceof OperationTimeoutError) {
         throw new FreshRouteReadinessTimeoutError(undefined, { cause: error });
@@ -142,12 +161,48 @@ export class ReadinessController {
     }
   }
 
+  public async waitForTurnComposer(
+    expectedRoute: RouteExpectation,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const snapshot = await this.waitForRoute(
+      this.existingPolicy.createGate(),
+      expectedRoute,
+      lease,
+      signal,
+    );
+
+    if (expectedRoute.kind === "THREAD") {
+      this.freshReadinessProof = null;
+      return;
+    }
+
+    const proof = this.freshReadinessProof;
+    this.freshReadinessProof = null;
+    if (
+      proof !== null &&
+      sameRuntimeLease(proof.lease, lease) &&
+      proof.frameId === snapshot.mainFrame.frameId &&
+      proof.loaderId === snapshot.mainFrame.loaderId
+    ) {
+      return;
+    }
+
+    await this.waitForRoute(
+      this.freshPolicy.createGate(),
+      { kind: "FRESH_ROOT" },
+      lease,
+      signal,
+    );
+  }
+
   private async waitForRoute(
     gate: ReadinessGate,
     expectedRoute: RouteExpectation,
     lease: RuntimeLease,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<ExistingReadinessSnapshot> {
     throwIfAborted(signal);
     const deadline = createDeadlineSignal(this.timeoutMs, this.deadlineScheduler, signal);
 
@@ -162,7 +217,7 @@ export class ReadinessController {
         const action = gate.observe(snapshot);
 
         if (action.kind === "READY") {
-          return;
+          return snapshot;
         }
 
         if (action.kind === "FOCUS") {
