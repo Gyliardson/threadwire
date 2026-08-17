@@ -14,6 +14,11 @@ export interface ThreadRegistryOptions {
   readonly handleFactory?: ThreadHandleFactory;
 }
 
+export type ThreadRegistrationResult = Readonly<{
+  threadHandle: ThreadHandle;
+  created: boolean;
+}>;
+
 export class ThreadRegistry {
   private readonly handleToLocator = new Map<ThreadHandle, ConversationLocator>();
   private readonly locatorToHandle = new Map<ConversationLocator, ThreadHandle>();
@@ -24,10 +29,14 @@ export class ThreadRegistry {
   }
 
   public register(locator: ConversationLocator): ThreadHandle {
+    return this.registerWithStatus(locator).threadHandle;
+  }
+
+  public registerWithStatus(locator: ConversationLocator): ThreadRegistrationResult {
     const normalized = createConversationLocator(locator);
     const existing = this.locatorToHandle.get(normalized);
     if (existing) {
-      return existing;
+      return Object.freeze({ threadHandle: existing, created: false });
     }
 
     for (let attempt = 0; attempt < DEFAULT_THREAD_HANDLE_COLLISION_ATTEMPTS; attempt += 1) {
@@ -37,7 +46,7 @@ export class ThreadRegistry {
       }
       this.handleToLocator.set(handle, normalized);
       this.locatorToHandle.set(normalized, handle);
-      return handle;
+      return Object.freeze({ threadHandle: handle, created: true });
     }
 
     throw new ThreadHandleCollisionError();
