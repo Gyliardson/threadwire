@@ -306,6 +306,13 @@ export class TurnExecutor {
         }
       }
 
+      if (writeLifecycle === "FINISHED") {
+        callerCancelled ||= signal?.aborted ?? false;
+        if (callerCancelled) {
+          throw operationAborted(signal);
+        }
+      }
+
       if (writeLifecycle === "FINISHED" && freshLocator !== null) {
         const threadHandle = this.registry.register(freshLocator);
         return Object.freeze({
