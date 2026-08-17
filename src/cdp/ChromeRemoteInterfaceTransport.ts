@@ -37,6 +37,7 @@ interface ActiveTurnObservation {
   writeRequestId: string | null;
   responseHandle: CdpResponseObservationHandle | null;
   lifecycle: CdpWriteLifecycleState | null;
+  ambiguousWrite: boolean;
 }
 
 export interface ChromeRemoteInterfaceTransportOptions {
@@ -321,12 +322,16 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
       writeRequestId: null,
       responseHandle: null,
       lifecycle: null,
+      ambiguousWrite: false,
     };
     return handle;
   }
 
   public getTurnObservation(handle: CdpTurnObservationHandle): CdpTurnObservationSnapshot {
     const observation = this.requireTurnObservation(handle);
+    if (observation.ambiguousWrite) {
+      throw new Error("The scoped turn observation contains multiple distinct conversation writes.");
+    }
     if (
       observation.writeRequestId === null ||
       observation.responseHandle === null ||
@@ -432,10 +437,19 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
       return;
     }
 
-    if (kind === "WRITE" && observation.writeRequestId === null) {
+    if (kind !== "WRITE") {
+      return;
+    }
+
+    if (observation.writeRequestId === null) {
       observation.writeRequestId = requestId;
       observation.responseHandle = Object.freeze({}) as unknown as CdpResponseObservationHandle;
       observation.lifecycle = "ACTIVE";
+      return;
+    }
+
+    if (observation.writeRequestId !== requestId) {
+      observation.ambiguousWrite = true;
     }
   }
 
