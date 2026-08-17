@@ -42,6 +42,7 @@ interface FreshReadinessProof {
   readonly lease: RuntimeLease;
   readonly frameId: string;
   readonly loaderId: string;
+  readonly backendDOMNodeId: number;
 }
 
 function positiveFinite(value: number, name: string): number {
@@ -148,10 +149,15 @@ export class ReadinessController {
         lease,
         signal,
       );
+      const composer = snapshot.eligibleEditables[0];
+      if (composer === undefined) {
+        throw new CdpReadinessFailedError();
+      }
       this.freshReadinessProof = Object.freeze({
         lease,
         frameId: snapshot.mainFrame.frameId,
         loaderId: snapshot.mainFrame.loaderId,
+        backendDOMNodeId: composer.backendDOMNodeId,
       });
     } catch (error) {
       if (error instanceof OperationTimeoutError) {
@@ -180,11 +186,14 @@ export class ReadinessController {
 
     const proof = this.freshReadinessProof;
     this.freshReadinessProof = null;
+    const composer = snapshot.eligibleEditables[0];
     if (
       proof !== null &&
+      composer !== undefined &&
       sameRuntimeLease(proof.lease, lease) &&
       proof.frameId === snapshot.mainFrame.frameId &&
-      proof.loaderId === snapshot.mainFrame.loaderId
+      proof.loaderId === snapshot.mainFrame.loaderId &&
+      proof.backendDOMNodeId === composer.backendDOMNodeId
     ) {
       return;
     }
