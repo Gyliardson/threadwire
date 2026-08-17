@@ -65,6 +65,16 @@ function operationAborted(signal?: AbortSignal): OperationAbortedError {
   );
 }
 
+function sanitizedTurnCause(error: unknown): Error {
+  if (error instanceof CdpDisconnectedError) {
+    return new CdpDisconnectedError(error.message);
+  }
+  if (error instanceof OperationTimeoutError) {
+    return new OperationTimeoutError(error.message);
+  }
+  return new Error("A low-level turn operation failed without retained protocol metadata.");
+}
+
 export class TurnExecutor {
   private readonly commandTimeoutMs: number;
   private readonly writeObservationTimeoutMs: number;
@@ -178,12 +188,17 @@ export class TurnExecutor {
         if (error instanceof CdpDisconnectedError || error instanceof OperationTimeoutError) {
           this.failClosed(lease, error);
         }
-        throw new TurnInputFailedError(undefined, { cause: error });
+        this.assertNoObservedPreSubmitWrite(observation, lease);
+        throw new TurnInputFailedError();
       }
 
-      // Composition alone is not submission. Honor cancellation before the first
-      // command that may submit the composed prompt.
+      // Composition alone is not submission. A real matching write, however,
+      // is independent evidence of mutation risk and cannot be discarded.
+      this.assertNoObservedPreSubmitWrite(observation, lease);
       throwIfAborted(signal);
+
+      // From this point onward Enter keyDown may have been sent even if the
+      // command later rejects, times out, disconnects, or the caller cancels.
       committed = true;
       callerCancelled = signal?.aborted ?? false;
 
@@ -233,57 +248,53 @@ export class TurnExecutor {
   ): Promise<TurnResult> {
     const committedAt = this.clock();
     let writeObservedAt: number | null = null;
-    let writeLifecycle: CdpWriteLifecycleState | null = null;
+    let previousLifecycle: CdpWriteLifecycleState | null = null;
     let freshLocator: ConversationLocator | null = null;
-    let lastFreshRouteError: unknown = null;
+    let lastFreshRouteError: Error | null = null;
     let callerCancelled = initiallyCancelled;
 
     while (true) {
       callerCancelled ||= signal?.aborted ?? false;
       const now = this.clock();
+      const snapshot = this.readTurnObservation(observation, lease);
+      const write = snapshot.write;
 
-      if (writeLifecycle === null || writeLifecycle === "ACTIVE") {
-        const snapshot = this.readCommittedObservation(observation, lease);
-        if (snapshot.write === null) {
-          if (now - committedAt >= this.writeObservationTimeoutMs) {
-            this.failClosed(
-              lease,
-              new Error("The committed turn did not produce an observable write before its engineering deadline."),
-            );
-          }
-          await this.sleep(this.pollIntervalMs);
-          continue;
+      if (write === null) {
+        if (now - committedAt >= this.writeObservationTimeoutMs) {
+          this.failClosed(
+            lease,
+            new Error("The committed turn did not produce an observable write before its engineering deadline."),
+          );
         }
-
-        writeObservedAt ??= now;
-        writeLifecycle = snapshot.write.lifecycle;
+        await this.sleep(this.pollIntervalMs);
+        continue;
       }
 
-      if (writeObservedAt === null || writeLifecycle === null) {
-        this.failClosed(lease, new Error("The committed turn observation became inconsistent."));
+      if (writeObservedAt === null || (previousLifecycle !== "ACTIVE" && write.lifecycle === "ACTIVE")) {
+        writeObservedAt = now;
       }
+      previousLifecycle = write.lifecycle;
 
-      if (writeLifecycle === "ACTIVE") {
+      if (write.lifecycle === "ACTIVE") {
         if (now - writeObservedAt >= this.writeSettlementTimeoutMs) {
           this.failClosed(
             lease,
             new Error("The observed write did not settle before its engineering deadline."),
           );
         }
-      } else {
+      } else if (write.lifecycle === "FAILED") {
+        // The exact write outcome is known and takes precedence over a later
+        // caller cancellation.
+        throw new TurnWriteFailedError();
+      } else if (target.kind === "THREAD") {
         if (callerCancelled || signal?.aborted) {
           throw operationAborted(signal);
         }
-        if (writeLifecycle === "FAILED") {
-          throw new TurnWriteFailedError();
-        }
-        if (target.kind === "THREAD") {
-          return Object.freeze({
-            kind: "THREAD" as const,
-            threadHandle: target.threadHandle,
-            created: false as const,
-          }) satisfies ExistingTurnResult;
-        }
+        return Object.freeze({
+          kind: "THREAD" as const,
+          threadHandle: target.threadHandle,
+          created: false as const,
+        }) satisfies ExistingTurnResult;
       }
 
       if (target.kind === "FRESH" && freshLocator === null) {
@@ -297,21 +308,47 @@ export class TurnExecutor {
           if (error instanceof RuntimeGenerationChangedError) {
             throw error;
           }
-          if (error instanceof CdpDisconnectedError && writeLifecycle === "ACTIVE") {
+          if (error instanceof CdpDisconnectedError && write.lifecycle === "ACTIVE") {
             this.failClosed(lease, error);
           }
-          lastFreshRouteError = error;
+          lastFreshRouteError = sanitizedTurnCause(error);
+        }
+
+        // Route observation awaited CDP. Re-read the still-armed scoped observer
+        // before any FRESH success/failure decision so a late distinct write
+        // already delivered to the adapter cannot be missed.
+        const afterRoute = this.readTurnObservation(observation, lease).write;
+        if (afterRoute === null) {
+          this.failClosed(lease, new Error("The committed turn observation became inconsistent."));
+        }
+        if (afterRoute.lifecycle === "FAILED") {
+          throw new TurnWriteFailedError();
+        }
+        if (afterRoute.lifecycle === "ACTIVE") {
+          previousLifecycle = "ACTIVE";
+          writeObservedAt = this.clock();
+          await this.sleep(this.pollIntervalMs);
+          continue;
         }
       }
 
-      if (writeLifecycle === "FINISHED") {
-        callerCancelled ||= signal?.aborted ?? false;
-        if (callerCancelled) {
-          throw operationAborted(signal);
-        }
+      callerCancelled ||= signal?.aborted ?? false;
+      if (callerCancelled) {
+        throw operationAborted(signal);
       }
 
-      if (writeLifecycle === "FINISHED" && freshLocator !== null) {
+      if (freshLocator !== null) {
+        // This final synchronous observer read is immediately followed by
+        // synchronous registration/return; no event callback can interleave
+        // before the finally block releases the scoped observation.
+        const finalWrite = this.readTurnObservation(observation, lease).write;
+        if (finalWrite === null || finalWrite.lifecycle === "ACTIVE") {
+          this.failClosed(lease, new Error("The fresh turn write was not terminal at finalization."));
+        }
+        if (finalWrite.lifecycle === "FAILED") {
+          throw new TurnWriteFailedError();
+        }
+
         const registration = this.registry.registerWithStatus(freshLocator);
         if (registration.created) {
           return Object.freeze({
@@ -327,10 +364,9 @@ export class TurnExecutor {
         }) satisfies ExistingTurnResult;
       }
 
-      if (
-        writeLifecycle === "FINISHED" &&
-        now - writeObservedAt >= this.freshConversationTimeoutMs
-      ) {
+      if (write.lifecycle === "FINISHED" && now - writeObservedAt >= this.freshConversationTimeoutMs) {
+        // The current synchronous read proved the selected request terminal and
+        // unambiguous immediately before releasing the TURN with this safe failure.
         throw new FreshConversationNotCreatedError(
           undefined,
           lastFreshRouteError === null ? undefined : { cause: lastFreshRouteError },
@@ -341,7 +377,26 @@ export class TurnExecutor {
     }
   }
 
-  private readCommittedObservation(
+  private assertNoObservedPreSubmitWrite(
+    observation: CdpTurnObservationHandle,
+    lease: RuntimeLease,
+  ): void {
+    const snapshot = this.readTurnObservation(observation, lease);
+    if (snapshot.write === null) {
+      return;
+    }
+    if (snapshot.write.lifecycle === "ACTIVE") {
+      this.failClosed(
+        lease,
+        new Error("A conversation write was observed before the intended submission boundary."),
+      );
+    }
+    // A terminal pre-submit write is navigation-safe, but it cannot prove that
+    // this turn followed the intended submission sequence.
+    throw new TurnInputFailedError();
+  }
+
+  private readTurnObservation(
     observation: CdpTurnObservationHandle,
     lease: RuntimeLease,
   ): CdpTurnObservationSnapshot {
@@ -374,7 +429,9 @@ export class TurnExecutor {
     ) {
       throw error;
     }
-    throw new TurnInputFailedError(undefined, { cause: error });
+    // Unknown low-level/protocol/library errors may retain command parameters.
+    // Do not keep them in the outward cause graph.
+    throw new TurnInputFailedError();
   }
 
   private rethrowPostCommitCommand(error: unknown, lease: RuntimeLease): void {
@@ -385,11 +442,12 @@ export class TurnExecutor {
       this.failClosed(lease, error);
     }
     // A generic key event rejection is weaker evidence than a subsequently
-    // observed, unambiguous legitimate write reaching loadingFinished.
+    // observed, unambiguous legitimate write reaching successful settlement.
+    // The raw error object is deliberately discarded.
   }
 
   private failClosed(lease: RuntimeLease, cause: unknown): never {
     this.scheduler.markRuntimeMutationStateUncertain(lease);
-    throw new TurnStateUncertainError(undefined, { cause });
+    throw new TurnStateUncertainError(undefined, { cause: sanitizedTurnCause(cause) });
   }
 }
