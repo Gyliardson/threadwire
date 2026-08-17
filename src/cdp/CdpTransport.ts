@@ -20,6 +20,7 @@ export type CdpResponseObservationHandle = Readonly<{
 }>;
 
 export interface CdpTurnComposerState {
+  readonly expectedRoute: boolean;
   readonly eligible: boolean;
   readonly focused: boolean;
   readonly empty: boolean;
@@ -47,7 +48,7 @@ export interface CdpTransportSession {
 }
 
 export interface CdpTurnTransportSession extends CdpTransportSession {
-  getTurnComposerState(): Promise<CdpTurnComposerState>;
+  getTurnComposerState(expectedRoute: RouteExpectation): Promise<CdpTurnComposerState>;
   armTurnObservation(): CdpTurnObservationHandle;
   getTurnObservation(handle: CdpTurnObservationHandle): CdpTurnObservationSnapshot;
   releaseTurnObservation(handle: CdpTurnObservationHandle): void;
