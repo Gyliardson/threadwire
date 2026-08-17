@@ -19,21 +19,23 @@ const expectedRoute: RouteExpectation = {
   locator: createConversationLocator("https://chatgpt.com/c/synthetic-turn"),
 };
 
+type RequestPayload = {
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  postData?: string;
+};
 type RequestListener = (event: {
   requestId: string;
-  request: {
-    url: string;
-    method: string;
-    headers?: Record<string, string>;
-    postData?: string;
-  };
+  request: RequestPayload;
 }) => void;
+type ResponsePayload = {
+  status: number;
+  headers?: Record<string, string>;
+};
 type ResponseListener = (event: {
   requestId: string;
-  response: {
-    status: number;
-    headers?: Record<string, string>;
-  };
+  response: ResponsePayload;
 }) => void;
 type SettledListener = (event: { requestId: string }) => void;
 
@@ -156,7 +158,7 @@ class FakeTurnCriClient {
       },
     });
     for (const listener of this.requestListeners) {
-      listener({ requestId, request: request as RequestListener extends (event: infer E) => void ? E extends { request: infer R } ? R : never : never });
+      listener({ requestId, request: request as RequestPayload });
     }
   }
 
@@ -168,7 +170,7 @@ class FakeTurnCriClient {
       },
     });
     for (const listener of this.responseListeners) {
-      listener({ requestId, response: response as { status: number; headers?: Record<string, string> } });
+      listener({ requestId, response: response as ResponsePayload });
     }
   }
 
