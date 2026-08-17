@@ -1,6 +1,7 @@
 import {
   CdpTurnObservationHandle,
   CdpTurnObservationSnapshot,
+  CdpWriteLifecycleState,
 } from "../cdp/CdpTransport.js";
 import { RuntimeLease } from "../domain/RuntimeGeneration.js";
 import {
@@ -231,27 +232,61 @@ export class TurnExecutor {
   ): Promise<TurnResult> {
     const committedAt = this.clock();
     let writeObservedAt: number | null = null;
+    let writeLifecycle: CdpWriteLifecycleState | null = null;
     let freshLocator: ConversationLocator | null = null;
     let lastFreshRouteError: unknown = null;
     let callerCancelled = initiallyCancelled;
 
     while (true) {
       callerCancelled ||= signal?.aborted ?? false;
-      const snapshot = this.readCommittedObservation(observation, lease);
       const now = this.clock();
 
-      if (snapshot.write === null) {
-        if (now - committedAt >= this.writeObservationTimeoutMs) {
-          this.failClosed(
-            lease,
-            new Error("The committed turn did not produce an observable write before its engineering deadline."),
-          );
+      if (writeLifecycle === null || writeLifecycle === "ACTIVE") {
+        const snapshot = this.readCommittedObservation(observation, lease);
+        if (snapshot.write === null) {
+          if (now - committedAt >= this.writeObservationTimeoutMs) {
+            this.failClosed(
+              lease,
+              new Error("The committed turn did not produce an observable write before its engineering deadline."),
+            );
+          }
+          await this.sleep(this.pollIntervalMs);
+          continue;
         }
-        await this.sleep(this.pollIntervalMs);
-        continue;
+
+        writeObservedAt ??= now;
+        writeLifecycle = snapshot.write.lifecycle;
       }
 
-      writeObservedAt ??= now;
+      if (writeObservedAt === null || writeLifecycle === null) {
+        this.failClosed(lease, new Error("The committed turn observation became inconsistent."));
+      }
+
+      if (writeLifecycle === "ACTIVE") {
+        if (now - writeObservedAt >= this.writeSettlementTimeoutMs) {
+          this.failClosed(
+            lease,
+            new Error("The observed write did not settle before its engineering deadline."),
+          );
+        }
+      } else {
+        if (callerCancelled || signal?.aborted) {
+          throw operationAborted(signal);
+        }
+        if (writeLifecycle === "FAILED") {
+          throw new TurnWriteFailedError();
+        }
+        if (inputFailure !== null) {
+          throw inputFailure;
+        }
+        if (target.kind === "THREAD") {
+          return Object.freeze({
+            kind: "THREAD" as const,
+            threadHandle: target.threadHandle,
+            created: false as const,
+          }) satisfies ExistingTurnResult;
+        }
+      }
 
       if (target.kind === "FRESH" && freshLocator === null) {
         try {
@@ -264,45 +299,14 @@ export class TurnExecutor {
           if (error instanceof RuntimeGenerationChangedError) {
             throw error;
           }
-          if (error instanceof CdpDisconnectedError && snapshot.write.lifecycle === "ACTIVE") {
+          if (error instanceof CdpDisconnectedError && writeLifecycle === "ACTIVE") {
             this.failClosed(lease, error);
           }
           lastFreshRouteError = error;
         }
       }
 
-      if (snapshot.write.lifecycle === "ACTIVE") {
-        if (now - writeObservedAt >= this.writeSettlementTimeoutMs) {
-          this.failClosed(
-            lease,
-            new Error("The observed write did not settle before its engineering deadline."),
-          );
-        }
-        await this.sleep(this.pollIntervalMs);
-        continue;
-      }
-
-      if (callerCancelled || signal?.aborted) {
-        throw operationAborted(signal);
-      }
-
-      if (snapshot.write.lifecycle === "FAILED") {
-        throw new TurnWriteFailedError();
-      }
-
-      if (inputFailure !== null) {
-        throw inputFailure;
-      }
-
-      if (target.kind === "THREAD") {
-        return Object.freeze({
-          kind: "THREAD" as const,
-          threadHandle: target.threadHandle,
-          created: false as const,
-        }) satisfies ExistingTurnResult;
-      }
-
-      if (freshLocator !== null) {
+      if (writeLifecycle === "FINISHED" && freshLocator !== null) {
         const threadHandle = this.registry.register(freshLocator);
         return Object.freeze({
           kind: "THREAD" as const,
@@ -311,7 +315,10 @@ export class TurnExecutor {
         }) satisfies FreshTurnResult;
       }
 
-      if (now - writeObservedAt >= this.freshConversationTimeoutMs) {
+      if (
+        writeLifecycle === "FINISHED" &&
+        now - writeObservedAt >= this.freshConversationTimeoutMs
+      ) {
         throw new FreshConversationNotCreatedError(
           undefined,
           lastFreshRouteError === null ? undefined : { cause: lastFreshRouteError },
