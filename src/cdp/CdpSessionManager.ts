@@ -311,11 +311,7 @@ export class CdpSessionManager {
   ): never {
     throwIfAborted(signal);
 
-    try {
-      this.assertSessionForLeaseCurrent(session, lease);
-    } catch (lifecycleError) {
-      throw lifecycleError;
-    }
+    this.assertSessionForLeaseCurrent(session, lease);
 
     if (
       error instanceof RuntimeGenerationChangedError ||

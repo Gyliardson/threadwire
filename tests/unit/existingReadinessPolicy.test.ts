@@ -158,16 +158,42 @@ test("focused target changing resets readiness and requires focus on the replace
   });
 });
 
-test("active relevant backend activity blocks focus and readiness", () => {
+test("activeCount > 0 + stable activityEpoch CAN become READY (activeCount alone does not reset focus or readiness)", () => {
   const gate = stableGate();
-  gate.observe(snapshot({ targets: oneTarget(), activeCount: 1, activityEpoch: 1 }));
+  
+  // frame stable
+  gate.observe(snapshot({ targets: oneTarget(), activeCount: 3, activityEpoch: 1 }));
   assert.deepEqual(
-    gate.observe(snapshot({ targets: oneTarget(), activeCount: 1, activityEpoch: 1 })),
+    gate.observe(snapshot({ targets: oneTarget(), activeCount: 3, activityEpoch: 1 })),
+    { kind: "FOCUS", backendDOMNodeId: 101 },
+  );
+
+  // focus observed
+  assert.deepEqual(
+    gate.observe(snapshot({ targets: oneTarget(101, true), activeCount: 3, activityEpoch: 1 })),
+    { kind: "WAIT" },
+  );
+  
+  // second stable focus observation with same epoch
+  assert.deepEqual(
+    gate.observe(snapshot({ targets: oneTarget(101, true), activeCount: 3, activityEpoch: 1 })),
+    { kind: "READY" },
+  );
+});
+
+test("continuously changing activityEpoch never becomes READY", () => {
+  const gate = stableGate();
+  gate.observe(snapshot({ targets: oneTarget(), activityEpoch: 1 }));
+  gate.observe(snapshot({ targets: oneTarget(), activityEpoch: 2 }));
+  gate.observe(snapshot({ targets: oneTarget(101, true), activityEpoch: 3 }));
+  
+  assert.deepEqual(
+    gate.observe(snapshot({ targets: oneTarget(101, true), activityEpoch: 4 })),
     { kind: "WAIT" },
   );
   assert.deepEqual(
-    gate.observe(snapshot({ targets: oneTarget(), activeCount: 0, activityEpoch: 2 })),
-    { kind: "FOCUS", backendDOMNodeId: 101 },
+    gate.observe(snapshot({ targets: oneTarget(101, true), activityEpoch: 5 })),
+    { kind: "WAIT" },
   );
 });
 

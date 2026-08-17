@@ -78,14 +78,6 @@ export class ExistingReadinessGate {
 
     const target = snapshot.eligibleEditables[0]!;
 
-    if (snapshot.backendActivity.activeCount !== 0) {
-      this.resetReadyEpoch();
-      if (this.focusTargetId !== target.backendDOMNodeId) {
-        this.focusTargetId = null;
-      }
-      return { kind: "WAIT" };
-    }
-
     if (this.focusTargetId !== target.backendDOMNodeId) {
       this.focusTargetId = target.backendDOMNodeId;
       this.resetReadyEpoch();

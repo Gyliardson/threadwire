@@ -61,7 +61,7 @@ class FakeCriClient {
   public enableOptions: unknown[] = [];
 
   public readonly Network = {
-    enable: async (options: {}) => { this.enableOptions.push(options); this.events.push("network.enable"); },
+    enable: async (options: Record<string, unknown>) => { this.enableOptions.push(options); this.events.push("network.enable"); },
     requestWillBeSent: (listener: RequestListener) => {
       this.events.push("subscribe.request"); this.requestListeners.add(listener); return () => this.requestListeners.delete(listener);
     },
