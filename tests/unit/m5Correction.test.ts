@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ChromeRemoteInterfaceTransport } from "../../src/cdp/ChromeRemoteInterfaceTransport.js";
 import {
-  CdpResponseObservationHandle,
   CdpTurnComposerState,
   CdpTurnObservationHandle,
   CdpTurnObservationSnapshot,
@@ -45,12 +44,11 @@ function createRuntime(): RuntimeGenerationTracker {
 }
 
 const observationHandle = Object.freeze({}) as unknown as CdpTurnObservationHandle;
-const responseHandle = Object.freeze({}) as unknown as CdpResponseObservationHandle;
 
 function writeObservation(lifecycle: "ACTIVE" | "FINISHED" | "FAILED"): CdpTurnObservationSnapshot {
   return Object.freeze({
     prepareCount: 0,
-    write: Object.freeze({ responseHandle, lifecycle }),
+    write: Object.freeze({ lifecycle }),
   });
 }
 
@@ -72,6 +70,7 @@ class ScriptedTurnCdp implements TurnCdpPort {
   public keyDownNeverSettles = false;
   public observationError: Error | null = null;
   private snapshotIndex = 0;
+  private submitted = false;
 
   public constructor(private readonly runtime: RuntimeGenerationTracker) {}
 
@@ -97,6 +96,9 @@ class ScriptedTurnCdp implements TurnCdpPort {
     if (this.observationError) {
       throw this.observationError;
     }
+    if (!this.submitted) {
+      return Object.freeze({ prepareCount: 0, write: null });
+    }
     const snapshot =
       this.snapshots[this.snapshotIndex] ??
       this.snapshots[this.snapshots.length - 1] ??
@@ -118,6 +120,7 @@ class ScriptedTurnCdp implements TurnCdpPort {
   public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     this.events.push("down");
+    this.submitted = true;
     if (this.keyDownNeverSettles) {
       await new Promise<void>(() => undefined);
       return;
@@ -405,6 +408,7 @@ type RequestListener = (event: {
   requestId: string;
   request: { url: string; method?: string };
 }) => void;
+type ResponseListener = (event: { requestId: string; response: { status: number } }) => void;
 type SettledListener = (event: { requestId: string }) => void;
 
 type WriteMode = "NONE" | "SAME_ID" | "DISTINCT_IDS";
@@ -417,6 +421,7 @@ class MultiWriteCriClient {
     url: "https://chatgpt.com/c/m5-multi-write",
   };
   private readonly requestListeners = new Set<RequestListener>();
+  private readonly responseListeners = new Set<ResponseListener>();
   private readonly finishedListeners = new Set<SettledListener>();
   private readonly failedListeners = new Set<SettledListener>();
   private readonly disconnectListeners = new Set<() => void>();
@@ -455,6 +460,10 @@ class MultiWriteCriClient {
       this.requestListeners.add(listener);
       return () => this.requestListeners.delete(listener);
     },
+    responseReceived: (listener: ResponseListener) => {
+      this.responseListeners.add(listener);
+      return () => this.responseListeners.delete(listener);
+    },
     loadingFinished: (listener: SettledListener) => {
       this.finishedListeners.add(listener);
       return () => this.finishedListeners.delete(listener);
@@ -474,9 +483,11 @@ class MultiWriteCriClient {
       if (this.writeMode === "SAME_ID") {
         this.emitWrite("write-a");
         this.emitWrite("write-a");
+        this.emitResponse("write-a", 200);
         this.emitFinished("write-a");
       } else if (this.writeMode === "DISTINCT_IDS") {
         this.emitWrite("write-a");
+        this.emitResponse("write-a", 200);
         this.emitWrite("write-b");
         this.emitFinished("write-a");
       }
@@ -500,6 +511,12 @@ class MultiWriteCriClient {
           method: "POST",
         },
       });
+    }
+  }
+
+  private emitResponse(requestId: string, status: number): void {
+    for (const listener of this.responseListeners) {
+      listener({ requestId, response: { status } });
     }
   }
 
