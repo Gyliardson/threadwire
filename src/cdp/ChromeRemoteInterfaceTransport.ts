@@ -365,7 +365,11 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
     if (this.closed) {
       throw new Error("CDP session is closed.");
     }
-    await this.client.Input.insertText({ text });
+    try {
+      await this.client.Input.insertText({ text });
+    } catch {
+      throw new Error("CDP insertText command failed without retained protocol metadata.");
+    }
   }
 
   public async dispatchEnterKeyDown(): Promise<void> {
@@ -392,13 +396,17 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
     if (this.closed) {
       throw new Error("CDP session is closed.");
     }
-    await this.client.Input.dispatchKeyEvent({
-      type,
-      key: "Enter",
-      code: "Enter",
-      windowsVirtualKeyCode: 13,
-      nativeVirtualKeyCode: 13,
-    });
+    try {
+      await this.client.Input.dispatchKeyEvent({
+        type,
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      });
+    } catch {
+      throw new Error("CDP Enter command failed without retained protocol metadata.");
+    }
   }
 
   private readonly handleDisconnect = (): void => {
