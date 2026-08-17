@@ -273,24 +273,33 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
     await this.client.DOM.focus({ backendNodeId: backendDOMNodeId });
   }
 
-  public async getTurnComposerState(): Promise<CdpTurnComposerState> {
+  public async getTurnComposerState(
+    expectedRoute: RouteExpectation,
+  ): Promise<CdpTurnComposerState> {
     if (this.closed || !this.readinessInitialized) {
       throw new Error("CDP turn observation is unavailable.");
     }
 
     const frameTree = await this.client.Page.getFrameTree();
     const mainFrame = frameTree.frameTree.frame;
+    const routeValid = routeMatchesExpected(mainFrame.url, expectedRoute);
     const axTree = await this.client.Accessibility.getFullAXTree({ frameId: mainFrame.id });
     const eligible = axTree.nodes
       .map(toEligibleComposer)
       .filter((target): target is EligibleComposerTarget => target !== null);
 
     if (eligible.length !== 1) {
-      return Object.freeze({ eligible: false, focused: false, empty: false });
+      return Object.freeze({
+        expectedRoute: routeValid,
+        eligible: false,
+        focused: false,
+        empty: false,
+      });
     }
 
     const target = eligible[0]!;
     return Object.freeze({
+      expectedRoute: routeValid,
       eligible: true,
       focused: target.focused,
       empty: target.empty,
