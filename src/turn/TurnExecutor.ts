@@ -7,6 +7,7 @@ import {
   CdpDisconnectedError,
   FreshConversationNotCreatedError,
   OperationAbortedError,
+  OperationTimeoutError,
   RuntimeGenerationChangedError,
   TurnInputFailedError,
   TurnStateUncertainError,
@@ -16,7 +17,7 @@ import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import { RouteExpectation } from "../readiness/types.js";
 import { OperationScheduler } from "../routing/OperationScheduler.js";
 import { ThreadRegistry } from "../routing/ThreadRegistry.js";
-import { delay, throwIfAborted } from "../utils/timeout.js";
+import { delay, throwIfAborted, withTimeout } from "../utils/timeout.js";
 import {
   ExistingTurnResult,
   FreshTurnResult,
@@ -26,12 +27,14 @@ import {
   TurnTarget,
 } from "./types.js";
 
+export const DEFAULT_TURN_COMMAND_TIMEOUT_MS = 5_000;
 export const DEFAULT_TURN_WRITE_OBSERVATION_TIMEOUT_MS = 15_000;
 export const DEFAULT_TURN_WRITE_SETTLEMENT_TIMEOUT_MS = 120_000;
 export const DEFAULT_FRESH_CONVERSATION_TIMEOUT_MS = 15_000;
 export const DEFAULT_TURN_POLL_INTERVAL_MS = 25;
 
 export interface TurnExecutorOptions {
+  readonly commandTimeoutMs?: number;
   readonly writeObservationTimeoutMs?: number;
   readonly writeSettlementTimeoutMs?: number;
   readonly freshConversationTimeoutMs?: number;
@@ -62,6 +65,7 @@ function operationAborted(signal?: AbortSignal): OperationAbortedError {
 }
 
 export class TurnExecutor {
+  private readonly commandTimeoutMs: number;
   private readonly writeObservationTimeoutMs: number;
   private readonly writeSettlementTimeoutMs: number;
   private readonly freshConversationTimeoutMs: number;
@@ -76,6 +80,10 @@ export class TurnExecutor {
     private readonly cdp: TurnCdpPort,
     options: TurnExecutorOptions = {},
   ) {
+    this.commandTimeoutMs = positiveFinite(
+      options.commandTimeoutMs ?? DEFAULT_TURN_COMMAND_TIMEOUT_MS,
+      "commandTimeoutMs",
+    );
     this.writeObservationTimeoutMs = positiveFinite(
       options.writeObservationTimeoutMs ?? DEFAULT_TURN_WRITE_OBSERVATION_TIMEOUT_MS,
       "writeObservationTimeoutMs",
@@ -123,7 +131,13 @@ export class TurnExecutor {
 
     try {
       await this.preflight.waitForTurnComposer(expectedRoute, lease, signal);
-      const composer = await this.cdp.getTurnComposerState(lease);
+      const composer = await withTimeout(
+        async () => await this.cdp.getTurnComposerState(lease),
+        this.commandTimeoutMs,
+        signal
+          ? { signal, message: "Timed out revalidating the turn composer." }
+          : { message: "Timed out revalidating the turn composer." },
+      );
       if (!composer.eligible || !composer.focused || !composer.empty) {
         throw new TurnInputFailedError();
       }
@@ -152,21 +166,29 @@ export class TurnExecutor {
       throwIfAborted(signal);
 
       try {
-        await this.cdp.insertText(text, lease);
+        await withTimeout(
+          async () => await this.cdp.insertText(text, lease),
+          this.commandTimeoutMs,
+          { message: "Timed out waiting for the CDP input command." },
+        );
         committed = true;
         callerCancelled = signal?.aborted ?? false;
       } catch (error) {
         if (error instanceof RuntimeGenerationChangedError) {
           throw error;
         }
-        if (error instanceof CdpDisconnectedError) {
+        if (error instanceof CdpDisconnectedError || error instanceof OperationTimeoutError) {
           this.failClosed(lease, error);
         }
         throw new TurnInputFailedError(undefined, { cause: error });
       }
 
       try {
-        await this.cdp.dispatchEnterKeyDown(lease);
+        await withTimeout(
+          async () => await this.cdp.dispatchEnterKeyDown(lease),
+          this.commandTimeoutMs,
+          { message: "Timed out waiting for Enter keyDown." },
+        );
       } catch (error) {
         this.rethrowPostCommitCommand(error, lease);
         inputFailure = new TurnInputFailedError(undefined, { cause: error });
@@ -174,7 +196,11 @@ export class TurnExecutor {
 
       if (inputFailure === null) {
         try {
-          await this.cdp.dispatchEnterKeyUp(lease);
+          await withTimeout(
+            async () => await this.cdp.dispatchEnterKeyUp(lease),
+            this.commandTimeoutMs,
+            { message: "Timed out waiting for Enter keyUp." },
+          );
         } catch (error) {
           this.rethrowPostCommitCommand(error, lease);
           inputFailure = new TurnInputFailedError(undefined, { cause: error });
@@ -229,19 +255,19 @@ export class TurnExecutor {
 
       if (target.kind === "FRESH" && freshLocator === null) {
         try {
-          freshLocator = await this.cdp.getCurrentConversationLocator(lease);
+          freshLocator = await withTimeout(
+            async () => await this.cdp.getCurrentConversationLocator(lease),
+            this.commandTimeoutMs,
+            { message: "Timed out observing the resulting conversation route." },
+          );
         } catch (error) {
           if (error instanceof RuntimeGenerationChangedError) {
             throw error;
           }
-          if (error instanceof CdpDisconnectedError) {
-            if (snapshot.write.lifecycle === "ACTIVE") {
-              this.failClosed(lease, error);
-            }
-            lastFreshRouteError = error;
-          } else {
-            lastFreshRouteError = error;
+          if (error instanceof CdpDisconnectedError && snapshot.write.lifecycle === "ACTIVE") {
+            this.failClosed(lease, error);
           }
+          lastFreshRouteError = error;
         }
       }
 
@@ -336,7 +362,7 @@ export class TurnExecutor {
     if (error instanceof RuntimeGenerationChangedError) {
       throw error;
     }
-    if (error instanceof CdpDisconnectedError) {
+    if (error instanceof CdpDisconnectedError || error instanceof OperationTimeoutError) {
       this.failClosed(lease, error);
     }
   }
