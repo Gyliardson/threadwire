@@ -114,4 +114,4 @@ Do not commit or upload real secrets, HAR files, authenticated browser profiles,
 
 ## License
 
-No open-source license has been selected yet. A `LICENSE` file is a required pre-publication gate; do not assume reuse rights until one is added.
+Threadwire is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
