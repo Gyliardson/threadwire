@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CdpResponseObservationHandle,
   CdpTurnComposerState,
   CdpTurnObservationHandle,
   CdpTurnObservationSnapshot,
@@ -32,7 +31,6 @@ function deferred<T>(): Deferred<T> {
 }
 
 const observationHandle = Object.freeze({}) as unknown as CdpTurnObservationHandle;
-const responseHandle = Object.freeze({}) as unknown as CdpResponseObservationHandle;
 
 class NoopPreflight implements TurnComposerPreflightPort {
   public async waitForTurnComposer(
@@ -70,10 +68,7 @@ class BlockingCompositionCdp implements TurnCdpPort {
   ): CdpTurnObservationSnapshot {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     this.observationReads += 1;
-    return Object.freeze({
-      prepareCount: 0,
-      write: Object.freeze({ responseHandle, lifecycle: "FINISHED" as const }),
-    });
+    return Object.freeze({ prepareCount: 0, write: null });
   }
 
   public releaseTurnObservation(_handle: CdpTurnObservationHandle): void {}
@@ -140,5 +135,5 @@ test("abort while successful composition is completing releases an already queue
   assert.equal(routeRan, true);
   assert.equal(cdp.keyDownCalls, 0);
   assert.equal(cdp.keyUpCalls, 0);
-  assert.equal(cdp.observationReads, 0, "composition-only abort must not wait for a fictitious write lifecycle");
+  assert.equal(cdp.observationReads, 1, "pre-submit safety check proves that no write was observed");
 });
