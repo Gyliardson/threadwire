@@ -308,3 +308,101 @@ test("routeFresh never invokes existing readiness", async () => {
   await router.routeFresh();
   assert.equal(readiness.existingCalls, 0);
 });
+
+// M4 ROUTEFRESH TESTS
+
+test("routeFresh calls fresh readiness exactly once and returns FRESH without allocating a handle", async () => {
+  const { router, readiness, registry } = createHarness();
+  const initialThreads = registry.knownThreads();
+  const result = await router.routeFresh();
+  
+  assert.equal(readiness.freshCalls, 1);
+  assert.equal(readiness.existingCalls, 0);
+  assert.deepEqual(result, { kind: "FRESH" });
+  assert.deepEqual(registry.knownThreads(), initialThreads);
+});
+
+test("routeFresh does not settle while fresh readiness is blocked", async () => {
+  const { router, readiness } = createHarness();
+  const gate = deferred<void>();
+  readiness.block = gate;
+  
+  let settled = false;
+  const p = router.routeFresh().then(() => { settled = true; });
+  
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  
+  gate.resolve();
+  await p;
+  assert.equal(settled, true);
+});
+
+test("routeFresh holds the ROUTE slot and blocks a second ROUTE until fresh readiness releases", async () => {
+  const { router, readiness, handleA } = createHarness();
+  const gate = deferred<void>();
+  readiness.block = gate;
+  
+  const p1 = router.routeFresh();
+  const p2 = router.routeToThread(handleA);
+  
+  await new Promise((resolve) => setImmediate(resolve));
+  // p1 is stuck in fresh readiness, so p2 hasn't reached existing readiness yet
+  assert.equal(readiness.freshCalls, 1);
+  assert.equal(readiness.existingCalls, 0);
+  
+  gate.resolve();
+  await Promise.all([p1, p2]);
+  
+  assert.equal(readiness.existingCalls, 1);
+});
+
+test("a TURN queued behind routeFresh cannot execute early", async () => {
+  const { router, scheduler, readiness } = createHarness();
+  const gate = deferred<void>();
+  readiness.block = gate;
+  
+  let turnExecuted = false;
+  const p1 = router.routeFresh();
+  const p2 = scheduler.schedule("TURN", async () => { turnExecuted = true; });
+  
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(turnExecuted, false);
+  
+  gate.resolve();
+  await Promise.all([p1, p2]);
+  
+  assert.equal(turnExecuted, true);
+});
+
+test("fresh readiness failure releases scheduler for later work", async () => {
+  const { router, scheduler, readiness } = createHarness();
+  readiness.failure = new Error("fresh fail");
+  
+  await assert.rejects(router.routeFresh(), /fresh fail/);
+  
+  let laterRan = false;
+  await scheduler.schedule("TURN", async () => { laterRan = true; });
+  assert.equal(laterRan, true);
+});
+
+test("stale queued routeFresh rejects before navigation or readiness when generation changes", async () => {
+  const { router, runtime, scheduler, readiness, navigation } = createHarness();
+  
+  // Block the scheduler with a TURN
+  const turnGate = deferred<void>();
+  const turn = scheduler.schedule("TURN", async () => turnGate.promise);
+  
+  const routeP = router.routeFresh();
+  
+  // Advance generation before ROUTE slot is acquired
+  runtime.observe({ pid: 101, creationTime: "runtime-b" });
+  turnGate.resolve();
+  
+  await turn;
+  await assert.rejects(routeP, RuntimeGenerationChangedError);
+  
+  assert.equal(navigation.urls.length, 0);
+  assert.equal(readiness.freshCalls, 0);
+});
+

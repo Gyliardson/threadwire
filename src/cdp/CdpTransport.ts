@@ -1,4 +1,4 @@
-import { ConversationLocator } from "../domain/ThreadIdentity.js";
+
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { CdpTargetInfo } from "./types.js";
 

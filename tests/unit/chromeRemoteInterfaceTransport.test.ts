@@ -128,8 +128,39 @@ test("main-frame route is normalized internally without exposing current URL or 
   const snapshot = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
   assert.equal(snapshot.mainFrame.expectedRoute, true);
   const serialized = JSON.stringify(snapshot);
-  assert.equal(serialized.includes("synthetic-a"), false);
   assert.equal(serialized.includes("locator_canary"), false);
+  assert.equal(serialized.includes("synthetic-a"), false);
+});
+
+test("FRESH_ROOT route matching semantics", async () => {
+  const { client, session } = await createSession();
+  await session.initializeReadinessObservation();
+
+  // Canonical root matches
+  client.frame.url = "https://chatgpt.com/";
+  let snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
+  assert.equal(snapshot.mainFrame.expectedRoute, true);
+
+  // Root with query/fragment matches, but does not leak
+  client.frame.url = "https://chatgpt.com/?synthetic=1#fragment";
+  snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
+  assert.equal(snapshot.mainFrame.expectedRoute, true);
+  assert.equal(JSON.stringify(snapshot).includes("synthetic=1"), false);
+
+  // Thread locator URL does NOT match FRESH_ROOT
+  client.frame.url = "https://chatgpt.com/c/synthetic";
+  snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
+  assert.equal(snapshot.mainFrame.expectedRoute, false);
+
+  // Other synthetic pathnames do NOT match FRESH_ROOT
+  client.frame.url = "https://chatgpt.com/g/g-some-gpt";
+  snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
+  assert.equal(snapshot.mainFrame.expectedRoute, false);
+
+  // THREAD expectation works with thread locator URL
+  client.frame.url = "https://chatgpt.com/c/synthetic-a";
+  snapshot = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
+  assert.equal(snapshot.mainFrame.expectedRoute, true);
 });
 
 test("wrong and transient main-frame routes are simply not ready", async () => {

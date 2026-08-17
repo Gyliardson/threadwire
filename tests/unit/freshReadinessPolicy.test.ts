@@ -116,3 +116,66 @@ test("resets if frame changes during guard", () => {
   time += DEFAULT_FRESH_GUARD_DURATION_MS;
   assert.deepEqual(gate.observe(frameChangedSnapshot), { kind: "READY" });
 });
+
+test("wrong fresh route prevents readiness", () => {
+  const policy = new FreshReadinessPolicy();
+  const gate = policy.createGate();
+  assert.deepEqual(gate.observe(createSnapshot(false, 1, true, 1)), { kind: "WAIT" });
+});
+
+test("zero eligible editables prevents readiness", () => {
+  const policy = new FreshReadinessPolicy();
+  const gate = policy.createGate();
+  const snapshot = createSnapshot(true, 0, false, 1);
+  assert.deepEqual(gate.observe(snapshot), { kind: "WAIT" });
+  assert.deepEqual(gate.observe(snapshot), { kind: "WAIT" });
+});
+
+test("multiple eligible editables prevent readiness", () => {
+  const policy = new FreshReadinessPolicy();
+  const gate = policy.createGate();
+  const snapshot = createSnapshot(true, 2, true, 1);
+  assert.deepEqual(gate.observe(snapshot), { kind: "WAIT" });
+  assert.deepEqual(gate.observe(snapshot), { kind: "WAIT" });
+});
+
+test("continuously changing activityEpoch never reaches READY", () => {
+  const policy = new FreshReadinessPolicy();
+  const gate = policy.createGate();
+  let epoch = 1;
+  assert.deepEqual(gate.observe(createSnapshot(true, 1, true, epoch)), { kind: "WAIT" });
+  assert.deepEqual(gate.observe(createSnapshot(true, 1, true, epoch)), { kind: "FOCUS", backendDOMNodeId: 42 });
+  
+  for (let i = 0; i < 10; i++) {
+    epoch++;
+    assert.deepEqual(gate.observe(createSnapshot(true, 1, true, epoch)), { kind: "WAIT" });
+  }
+});
+
+test("activeCount > 0 with stable epoch can reach fresh READY", () => {
+  let time = 1000;
+  const policy = new FreshReadinessPolicy({ clock: () => time });
+  const gate = policy.createGate();
+  const snapshot = createSnapshot(true, 1, true, 1);
+  // Add activeCount
+  const activeSnapshot = { ...snapshot, backendActivity: { activeCount: 5, activityEpoch: 1 } };
+  
+  stabilizeInnerGate(gate, activeSnapshot);
+  time += DEFAULT_FRESH_GUARD_DURATION_MS;
+  assert.deepEqual(gate.observe(activeSnapshot), { kind: "READY" });
+});
+
+test("configurable guard duration is honored", () => {
+  let time = 1000;
+  const policy = new FreshReadinessPolicy({ clock: () => time, guardDurationMs: 2000 });
+  const gate = policy.createGate();
+  const snapshot = createSnapshot(true, 1, true, 1);
+
+  stabilizeInnerGate(gate, snapshot);
+
+  time += 1999;
+  assert.deepEqual(gate.observe(snapshot), { kind: "WAIT" });
+
+  time += 1;
+  assert.deepEqual(gate.observe(snapshot), { kind: "READY" });
+});

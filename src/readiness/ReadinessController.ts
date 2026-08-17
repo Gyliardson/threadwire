@@ -11,7 +11,7 @@ import {
 import { delay, throwIfAborted } from "../utils/timeout.js";
 import { ExistingReadinessPolicy } from "./ExistingReadinessPolicy.js";
 import { FreshReadinessPolicy } from "./FreshReadinessPolicy.js";
-import { ExistingReadinessObservationPort, RouteExpectation } from "./types.js";
+import { ExistingReadinessObservationPort, ReadinessGate, RouteExpectation } from "./types.js";
 
 export const DEFAULT_EXISTING_READINESS_TIMEOUT_MS = 20_000;
 export const DEFAULT_EXISTING_READINESS_POLL_INTERVAL_MS = 100;
@@ -53,7 +53,7 @@ function createDeadlineSignal(
   parent?: AbortSignal,
 ): DeadlineSignal {
   const controller = new AbortController();
-  const timeoutError = new OperationTimeoutError("Timed out waiting for existing-route readiness.");
+  const timeoutError = new OperationTimeoutError("Timed out waiting for route readiness.");
   const timer = scheduler.schedule(() => controller.abort(timeoutError), timeoutMs);
 
   const onParentAbort = (): void => {
@@ -143,7 +143,7 @@ export class ReadinessController {
   }
 
   private async waitForRoute(
-    gate: { observe(snapshot: any): { kind: string; backendDOMNodeId?: number } },
+    gate: ReadinessGate,
     expectedRoute: RouteExpectation,
     lease: RuntimeLease,
     signal?: AbortSignal,
@@ -167,7 +167,7 @@ export class ReadinessController {
 
         if (action.kind === "FOCUS") {
           await this.observation.focusBackendNode(
-            action.backendDOMNodeId!,
+            action.backendDOMNodeId,
             lease,
             deadline.signal,
           );

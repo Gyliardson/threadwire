@@ -1,5 +1,5 @@
 import { ExistingReadinessAction, ExistingReadinessGate, ExistingReadinessPolicy, ExistingReadinessPolicyOptions } from "./ExistingReadinessPolicy.js";
-import { ExistingReadinessSnapshot } from "./types.js";
+import { ExistingReadinessSnapshot, ReadinessGate } from "./types.js";
 
 export const DEFAULT_FRESH_GUARD_DURATION_MS = 500;
 
@@ -38,7 +38,7 @@ export class FreshReadinessPolicy {
   }
 }
 
-export class FreshReadinessGate {
+export class FreshReadinessGate implements ReadinessGate {
   private guardStartTime: number | null = null;
 
   public constructor(

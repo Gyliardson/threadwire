@@ -27,6 +27,15 @@ export interface ExistingReadinessSnapshot {
   readonly backendActivity: ReadinessBackendActivity;
 }
 
+export type ReadinessAction =
+  | Readonly<{ kind: "WAIT" }>
+  | Readonly<{ kind: "FOCUS"; backendDOMNodeId: number }>
+  | Readonly<{ kind: "READY" }>;
+
+export interface ReadinessGate {
+  observe(snapshot: ExistingReadinessSnapshot): ReadinessAction;
+}
+
 export interface ExistingReadinessObservationPort {
   getReadinessSnapshot(
     expectedRoute: RouteExpectation,
