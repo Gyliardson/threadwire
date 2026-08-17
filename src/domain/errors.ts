@@ -17,13 +17,15 @@ export type ThreadwireErrorCode =
   | "CDP_ATTACH_FAILED"
   | "CDP_DISCONNECTED"
   | "CDP_NAVIGATION_FAILED"
+  | "CDP_READINESS_FAILED"
   | "RUNTIME_GENERATION_CHANGED"
   | "OPERATION_TIMEOUT"
   | "OPERATION_ABORTED"
   | "CONVERSATION_LOCATOR_INVALID"
   | "THREAD_NOT_FOUND"
   | "THREAD_HANDLE_COLLISION"
-  | "ROUTE_NAVIGATION_FAILED";
+  | "ROUTE_NAVIGATION_FAILED"
+  | "EXISTING_ROUTE_READINESS_TIMEOUT";
 
 export class ThreadwireError extends Error {
   public readonly code: ThreadwireErrorCode;
@@ -161,6 +163,13 @@ export class CdpNavigationFailedError extends ThreadwireError {
   }
 }
 
+export class CdpReadinessFailedError extends ThreadwireError {
+  constructor(message: string = "CDP existing-route readiness observation failed.", options?: ErrorOptions) {
+    super(message, "CDP_READINESS_FAILED", options);
+    this.name = "CdpReadinessFailedError";
+  }
+}
+
 export class RuntimeGenerationChangedError extends ThreadwireError {
   constructor(message: string = "The ChatGPT Classic runtime generation changed during the operation.", options?: ErrorOptions) {
     super(message, "RUNTIME_GENERATION_CHANGED", options);
@@ -207,5 +216,12 @@ export class RouteNavigationFailedError extends ThreadwireError {
   constructor(message: string = "Threadwire route navigation failed.", options?: ErrorOptions) {
     super(message, "ROUTE_NAVIGATION_FAILED", options);
     this.name = "RouteNavigationFailedError";
+  }
+}
+
+export class ExistingRouteReadinessTimeoutError extends ThreadwireError {
+  constructor(message: string = "Existing conversation route did not become ready before the deadline.", options?: ErrorOptions) {
+    super(message, "EXISTING_ROUTE_READINESS_TIMEOUT", options);
+    this.name = "ExistingRouteReadinessTimeoutError";
   }
 }

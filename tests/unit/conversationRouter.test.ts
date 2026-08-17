@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  RuntimeGenerationTracker,
+  RuntimeLease,
+} from "../../src/domain/RuntimeGeneration.js";
 import { ThreadHandle, createConversationLocator } from "../../src/domain/ThreadIdentity.js";
 import {
+  ExistingRouteReadinessTimeoutError,
   RouteNavigationFailedError,
   RuntimeGenerationChangedError,
   ThreadNotFoundError,
@@ -10,10 +15,10 @@ import {
   CHATGPT_FRESH_ROUTE,
   ConversationNavigationPort,
   ConversationRouter,
+  ExistingRouteReadinessPort,
 } from "../../src/routing/ConversationRouter.js";
 import { OperationScheduler } from "../../src/routing/OperationScheduler.js";
 import { ThreadRegistry } from "../../src/routing/ThreadRegistry.js";
-import { RuntimeGenerationTracker } from "../../src/domain/RuntimeGeneration.js";
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -38,9 +43,15 @@ class RecordingNavigation implements ConversationNavigationPort {
   public readonly urls: string[] = [];
   public failure: Error | null = null;
   public block: Deferred<void> | null = null;
+  public readonly events: string[];
+
+  public constructor(events: string[] = []) {
+    this.events = events;
+  }
 
   public async navigate(url: string): Promise<void> {
     this.urls.push(url);
+    this.events.push("navigate");
     if (this.failure) {
       throw this.failure;
     }
@@ -52,14 +63,46 @@ class RecordingNavigation implements ConversationNavigationPort {
   }
 }
 
+class ControlledReadiness implements ExistingRouteReadinessPort {
+  public calls = 0;
+  public block: Deferred<void> | null = null;
+  public failure: Error | null = null;
+  public readonly leases: RuntimeLease[] = [];
+  public readonly events: string[];
+
+  public constructor(events: string[] = []) {
+    this.events = events;
+  }
+
+  public async waitForExistingRoute(
+    _expectedLocator: ReturnType<typeof createConversationLocator>,
+    lease: RuntimeLease,
+  ): Promise<void> {
+    this.calls += 1;
+    this.leases.push(lease);
+    this.events.push("readiness");
+    if (this.failure) {
+      throw this.failure;
+    }
+    if (this.block) {
+      const gate = this.block;
+      this.block = null;
+      await gate.promise;
+    }
+    this.events.push("ready");
+  }
+}
+
 function createHarness(): {
   readonly runtime: RuntimeGenerationTracker;
   readonly scheduler: OperationScheduler;
   readonly registry: ThreadRegistry;
   readonly navigation: RecordingNavigation;
+  readonly readiness: ControlledReadiness;
   readonly router: ConversationRouter;
   readonly handleA: ThreadHandle;
   readonly handleB: ThreadHandle;
+  readonly events: string[];
 } {
   const runtime = createRuntime();
   const scheduler = new OperationScheduler(runtime);
@@ -72,15 +115,18 @@ function createHarness(): {
   });
   const handleA = registry.register(createConversationLocator("https://chatgpt.com/c/synthetic-a"));
   const handleB = registry.register(createConversationLocator("https://chatgpt.com/c/synthetic-b"));
-  const navigation = new RecordingNavigation();
-  const router = new ConversationRouter(registry, scheduler, navigation);
-  return { runtime, scheduler, registry, navigation, router, handleA, handleB };
+  const events: string[] = [];
+  const navigation = new RecordingNavigation(events);
+  const readiness = new ControlledReadiness(events);
+  const router = new ConversationRouter(registry, scheduler, navigation, readiness);
+  return { runtime, scheduler, registry, navigation, readiness, router, handleA, handleB, events };
 }
 
 test("unknown ThreadHandle performs no navigation", async () => {
-  const { router, navigation } = createHarness();
+  const { router, navigation, readiness } = createHarness();
   await assert.rejects(router.routeToThread("tw_unknown" as ThreadHandle), ThreadNotFoundError);
   assert.deepEqual(navigation.urls, []);
+  assert.equal(readiness.calls, 0);
 });
 
 test("known existing thread resolves internally and outward result contains only the opaque handle", async () => {
@@ -104,13 +150,20 @@ test("routeFresh navigates to root and allocates no ThreadHandle", async () => {
   registry.register(createConversationLocator("https://chatgpt.com/c/synthetic-existing"));
   const before = handleCalls;
   const navigation = new RecordingNavigation();
-  const router = new ConversationRouter(registry, new OperationScheduler(runtime), navigation);
+  const readiness = new ControlledReadiness();
+  const router = new ConversationRouter(
+    registry,
+    new OperationScheduler(runtime),
+    navigation,
+    readiness,
+  );
 
   const result = await router.routeFresh();
   assert.deepEqual(result, { kind: "FRESH" });
   assert.deepEqual(navigation.urls, [CHATGPT_FRESH_ROUTE]);
   assert.equal(handleCalls, before);
   assert.equal("threadHandle" in result, false);
+  assert.equal(readiness.calls, 0);
 });
 
 test("concurrent route requests are serialized through the shared scheduler", async () => {
@@ -145,7 +198,7 @@ test("route waits behind an active synthetic TURN and then navigates when genera
 });
 
 test("stale queued route rejects before navigation", async () => {
-  const { runtime, router, scheduler, navigation, handleA } = createHarness();
+  const { runtime, router, scheduler, navigation, readiness, handleA } = createHarness();
   const turnGate = deferred<void>();
   const turn = scheduler.schedule("TURN", async () => await turnGate.promise);
   const route = router.routeToThread(handleA);
@@ -155,10 +208,11 @@ test("stale queued route rejects before navigation", async () => {
   await turn;
   await assert.rejects(route, RuntimeGenerationChangedError);
   assert.deepEqual(navigation.urls, []);
+  assert.equal(readiness.calls, 0);
 });
 
 test("navigation failure is normalized without locator or upstream error leakage", async () => {
-  const { router, navigation, handleA } = createHarness();
+  const { router, navigation, readiness, handleA } = createHarness();
   navigation.failure = new Error("upstream synthetic-a secret detail");
 
   await assert.rejects(
@@ -169,11 +223,81 @@ test("navigation failure is normalized without locator or upstream error leakage
       !error.message.includes("synthetic-a") &&
       !error.message.includes("secret detail"),
   );
+  assert.equal(readiness.calls, 0);
 });
 
-test("router completes when the navigation command completes and performs no readiness phase", async () => {
-  const { router, navigation, handleA } = createHarness();
-  const result = await router.routeToThread(handleA);
-  assert.equal(navigation.urls.length, 1);
-  assert.deepEqual(result, { kind: "THREAD", threadHandle: handleA });
+test("existing route success boundary is navigation followed by readiness completion", async () => {
+  const { router, navigation, readiness, events, handleA } = createHarness();
+  const readinessGate = deferred<void>();
+  readiness.block = readinessGate;
+  let settled = false;
+
+  const route = router.routeToThread(handleA).then((result) => {
+    settled = true;
+    return result;
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(navigation.urls, ["https://chatgpt.com/c/synthetic-a"]);
+  assert.deepEqual(events, ["navigate", "readiness"]);
+  assert.equal(settled, false);
+
+  readinessGate.resolve();
+  assert.deepEqual(await route, { kind: "THREAD", threadHandle: handleA });
+  assert.equal(settled, true);
+  assert.deepEqual(events, ["navigate", "readiness", "ready"]);
+});
+
+test("concurrent second route waits until first route readiness releases the ROUTE slot", async () => {
+  const { router, navigation, readiness, handleA, handleB } = createHarness();
+  const readinessGate = deferred<void>();
+  readiness.block = readinessGate;
+
+  const first = router.routeToThread(handleA);
+  const second = router.routeToThread(handleB);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(navigation.urls, ["https://chatgpt.com/c/synthetic-a"]);
+  readinessGate.resolve();
+  await Promise.all([first, second]);
+  assert.deepEqual(navigation.urls, [
+    "https://chatgpt.com/c/synthetic-a",
+    "https://chatgpt.com/c/synthetic-b",
+  ]);
+});
+
+test("synthetic TURN queued behind existing route waits for readiness", async () => {
+  const { router, scheduler, readiness, handleA } = createHarness();
+  const readinessGate = deferred<void>();
+  readiness.block = readinessGate;
+  const events: string[] = [];
+
+  const route = router.routeToThread(handleA);
+  const turn = scheduler.schedule("TURN", async () => {
+    events.push("turn");
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, []);
+
+  readinessGate.resolve();
+  await Promise.all([route, turn]);
+  assert.deepEqual(events, ["turn"]);
+});
+
+test("readiness failure releases scheduler so later work can continue", async () => {
+  const { router, scheduler, readiness, handleA } = createHarness();
+  readiness.failure = new ExistingRouteReadinessTimeoutError();
+
+  await assert.rejects(router.routeToThread(handleA), ExistingRouteReadinessTimeoutError);
+  let laterRan = false;
+  await scheduler.schedule("TURN", async () => {
+    laterRan = true;
+  });
+  assert.equal(laterRan, true);
+});
+
+test("routeFresh never invokes existing readiness", async () => {
+  const { router, readiness } = createHarness();
+  await router.routeFresh();
+  assert.equal(readiness.calls, 0);
 });

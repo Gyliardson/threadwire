@@ -1,4 +1,5 @@
 import { ControllerConfig } from "../config/ControllerConfig.js";
+import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import {
   RuntimeGeneration,
   RuntimeLease,
@@ -10,10 +11,12 @@ import {
   CdpAttachFailedError,
   CdpDisconnectedError,
   CdpNavigationFailedError,
+  CdpReadinessFailedError,
   OperationAbortedError,
   RuntimeGenerationChangedError,
   ThreadwireError,
 } from "../domain/errors.js";
+import { ExistingReadinessSnapshot } from "../readiness/types.js";
 import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
@@ -73,7 +76,9 @@ export class CdpSessionManager {
       await this.disposeSession();
     } catch (error) {
       this.currentState = "FAILED";
-      throw new CdpDisconnectedError("Failed to replace the previous CDP session cleanly.", { cause: error });
+      throw new CdpDisconnectedError("Failed to replace the previous CDP session cleanly.", {
+        cause: error,
+      });
     }
     this.currentState = "DISCOVERING";
 
@@ -91,14 +96,31 @@ export class CdpSessionManager {
             signal: attachSignal,
           }),
         this.attachTimeoutMs,
-        signal ? { signal, message: "Timed out attaching to the selected CDP target." } : { message: "Timed out attaching to the selected CDP target." },
+        signal
+          ? { signal, message: "Timed out attaching to the selected CDP target." }
+          : { message: "Timed out attaching to the selected CDP target." },
       );
 
       try {
         this.runtime.assertRuntimeLeaseCurrent(lease);
+        await withTimeout(
+          async (readinessSignal) => {
+            throwIfAborted(readinessSignal);
+            await session.initializeReadinessObservation();
+            throwIfAborted(readinessSignal);
+          },
+          this.attachTimeoutMs,
+          signal
+            ? { signal, message: "Timed out initializing CDP readiness observation." }
+            : { message: "Timed out initializing CDP readiness observation." },
+        );
+        this.runtime.assertRuntimeLeaseCurrent(lease);
       } catch (error) {
         await session.close().catch(() => undefined);
-        throw error;
+        if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+          throw error;
+        }
+        throw new CdpReadinessFailedError(undefined, { cause: error });
       }
 
       this.session = session;
@@ -156,6 +178,151 @@ export class CdpSessionManager {
     } catch (error) {
       throw new CdpNavigationFailedError(undefined, { cause: error });
     }
+  }
+
+  public async getReadinessSnapshot(
+    expectedLocator: ConversationLocator,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<ExistingReadinessSnapshot> {
+    throwIfAborted(signal);
+    const session = this.requireSessionForLease(lease);
+    try {
+      return await this.runReadinessSessionOperation(
+        session,
+        lease,
+        () => session.getReadinessSnapshot(expectedLocator),
+        signal,
+      );
+    } catch (error) {
+      this.rethrowReadinessLifecycleError(error, session, lease, signal);
+    }
+  }
+
+  public async focusBackendNode(
+    backendDOMNodeId: number,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!Number.isSafeInteger(backendDOMNodeId) || backendDOMNodeId <= 0) {
+      throw new CdpReadinessFailedError();
+    }
+
+    throwIfAborted(signal);
+    const session = this.requireSessionForLease(lease);
+    try {
+      await this.runReadinessSessionOperation(
+        session,
+        lease,
+        () => session.focusBackendNode(backendDOMNodeId),
+        signal,
+      );
+    } catch (error) {
+      this.rethrowReadinessLifecycleError(error, session, lease, signal);
+    }
+  }
+
+  private async runReadinessSessionOperation<T>(
+    session: CdpTransportSession,
+    lease: RuntimeLease,
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    this.assertSessionForLeaseCurrent(session, lease);
+    throwIfAborted(signal);
+
+    const operationPromise = operation();
+    if (!signal) {
+      const result = await operationPromise;
+      this.assertSessionForLeaseCurrent(session, lease);
+      return result;
+    }
+
+    let onAbort: (() => void) | null = null;
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        this.invalidateSessionAfterInFlightAbort(session);
+        try {
+          throwIfAborted(signal);
+          reject(new OperationAbortedError());
+        } catch (error) {
+          reject(error);
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+
+    try {
+      const result = await Promise.race([operationPromise, abortPromise]);
+      throwIfAborted(signal);
+      this.assertSessionForLeaseCurrent(session, lease);
+      return result;
+    } finally {
+      if (onAbort) {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
+  }
+
+  private invalidateSessionAfterInFlightAbort(session: CdpTransportSession): void {
+    if (this.session !== session) {
+      return;
+    }
+
+    this.unsubscribeDisconnect?.();
+    this.unsubscribeDisconnect = null;
+    this.session = null;
+    this.boundLease = null;
+    this.selectedTargetId = null;
+    this.currentState = "DISCONNECTED";
+    void session.close().catch(() => undefined);
+  }
+
+  private requireSessionForLease(lease: RuntimeLease): CdpTransportSession {
+    this.runtime.assertRuntimeLeaseCurrent(lease);
+    if (this.currentState !== "CONNECTED" || this.boundLease === null || this.session === null) {
+      throw new CdpDisconnectedError();
+    }
+    if (!sameRuntimeLease(this.boundLease, lease)) {
+      throw new RuntimeGenerationChangedError();
+    }
+    return this.session;
+  }
+
+  private assertSessionForLeaseCurrent(session: CdpTransportSession, lease: RuntimeLease): void {
+    this.runtime.assertRuntimeLeaseCurrent(lease);
+    if (
+      this.currentState !== "CONNECTED" ||
+      this.session !== session ||
+      this.boundLease === null
+    ) {
+      throw new CdpDisconnectedError();
+    }
+    if (!sameRuntimeLease(this.boundLease, lease)) {
+      throw new RuntimeGenerationChangedError();
+    }
+  }
+
+  private rethrowReadinessLifecycleError(
+    error: unknown,
+    session: CdpTransportSession,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): never {
+    throwIfAborted(signal);
+
+    this.assertSessionForLeaseCurrent(session, lease);
+
+    if (
+      error instanceof RuntimeGenerationChangedError ||
+      error instanceof OperationAbortedError ||
+      error instanceof CdpDisconnectedError ||
+      error instanceof CdpReadinessFailedError
+    ) {
+      throw error;
+    }
+
+    throw new CdpReadinessFailedError(undefined, { cause: error });
   }
 
   private async disposeSession(): Promise<void> {

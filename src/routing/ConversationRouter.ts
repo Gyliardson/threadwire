@@ -1,4 +1,9 @@
-import { CHATGPT_ORIGIN, ThreadHandle } from "../domain/ThreadIdentity.js";
+import {
+  CHATGPT_ORIGIN,
+  ConversationLocator,
+  ThreadHandle,
+} from "../domain/ThreadIdentity.js";
+import { RuntimeLease } from "../domain/RuntimeGeneration.js";
 import {
   OperationAbortedError,
   RouteNavigationFailedError,
@@ -13,7 +18,18 @@ export interface ConversationNavigationPort {
   navigate(url: string, signal?: AbortSignal): Promise<void>;
 }
 
-export type ExistingConversationRouteResult = Readonly<{ kind: "THREAD"; threadHandle: ThreadHandle }>;
+export interface ExistingRouteReadinessPort {
+  waitForExistingRoute(
+    expectedLocator: ConversationLocator,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void>;
+}
+
+export type ExistingConversationRouteResult = Readonly<{
+  kind: "THREAD";
+  threadHandle: ThreadHandle;
+}>;
 export type FreshConversationRouteResult = Readonly<{ kind: "FRESH" }>;
 export type ConversationRouteResult = ExistingConversationRouteResult | FreshConversationRouteResult;
 
@@ -22,14 +38,19 @@ export class ConversationRouter {
     private readonly registry: ThreadRegistry,
     private readonly scheduler: OperationScheduler,
     private readonly navigation: ConversationNavigationPort,
+    private readonly existingReadiness: ExistingRouteReadinessPort,
   ) {}
 
-  public async routeToThread(handle: ThreadHandle, signal?: AbortSignal): Promise<ExistingConversationRouteResult> {
+  public async routeToThread(
+    handle: ThreadHandle,
+    signal?: AbortSignal,
+  ): Promise<ExistingConversationRouteResult> {
     const locator = this.registry.resolve(handle);
     return await this.scheduler.schedule(
       "ROUTE",
-      async (operationSignal) => {
+      async (operationSignal, lease) => {
         await this.navigate(locator, operationSignal);
+        await this.existingReadiness.waitForExistingRoute(locator, lease, operationSignal);
         return Object.freeze({ kind: "THREAD" as const, threadHandle: handle });
       },
       signal ? { signal } : {},
