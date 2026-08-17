@@ -5,6 +5,8 @@ import {
   CdpTurnTransportSession,
 } from "../../src/cdp/CdpTransport.js";
 import { CdpTargetInfo } from "../../src/cdp/types.js";
+import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { RouteExpectation } from "../../src/readiness/types.js";
 
 const target: CdpTargetInfo = {
   id: "target-turn",
@@ -13,6 +15,10 @@ const target: CdpTargetInfo = {
   description: "",
   webSocketDebuggerUrl: "ws://127.0.0.1:9223/devtools/page/target-turn",
   url: "https://chatgpt.com/c/synthetic-turn",
+};
+const expectedRoute: RouteExpectation = {
+  kind: "THREAD",
+  locator: createConversationLocator("https://chatgpt.com/c/synthetic-turn"),
 };
 
 type RequestListener = (event: {
@@ -145,10 +151,15 @@ async function createSession(client = new FakeTurnCriClient()): Promise<{
   return { client, session };
 }
 
-test("turn composer state exposes only eligible/focused/empty booleans", async () => {
+test("turn composer state exposes route/eligible/focused/empty booleans only", async () => {
   const { client, session } = await createSession();
-  const empty = await session.getTurnComposerState();
-  assert.deepEqual(empty, { eligible: true, focused: true, empty: true });
+  const empty = await session.getTurnComposerState(expectedRoute);
+  assert.deepEqual(empty, {
+    expectedRoute: true,
+    eligible: true,
+    focused: true,
+    empty: true,
+  });
   assert.equal(JSON.stringify(empty).includes("ACCESSIBLE_NAME_SECRET"), false);
 
   client.axNodes = [
@@ -166,9 +177,19 @@ test("turn composer state exposes only eligible/focused/empty booleans", async (
       ],
     },
   ];
-  const nonEmpty = await session.getTurnComposerState();
-  assert.deepEqual(nonEmpty, { eligible: true, focused: true, empty: false });
+  const nonEmpty = await session.getTurnComposerState(expectedRoute);
+  assert.deepEqual(nonEmpty, {
+    expectedRoute: true,
+    eligible: true,
+    focused: true,
+    empty: false,
+  });
   assert.equal(JSON.stringify(nonEmpty).includes("ACCESSIBLE_VALUE_SECRET"), false);
+
+  client.frame.url = "https://chatgpt.com/c/synthetic-other";
+  const drifted = await session.getTurnComposerState(expectedRoute);
+  assert.equal(drifted.expectedRoute, false);
+  assert.equal(JSON.stringify(drifted).includes("synthetic-other"), false);
 });
 
 test("typed Input primitives preserve insertText then Enter keyDown/keyUp ordering", async () => {
