@@ -130,7 +130,11 @@ test("THREAD turn preflight preserves existing-route expectation semantics", asy
 
   assert.equal(observation.expectations.at(-1)?.kind, "THREAD");
   assert.equal(freshClockCalls, 0);
-  assert.equal(observation.focusCalls, 0);
+  assert.equal(
+    observation.focusCalls,
+    1,
+    "existing readiness adopts the unique backend node through its normal focus action",
+  );
 });
 
 test("fresh proof from an old runtime generation is never reused by the replacement runtime", async () => {
