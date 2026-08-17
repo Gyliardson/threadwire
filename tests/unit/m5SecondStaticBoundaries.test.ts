@@ -35,3 +35,12 @@ test("M5 transport contract contains no premature response-body ownership seam",
   assert.equal(contract.includes("getResponseBody"), false);
   assert.equal(contract.includes("streamResourceContent"), false);
 });
+
+test("M5 Input protocol failures are caught before raw CRI error objects leave the adapter", async () => {
+  const source = await readFile(
+    new URL("../../src/cdp/ChromeRemoteInterfaceTransport.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /Input\.insertText\(\{ text \}\);\s*\} catch \{/s);
+  assert.match(source, /Input\.dispatchKeyEvent\(\{[\s\S]*?\}\);\s*\} catch \{/);
+});
