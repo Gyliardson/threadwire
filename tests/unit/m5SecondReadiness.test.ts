@@ -131,7 +131,7 @@ test("non-ready M5 readiness deadline uses deterministic scheduling plus a macro
   const runtime = new RuntimeGenerationTracker();
   runtime.observe({ pid: 801, creationTime: "deadline-a" });
   const observation = new NeverReadyObservation();
-  let deadlineCallback: (() => void) | null = null;
+  let deadlineCallback: (() => void) | undefined;
   let deadlineCancelled = false;
 
   const controller = new ReadinessController(
@@ -156,10 +156,8 @@ test("non-ready M5 readiness deadline uses deterministic scheduling plus a macro
       },
       sleep: async () => {
         const callback = deadlineCallback;
-        if (callback !== null) {
-          deadlineCallback = null;
-          callback();
-        }
+        deadlineCallback = undefined;
+        callback?.();
         await new Promise<void>((resolve) => setImmediate(resolve));
       },
     },
