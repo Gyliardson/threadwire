@@ -112,6 +112,8 @@ Repository tests and mocks validate only the code paths they exercise; they do n
 
 Do not commit or upload real secrets, HAR files, authenticated browser profiles, raw network dumps, cookies, tokens, response bodies, or sensitive research artifacts. Treat every commit as potentially public.
 
+Before changing repository visibility, perform a final local scan of tracked, untracked, generated files, and Git history for sensitive material, and decide whether historical author metadata containing a personal email address should be rewritten.
+
 ## License
 
 Threadwire is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
