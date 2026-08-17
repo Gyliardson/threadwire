@@ -64,3 +64,11 @@ test("M5 CDP boundary adds no arbitrary send, reload, Runtime.evaluate, or respo
     assert.equal(combined.includes(forbidden), false, forbidden);
   }
 });
+
+test("route operations remain ROUTE and TurnExecutor owns TURN scheduling", async () => {
+  const router = await readFile(new URL("../../src/routing/ConversationRouter.ts", import.meta.url), "utf8");
+  const turnExecutor = await readFile(new URL("../../src/turn/TurnExecutor.ts", import.meta.url), "utf8");
+
+  assert.match(router, /schedule\(\s*"ROUTE"/);
+  assert.match(turnExecutor, /schedule\(\s*"TURN"/);
+});
