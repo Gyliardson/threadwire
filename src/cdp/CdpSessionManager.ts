@@ -244,9 +244,16 @@ export class CdpSessionManager {
     }
   }
 
-  public async getTurnComposerState(lease: RuntimeLease): Promise<CdpTurnComposerState> {
+  public async getTurnComposerState(
+    expectedRoute: RouteExpectation,
+    lease: RuntimeLease,
+  ): Promise<CdpTurnComposerState> {
     const session = this.requireTurnSessionForLease(lease);
-    return await this.runTurnSessionOperation(session, lease, () => session.getTurnComposerState());
+    return await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => session.getTurnComposerState(expectedRoute),
+    );
   }
 
   public armTurnObservation(lease: RuntimeLease): CdpTurnObservationHandle {
