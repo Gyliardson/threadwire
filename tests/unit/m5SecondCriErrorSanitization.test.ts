@@ -12,6 +12,7 @@ type ResponseListener = (event: { requestId: string; response: { status: number 
 type SettledListener = (event: { requestId: string }) => void;
 
 class ProtocolErrorCriClient {
+  public failEnter = false;
   private readonly disconnectListeners = new Set<() => void>();
 
   public readonly Page = {
@@ -55,7 +56,20 @@ class ProtocolErrorCriClient {
       });
       throw raw;
     },
-    dispatchKeyEvent: async (_params: Readonly<Record<string, unknown>>) => undefined,
+    dispatchKeyEvent: async (params: Readonly<Record<string, unknown>>) => {
+      if (!this.failEnter) {
+        return;
+      }
+      const raw = new Error("Protocol error (Input.dispatchKeyEvent)");
+      Object.defineProperty(raw, "request", {
+        value: {
+          method: "Input.dispatchKeyEvent",
+          params: { ...params, syntheticSensitiveField: "ENTER_PROTOCOL_SECRET" },
+        },
+        enumerable: true,
+      });
+      throw raw;
+    },
   };
 
   public async close(): Promise<void> {}
@@ -96,16 +110,19 @@ const target: CdpTargetInfo = {
   url: "https://chatgpt.com/c/m5-error-sanitization",
 };
 
-test("CRI insertText ProtocolError is replaced before leaving the transport adapter", async () => {
-  const transport = new ChromeRemoteInterfaceTransport({
-    connect: async () => new ProtocolErrorCriClient(),
-  });
+async function createSession(client: ProtocolErrorCriClient): Promise<CdpTurnTransportSession> {
+  const transport = new ChromeRemoteInterfaceTransport({ connect: async () => client });
   const session = (await transport.connect({
     host: "127.0.0.1",
     port: 9223,
     target,
   })) as CdpTurnTransportSession;
   await session.initializeReadinessObservation();
+  return session;
+}
+
+test("CRI insertText ProtocolError is replaced before leaving the transport adapter", async () => {
+  const session = await createSession(new ProtocolErrorCriClient());
 
   let captured: unknown;
   try {
@@ -116,5 +133,22 @@ test("CRI insertText ProtocolError is replaced before leaving the transport adap
 
   assert.ok(captured instanceof Error);
   assert.equal(graphContains(captured, "PROMPT_TEXT_SECRET"), false);
+  assert.equal("cause" in captured, false);
+});
+
+test("CRI Enter ProtocolError is replaced before leaving the transport adapter", async () => {
+  const client = new ProtocolErrorCriClient();
+  client.failEnter = true;
+  const session = await createSession(client);
+
+  let captured: unknown;
+  try {
+    await session.dispatchEnterKeyDown();
+  } catch (error) {
+    captured = error;
+  }
+
+  assert.ok(captured instanceof Error);
+  assert.equal(graphContains(captured, "ENTER_PROTOCOL_SECRET"), false);
   assert.equal("cause" in captured, false);
 });
