@@ -133,13 +133,13 @@ export class TurnExecutor {
     try {
       await this.preflight.waitForTurnComposer(expectedRoute, lease, signal);
       const composer = await withTimeout(
-        async () => await this.cdp.getTurnComposerState(lease),
+        async () => await this.cdp.getTurnComposerState(expectedRoute, lease),
         this.commandTimeoutMs,
         signal
           ? { signal, message: "Timed out revalidating the turn composer." }
           : { message: "Timed out revalidating the turn composer." },
       );
-      if (!composer.eligible || !composer.focused || !composer.empty) {
+      if (!composer.expectedRoute || !composer.eligible || !composer.focused || !composer.empty) {
         throw new TurnInputFailedError();
       }
     } catch (error) {
