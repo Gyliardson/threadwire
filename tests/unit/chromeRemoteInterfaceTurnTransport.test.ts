@@ -22,8 +22,8 @@ const expectedRoute: RouteExpectation = {
 type RequestPayload = {
   url: string;
   method: string;
-  headers?: Record<string, string>;
-  postData?: string;
+  headers: Record<string, string> | undefined;
+  postData: string | undefined;
 };
 type RequestListener = (event: {
   requestId: string;
