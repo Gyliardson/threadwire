@@ -1,6 +1,67 @@
+# Dependencies and build output
 node_modules/
 dist/
 coverage/
+.nyc_output/
+*.tsbuildinfo
+
+# Environment and logs
 .env
 .env.*
+!.env.example
 *.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Local Threadwire/runtime state
+.threadwire/
+.threadwire-local/
+tmp/
+.tmp/
+
+# Acceptance/research artifacts
+acceptance-artifacts/
+artifacts/
+traces/
+screenshots/
+network-dumps/
+research-dumps/
+
+# Browser/authenticated profile material
+profiles/
+profile/
+user-data/
+user_data/
+chrome-profile/
+chatgpt-profile/
+
+# Network/process dumps and captures
+*.har
+*.har.gz
+*.trace
+*.trace.zip
+*.pcap
+*.pcapng
+*.dmp
+*.dump
+
+# Local databases/session stores
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.ldb
+
+# Keys and certificate containers
+*.pem
+*.key
+*.p12
+*.pfx
+*.der
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
