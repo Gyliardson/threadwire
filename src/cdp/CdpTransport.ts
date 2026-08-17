@@ -1,5 +1,5 @@
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
-import { ExistingReadinessSnapshot } from "../readiness/types.js";
+import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { CdpTargetInfo } from "./types.js";
 
 export interface CdpTransportConnectOptions {
@@ -14,7 +14,7 @@ export interface CdpTransportSession {
   onDisconnect(listener: () => void): () => void;
   initializeReadinessObservation(): Promise<void>;
   navigate(url: string): Promise<void>;
-  getReadinessSnapshot(expectedLocator: ConversationLocator): Promise<ExistingReadinessSnapshot>;
+  getReadinessSnapshot(expectedRoute: RouteExpectation): Promise<ExistingReadinessSnapshot>;
   focusBackendNode(backendDOMNodeId: number): Promise<void>;
 }
 

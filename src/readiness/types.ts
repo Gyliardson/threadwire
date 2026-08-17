@@ -1,6 +1,10 @@
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import { RuntimeLease } from "../domain/RuntimeGeneration.js";
 
+export type RouteExpectation =
+  | Readonly<{ kind: "THREAD"; locator: ConversationLocator }>
+  | Readonly<{ kind: "FRESH_ROOT" }>;
+
 export interface ReadinessMainFrameState {
   readonly frameId: string;
   readonly loaderId: string;
@@ -25,7 +29,7 @@ export interface ExistingReadinessSnapshot {
 
 export interface ExistingReadinessObservationPort {
   getReadinessSnapshot(
-    expectedLocator: ConversationLocator,
+    expectedRoute: RouteExpectation,
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<ExistingReadinessSnapshot>;

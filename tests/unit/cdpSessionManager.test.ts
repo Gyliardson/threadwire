@@ -359,10 +359,10 @@ test("readiness snapshot delegates only while the captured RuntimeLease remains 
   await manager.connect();
   const lease = runtime.getCurrentRuntimeLease();
 
-  assert.deepEqual(await manager.getReadinessSnapshot(locator, lease), readySnapshot);
+  assert.deepEqual(await manager.getReadinessSnapshot({ kind: "THREAD", locator }, lease), readySnapshot);
   runtime.observe({ pid: 200, creationTime: "B" });
   await assert.rejects(
-    () => manager.getReadinessSnapshot(locator, lease),
+    () => manager.getReadinessSnapshot({ kind: "THREAD", locator }, lease),
     RuntimeGenerationChangedError,
   );
   assert.equal(transport.sessions[0]!.snapshotCalls, 1);
@@ -452,7 +452,7 @@ test("raw readiness CDP errors normalize without upstream detail leakage", async
   transport.sessions[0]!.readinessFailure = new Error("raw AX secret payload");
 
   await assert.rejects(
-    () => manager.getReadinessSnapshot(locator, lease),
+    () => manager.getReadinessSnapshot({ kind: "THREAD", locator }, lease),
     (error: unknown) =>
       error instanceof CdpReadinessFailedError &&
       !error.message.includes("raw AX secret payload"),

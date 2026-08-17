@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { withTimeout } from "../../src/utils/timeout.js";
 import {
   RuntimeGenerationTracker,
   RuntimeLease,
 } from "../../src/domain/RuntimeGeneration.js";
-import { ThreadHandle, createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { ThreadHandle, ConversationLocator, createConversationLocator } from "../../src/domain/ThreadIdentity.js";
 import {
   ExistingRouteReadinessTimeoutError,
   RouteNavigationFailedError,
@@ -14,8 +15,8 @@ import {
 import {
   CHATGPT_FRESH_ROUTE,
   ConversationNavigationPort,
+  ConversationReadinessPort,
   ConversationRouter,
-  ExistingRouteReadinessPort,
 } from "../../src/routing/ConversationRouter.js";
 import { OperationScheduler } from "../../src/routing/OperationScheduler.js";
 import { ThreadRegistry } from "../../src/routing/ThreadRegistry.js";
@@ -63,33 +64,39 @@ class RecordingNavigation implements ConversationNavigationPort {
   }
 }
 
-class ControlledReadiness implements ExistingRouteReadinessPort {
-  public calls = 0;
+class ControlledReadiness implements ConversationReadinessPort {
+  public existingCalls = 0;
+  public freshCalls = 0;
   public block: Deferred<void> | null = null;
   public failure: Error | null = null;
-  public readonly leases: RuntimeLease[] = [];
-  public readonly events: string[];
 
-  public constructor(events: string[] = []) {
-    this.events = events;
-  }
+  public constructor(private readonly events: string[] = []) {}
 
   public async waitForExistingRoute(
-    _expectedLocator: ReturnType<typeof createConversationLocator>,
-    lease: RuntimeLease,
+    _locator: ConversationLocator,
+    _lease: RuntimeLease,
+    signal?: AbortSignal,
   ): Promise<void> {
-    this.calls += 1;
-    this.leases.push(lease);
+    this.existingCalls += 1;
     this.events.push("readiness");
-    if (this.failure) {
-      throw this.failure;
-    }
+    if (this.failure) throw this.failure;
     if (this.block) {
-      const gate = this.block;
-      this.block = null;
-      await gate.promise;
+      await withTimeout(() => this.block!.promise, 5000, signal ? { signal } : {});
     }
     this.events.push("ready");
+  }
+
+  public async waitForFreshRoute(
+    _lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.freshCalls += 1;
+    this.events.push("fresh_readiness");
+    if (this.failure) throw this.failure;
+    if (this.block) {
+      await withTimeout(() => this.block!.promise, 5000, signal ? { signal } : {});
+    }
+    this.events.push("fresh_ready");
   }
 }
 
@@ -126,7 +133,7 @@ test("unknown ThreadHandle performs no navigation", async () => {
   const { router, navigation, readiness } = createHarness();
   await assert.rejects(router.routeToThread("tw_unknown" as ThreadHandle), ThreadNotFoundError);
   assert.deepEqual(navigation.urls, []);
-  assert.equal(readiness.calls, 0);
+  assert.equal(readiness.existingCalls, 0);
 });
 
 test("known existing thread resolves internally and outward result contains only the opaque handle", async () => {
@@ -163,7 +170,7 @@ test("routeFresh navigates to root and allocates no ThreadHandle", async () => {
   assert.deepEqual(navigation.urls, [CHATGPT_FRESH_ROUTE]);
   assert.equal(handleCalls, before);
   assert.equal("threadHandle" in result, false);
-  assert.equal(readiness.calls, 0);
+  assert.equal(readiness.existingCalls, 0);
 });
 
 test("concurrent route requests are serialized through the shared scheduler", async () => {
@@ -208,7 +215,7 @@ test("stale queued route rejects before navigation", async () => {
   await turn;
   await assert.rejects(route, RuntimeGenerationChangedError);
   assert.deepEqual(navigation.urls, []);
-  assert.equal(readiness.calls, 0);
+  assert.equal(readiness.existingCalls, 0);
 });
 
 test("navigation failure is normalized without locator or upstream error leakage", async () => {
@@ -223,7 +230,7 @@ test("navigation failure is normalized without locator or upstream error leakage
       !error.message.includes("synthetic-a") &&
       !error.message.includes("secret detail"),
   );
-  assert.equal(readiness.calls, 0);
+  assert.equal(readiness.existingCalls, 0);
 });
 
 test("existing route success boundary is navigation followed by readiness completion", async () => {
@@ -299,5 +306,5 @@ test("readiness failure releases scheduler so later work can continue", async ()
 test("routeFresh never invokes existing readiness", async () => {
   const { router, readiness } = createHarness();
   await router.routeFresh();
-  assert.equal(readiness.calls, 0);
+  assert.equal(readiness.existingCalls, 0);
 });

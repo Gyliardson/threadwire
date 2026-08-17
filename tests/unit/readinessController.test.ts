@@ -15,6 +15,7 @@ import {
 import {
   ExistingReadinessObservationPort,
   ExistingReadinessSnapshot,
+  RouteExpectation,
 } from "../../src/readiness/types.js";
 
 const locator = createConversationLocator("https://chatgpt.com/c/synthetic-readiness");
@@ -58,8 +59,9 @@ class QueueObservation implements ExistingReadinessObservationPort {
   ) {}
 
   public async getReadinessSnapshot(
-    _expectedLocator: typeof locator,
+    _expectedRoute: RouteExpectation,
     _lease: RuntimeLease,
+    _signal?: AbortSignal,
   ): Promise<ExistingReadinessSnapshot> {
     this.snapshotCalls += 1;
     this.onSnapshot?.(this.snapshotCalls);
@@ -82,6 +84,7 @@ function fastController(
   return new ReadinessController(
     observation,
     new ExistingReadinessPolicy({ frameStableObservations: 1, focusStableObservations: 1 }),
+    undefined, // freshPolicy
     {
       timeoutMs: options.timeoutMs ?? 100,
       pollIntervalMs: 0,
@@ -143,7 +146,7 @@ test("abort while waiting stops further observation", async () => {
 test("deadline produces stable existing-route readiness timeout without locator leakage", async () => {
   const { lease } = createRuntime();
   const observation = new QueueObservation([], snapshot({ expectedRoute: false }));
-  const controller = new ReadinessController(observation, new ExistingReadinessPolicy(), {
+  const controller = new ReadinessController(observation, new ExistingReadinessPolicy(), undefined, {
     timeoutMs: 15,
     pollIntervalMs: 2,
   });
@@ -209,6 +212,7 @@ test("deadline timer is cancelled when readiness settles successfully", async ()
   const controller = new ReadinessController(
     observation,
     new ExistingReadinessPolicy({ frameStableObservations: 1, focusStableObservations: 1 }),
+    undefined,
     {
       timeoutMs: 100,
       pollIntervalMs: 0,
