@@ -13,6 +13,7 @@ import {
 } from "./ChromeRemoteInterfaceHelpers.js";
 
 const MAX_PENDING_LIVE_BASE64_CHARS = 2_796_204;
+const MAX_PENDING_LIVE_CHUNKS = 1024;
 
 export class CdpResponseStreamTracker {
   private selectedRequestId: string | null = null;
@@ -88,6 +89,10 @@ export class CdpResponseStreamTracker {
     }
 
     if (this.activationPending && !this.activated) {
+      if (this.pendingLiveData.length >= MAX_PENDING_LIVE_CHUNKS) {
+        this.fail("BUFFER_OVERFLOW");
+        return;
+      }
       this.pendingLiveBase64Chars += data.length;
       if (this.pendingLiveBase64Chars > MAX_PENDING_LIVE_BASE64_CHARS) {
         this.fail("BUFFER_OVERFLOW");

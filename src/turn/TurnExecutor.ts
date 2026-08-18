@@ -701,6 +701,7 @@ export class TurnExecutor {
       error instanceof RuntimeGenerationChangedError ||
       error instanceof OperationAbortedError ||
       error instanceof CdpDisconnectedError ||
+      error instanceof ResponseStreamUnavailableError ||
       error instanceof TurnInputFailedError
     ) {
       throw error;

@@ -2,7 +2,9 @@ import { TextDecoder } from "node:util";
 import { ResponseStreamEvent } from "./types.js";
 
 const DEFAULT_MAX_QUEUED_EVENTS = 1024;
+const DEFAULT_MAX_QUEUED_TEXT_CHARS = 1_048_576;
 const DEFAULT_MAX_PENDING_TEXT_CHARS = 1_048_576;
+const DEFAULT_MAX_PENDING_DATA_LINES = 4096;
 
 export type ResponseStreamConsumerFailureKind = "PARSE_FAILED" | "BUFFER_OVERFLOW";
 
@@ -19,7 +21,9 @@ export class ResponseStreamConsumerError extends Error {
 
 export interface ResponseStreamConsumerOptions {
   readonly maxQueuedEvents?: number;
+  readonly maxQueuedTextChars?: number;
   readonly maxPendingTextChars?: number;
+  readonly maxPendingDataLines?: number;
 }
 
 function positiveSafeInteger(value: number, name: string): number {
@@ -47,11 +51,15 @@ function isValidBase64(value: string): boolean {
 export class ResponseStreamConsumer {
   private readonly decoder = new TextDecoder("utf-8", { fatal: true });
   private readonly maxQueuedEvents: number;
+  private readonly maxQueuedTextChars: number;
   private readonly maxPendingTextChars: number;
+  private readonly maxPendingDataLines: number;
   private readonly events: ResponseStreamEvent[] = [];
+  private queuedTextChars = 0;
   private textBuffer = "";
   private eventName: string | null = null;
   private dataLines: string[] = [];
+  private pendingDataChars = 0;
   private completedState = false;
   private disposed = false;
 
@@ -60,9 +68,17 @@ export class ResponseStreamConsumer {
       options.maxQueuedEvents ?? DEFAULT_MAX_QUEUED_EVENTS,
       "maxQueuedEvents",
     );
+    this.maxQueuedTextChars = positiveSafeInteger(
+      options.maxQueuedTextChars ?? DEFAULT_MAX_QUEUED_TEXT_CHARS,
+      "maxQueuedTextChars",
+    );
     this.maxPendingTextChars = positiveSafeInteger(
       options.maxPendingTextChars ?? DEFAULT_MAX_PENDING_TEXT_CHARS,
       "maxPendingTextChars",
+    );
+    this.maxPendingDataLines = positiveSafeInteger(
+      options.maxPendingDataLines ?? DEFAULT_MAX_PENDING_DATA_LINES,
+      "maxPendingDataLines",
     );
   }
 
@@ -116,6 +132,7 @@ export class ResponseStreamConsumer {
       return Object.freeze([]);
     }
     const drained = this.events.splice(0, this.events.length);
+    this.queuedTextChars = 0;
     return Object.freeze(drained);
   }
 
@@ -124,11 +141,13 @@ export class ResponseStreamConsumer {
     this.textBuffer = "";
     this.eventName = null;
     this.dataLines = [];
+    this.pendingDataChars = 0;
   }
 
   public dispose(): void {
     this.stop();
     this.events.splice(0, this.events.length);
+    this.queuedTextChars = 0;
   }
 
   private pushDecoded(decoded: string): void {
@@ -174,20 +193,22 @@ export class ResponseStreamConsumer {
 
     if (field === "event") {
       this.eventName = value;
+      this.assertPendingTextBound();
     } else if (field === "data") {
+      if (this.dataLines.length >= this.maxPendingDataLines) {
+        throw new ResponseStreamConsumerError("BUFFER_OVERFLOW");
+      }
+      this.pendingDataChars += value.length + (this.dataLines.length === 0 ? 0 : 1);
       this.dataLines.push(value);
       this.assertPendingTextBound();
     }
   }
 
   private assertPendingTextBound(): void {
-    let pending = this.textBuffer.length;
-    for (const line of this.dataLines) {
-      pending += line.length;
-      if (pending > this.maxPendingTextChars) {
-        throw new ResponseStreamConsumerError("BUFFER_OVERFLOW");
-      }
-    }
+    const pending =
+      this.textBuffer.length +
+      (this.eventName?.length ?? 0) +
+      this.pendingDataChars;
     if (pending > this.maxPendingTextChars) {
       throw new ResponseStreamConsumerError("BUFFER_OVERFLOW");
     }
@@ -239,11 +260,21 @@ export class ResponseStreamConsumer {
     if (this.events.length >= this.maxQueuedEvents) {
       throw new ResponseStreamConsumerError("BUFFER_OVERFLOW");
     }
+    if (
+      event.type === "TEXT_DELTA" &&
+      event.text.length > this.maxQueuedTextChars - this.queuedTextChars
+    ) {
+      throw new ResponseStreamConsumerError("BUFFER_OVERFLOW");
+    }
+    if (event.type === "TEXT_DELTA") {
+      this.queuedTextChars += event.text.length;
+    }
     this.events.push(event);
   }
 
   private resetRecord(): void {
     this.eventName = null;
     this.dataLines = [];
+    this.pendingDataChars = 0;
   }
 }
