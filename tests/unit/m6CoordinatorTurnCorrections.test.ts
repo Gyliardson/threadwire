@@ -12,12 +12,9 @@ import {
   createConversationLocator,
 } from "../../src/domain/ThreadIdentity.js";
 import {
-  OperationAbortedError,
   ResponseParseFailedError,
-  RuntimeGenerationChangedError,
   ResponseStreamUnavailableError,
   TurnStateUncertainError,
-  TurnWriteFailedError,
 } from "../../src/domain/errors.js";
 import { RouteExpectation } from "../../src/readiness/types.js";
 import { ResponseStreamEvent } from "../../src/response/types.js";

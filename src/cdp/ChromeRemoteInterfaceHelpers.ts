@@ -1,4 +1,4 @@
-import CDP from "chrome-remote-interface";
+import type { CriClient } from "./ChromeRemoteInterfaceTransport.js";
 import {
   CHATGPT_ORIGIN,
   ConversationLocator,
@@ -6,7 +6,7 @@ import {
 } from "../domain/ThreadIdentity.js";
 import { ReadinessEditableTarget, RouteExpectation } from "../readiness/types.js";
 
-export type CriClient = Awaited<ReturnType<typeof CDP>>;
+export type { CriClient };
 type CriAxNode = Awaited<ReturnType<CriClient["Accessibility"]["getFullAXTree"]>>["nodes"][number];
 
 export type TurnRequestKind = "PREPARE" | "WRITE";

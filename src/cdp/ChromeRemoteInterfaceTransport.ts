@@ -4,6 +4,8 @@ import { CdpTransport, CdpTransportConnectOptions, CdpTransportSession } from ".
 import { isCriClient } from "./ChromeRemoteInterfaceHelpers.js";
 import { ChromeRemoteInterfaceSession } from "./ChromeRemoteInterfaceSession.js";
 
+export type CriClient = Awaited<ReturnType<typeof CDP>>;
+
 export interface ChromeRemoteInterfaceTransportOptions {
   readonly connect?: (options: Readonly<{ host: string; port: number; target: string }>) => Promise<unknown>;
 }
