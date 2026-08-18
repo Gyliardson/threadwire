@@ -39,27 +39,32 @@ type ResponseListener = (event: {
 }) => void;
 type SettledListener = (event: { requestId: string }) => void;
 
+function eligibleComposerNode(value: unknown, valuePresent: boolean): Record<string, unknown> {
+  const node: Record<string, unknown> = {
+    ignored: false,
+    role: { value: "textbox" },
+    name: { value: "ACCESSIBLE_NAME_SECRET" },
+    backendDOMNodeId: 501,
+    properties: [
+      { name: "multiline", value: { value: true } },
+      { name: "focusable", value: { value: true } },
+      { name: "editable", value: { value: "richtext" } },
+      { name: "focused", value: { value: true } },
+    ],
+  };
+  if (valuePresent) {
+    node.value = value;
+  }
+  return node;
+}
+
 class FakeTurnCriClient {
   public frame = {
     id: "main",
     loaderId: "loader-turn",
     url: "https://chatgpt.com/c/synthetic-turn",
   };
-  public axNodes: readonly unknown[] = [
-    {
-      ignored: false,
-      role: { value: "textbox" },
-      name: { value: "ACCESSIBLE_NAME_SECRET" },
-      value: { value: "" },
-      backendDOMNodeId: 501,
-      properties: [
-        { name: "multiline", value: { value: true } },
-        { name: "focusable", value: { value: true } },
-        { name: "editable", value: { value: "richtext" } },
-        { name: "focused", value: { value: true } },
-      ],
-    },
-  ];
+  public axNodes: readonly unknown[] = [eligibleComposerNode({ value: "" }, true)];
   public readonly inputCalls: Array<Readonly<Record<string, unknown>>> = [];
   private readonly disconnectListeners = new Set<() => void>();
   private readonly requestListeners = new Set<RequestListener>();
@@ -212,21 +217,7 @@ test("turn composer state exposes route/eligible/focused/empty booleans only", a
   });
   assert.equal(JSON.stringify(empty).includes("ACCESSIBLE_NAME_SECRET"), false);
 
-  client.axNodes = [
-    {
-      ignored: false,
-      role: { value: "textbox" },
-      name: { value: "ACCESSIBLE_NAME_SECRET" },
-      value: { value: "ACCESSIBLE_VALUE_SECRET" },
-      backendDOMNodeId: 501,
-      properties: [
-        { name: "multiline", value: { value: true } },
-        { name: "focusable", value: { value: true } },
-        { name: "editable", value: { value: "richtext" } },
-        { name: "focused", value: { value: true } },
-      ],
-    },
-  ];
+  client.axNodes = [eligibleComposerNode({ value: "ACCESSIBLE_VALUE_SECRET" }, true)];
   const nonEmpty = await session.getTurnComposerState(expectedRoute);
   assert.deepEqual(nonEmpty, {
     expectedRoute: true,
@@ -240,6 +231,42 @@ test("turn composer state exposes route/eligible/focused/empty booleans only", a
   const drifted = await session.getTurnComposerState(expectedRoute);
   assert.equal(drifted.expectedRoute, false);
   assert.equal(JSON.stringify(drifted).includes("synthetic-other"), false);
+});
+
+test("real Classic empty composer shape with absent AXNode.value is known empty", async () => {
+  const { client, session } = await createSession();
+  client.axNodes = [eligibleComposerNode(undefined, false)];
+
+  assert.deepEqual(await session.getTurnComposerState(expectedRoute), {
+    expectedRoute: true,
+    eligible: true,
+    focused: true,
+    empty: true,
+  });
+});
+
+test("explicit empty-string AX value remains known empty", async () => {
+  const { client, session } = await createSession();
+  client.axNodes = [eligibleComposerNode({ value: "" }, true)];
+
+  assert.equal((await session.getTurnComposerState(expectedRoute)).empty, true);
+});
+
+test("present nonempty AX string remains nonempty without exposing content", async () => {
+  const { client, session } = await createSession();
+  const canary = "synthetic nonempty canary";
+  client.axNodes = [eligibleComposerNode({ value: canary }, true)];
+
+  const state = await session.getTurnComposerState(expectedRoute);
+  assert.equal(state.empty, false);
+  assert.equal(JSON.stringify(state).includes(canary), false);
+});
+
+test("present AX value with unknown shape is not proven empty", async () => {
+  const { client, session } = await createSession();
+  client.axNodes = [eligibleComposerNode({}, true)];
+
+  assert.equal((await session.getTurnComposerState(expectedRoute)).empty, false);
 });
 
 test("typed Input primitives preserve insertText then Enter keyDown/keyUp ordering", async () => {
