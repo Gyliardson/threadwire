@@ -354,7 +354,7 @@ function errorGraphContainsText(value: unknown, needle: string, seen = new Set<u
   );
 }
 
-test("FRESH early route succeeds only after later write settlement and final route congruence", async () => {
+test("FRESH early route succeeds only after later write settlement and final supported route authority", async () => {
   const f = await fixture();
   const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
   const state = observeSettlement(turn);
@@ -373,6 +373,7 @@ test("FRESH early route succeeds only after later write settlement and final rou
   f.manualSleep.releaseOne();
 
   const result = await turn;
+  assert.equal(result.kind, "THREAD");
   assert.equal(result.created, true);
   assert.equal(f.registry.resolve(result.threadHandle), freshLocator);
   assert.equal(f.registry.knownThreads().length, 1);
@@ -400,7 +401,7 @@ test("FRESH captured locator that becomes unsupported is not registered and time
 
   await f.manualSleep.waitForEntry(2);
   assert.equal(f.registry.knownThreads().length, 0);
-  assert.equal(f.handleAllocations(), 0, "stale captured locator must not be registered while current route is unsupported");
+  assert.equal(f.handleAllocations(), 0, "early supported locator must not be registered while current route is unsupported");
 
   f.now.value = 20;
   f.manualSleep.releaseOne();
@@ -410,30 +411,54 @@ test("FRESH captured locator that becomes unsupported is not registered and time
   assert.equal(f.handleAllocations(), 0);
 });
 
-test("FRESH captured locator that changes to a different supported locator fails without registration", async () => {
+test("FRESH final supported locator is authoritative when it differs from the early locator", async () => {
   const f = await fixture();
   const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
 
   await f.manualSleep.waitForEntry(1);
   f.client.frame = {
     id: "main",
-    loaderId: "loader-different-conversation",
+    loaderId: "loader-final-conversation",
     url: differentFreshLocator,
   };
   f.client.emitFinished();
   f.manualSleep.releaseOne();
 
-  let captured: unknown;
-  try {
-    await turn;
-  } catch (error) {
-    captured = error;
-  }
-  assert.ok(captured instanceof FreshConversationNotCreatedError);
-  assert.equal(f.registry.knownThreads().length, 0);
-  assert.equal(f.handleAllocations(), 0, "neither captured nor current differing locator may allocate a handle");
-  assert.equal(errorGraphContainsText(captured, "m5-early-route"), false);
-  assert.equal(errorGraphContainsText(captured, "m5-different-route"), false);
+  const result = await turn;
+  assert.equal(result.kind, "THREAD");
+  assert.equal(result.created, true);
+  assert.equal(f.registry.resolve(result.threadHandle), differentFreshLocator);
+  assert.equal(f.registry.knownThreads().length, 1);
+  assert.equal(f.handleAllocations(), 1);
+  assert.equal(errorGraphContainsText(result, "m5-early-route"), false);
+  assert.equal(errorGraphContainsText(result, "m5-different-route"), false);
+});
+
+test("FRESH final supported locator reuses an existing registry handle even when early locator differs", async () => {
+  const f = await fixture();
+  const existingHandle = f.registry.register(differentFreshLocator);
+  assert.equal(f.registry.knownThreads().length, 1);
+  assert.equal(f.handleAllocations(), 1);
+
+  const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
+  await f.manualSleep.waitForEntry(1);
+  f.client.frame = {
+    id: "main",
+    loaderId: "loader-known-final-conversation",
+    url: differentFreshLocator,
+  };
+  f.client.emitFinished();
+  f.manualSleep.releaseOne();
+
+  const result = await turn;
+  assert.equal(result.kind, "THREAD");
+  assert.equal(result.created, false);
+  assert.equal(result.threadHandle, existingHandle);
+  assert.equal(f.registry.resolve(result.threadHandle), differentFreshLocator);
+  assert.equal(f.registry.knownThreads().length, 1);
+  assert.equal(f.handleAllocations(), 1, "authoritative final locator must reuse the existing opaque handle");
+  assert.equal(errorGraphContainsText(result, "m5-early-route"), false);
+  assert.equal(errorGraphContainsText(result, "m5-different-route"), false);
 });
 
 test("FRESH late distinct write during final route revalidation fails closed before registration", async () => {
