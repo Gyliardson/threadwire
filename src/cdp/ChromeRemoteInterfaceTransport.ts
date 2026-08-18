@@ -86,6 +86,10 @@ function isEditableValue(value: unknown): boolean {
   return value === true || value === "plaintext" || value === "richtext";
 }
 
+function isKnownEmptyAxValue(value: unknown): boolean {
+  return value === undefined || (isObject(value) && value.value === "");
+}
+
 function toEligibleComposer(node: CriAxNode): EligibleComposerTarget | null {
   const backendDOMNodeId = node.backendDOMNodeId;
   if (
@@ -103,11 +107,10 @@ function toEligibleComposer(node: CriAxNode): EligibleComposerTarget | null {
     return null;
   }
 
-  const editableValue = node.value?.value;
   return Object.freeze({
     backendDOMNodeId,
     focused: axBoolean(node, "focused"),
-    empty: editableValue === "",
+    empty: isKnownEmptyAxValue(node.value),
   });
 }
 
