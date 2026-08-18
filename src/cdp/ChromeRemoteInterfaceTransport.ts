@@ -35,6 +35,7 @@ interface ActiveTurnObservation {
   prepareCount: number;
   writeRequestId: string | null;
   successfulResponseObserved: boolean | null;
+  selectedLegRedirected: boolean;
   lifecycle: CdpWriteLifecycleState | null;
   ambiguousWrite: boolean;
 }
@@ -217,7 +218,12 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
 
     const unsubscribers = [
       this.client.Network.requestWillBeSent((event) =>
-        this.onRequestWillBeSent(event.requestId, event.request.url, event.request.method),
+        this.onRequestWillBeSent(
+          event.requestId,
+          event.request.url,
+          event.request.method,
+          event.redirectResponse !== undefined,
+        ),
       ),
       this.client.Network.responseReceived((event) =>
         this.onResponseReceived(event.requestId, event.response.status),
@@ -241,7 +247,12 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
       throw new Error("CDP session is closed.");
     }
 
-    const result = await this.client.Page.navigate({ url });
+    let result: Awaited<ReturnType<CriClient["Page"]["navigate"]>>;
+    try {
+      result = await this.client.Page.navigate({ url });
+    } catch {
+      throw new Error("CDP Page.navigate command failed without retained protocol metadata.");
+    }
     if (typeof result.errorText === "string" && result.errorText.length > 0) {
       throw new Error("CDP Page.navigate reported a navigation error.");
     }
@@ -330,6 +341,7 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
       prepareCount: 0,
       writeRequestId: null,
       successfulResponseObserved: null,
+      selectedLegRedirected: false,
       lifecycle: null,
       ambiguousWrite: false,
     };
@@ -339,7 +351,7 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
   public getTurnObservation(handle: CdpTurnObservationHandle): CdpTurnObservationSnapshot {
     const observation = this.requireTurnObservation(handle);
     if (observation.ambiguousWrite) {
-      throw new Error("The scoped turn observation contains multiple distinct conversation writes.");
+      throw new Error("The scoped turn write identity became ambiguous or unsafe.");
     }
     if (observation.writeRequestId === null || observation.lifecycle === null) {
       return Object.freeze({ prepareCount: observation.prepareCount, write: null });
@@ -426,6 +438,7 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
     requestId: string,
     rawUrl: string,
     method: string | undefined,
+    redirectedFromPreviousRequest: boolean,
   ): void {
     const relevant = isRelevantBackendUrl(rawUrl);
     const wasRelevant = this.activeRelevantRequestIds.has(requestId);
@@ -443,6 +456,26 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
       return;
     }
 
+    if (observation.writeRequestId === requestId) {
+      if (observation.lifecycle !== "ACTIVE") {
+        observation.ambiguousWrite = true;
+        return;
+      }
+      if (!redirectedFromPreviousRequest) {
+        observation.ambiguousWrite = true;
+        return;
+      }
+
+      // requestWillBeSent reuses Network.RequestId across redirects. Presence
+      // of redirectResponse proves the originally selected conversation POST
+      // did not itself obtain the required direct successful HTTP outcome.
+      // Keep the overall chain ACTIVE until loadingFinished/loadingFailed, but
+      // make selected-leg failure sticky so a later hop's 2xx cannot upgrade it.
+      observation.selectedLegRedirected = true;
+      observation.successfulResponseObserved = false;
+      return;
+    }
+
     const kind = classifyTurnRequest(rawUrl, method);
     if (kind === "PREPARE") {
       observation.prepareCount += 1;
@@ -456,12 +489,7 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
     if (observation.writeRequestId === null) {
       observation.writeRequestId = requestId;
       observation.successfulResponseObserved = null;
-      observation.lifecycle = "ACTIVE";
-      return;
-    }
-
-    if (observation.writeRequestId === requestId) {
-      observation.successfulResponseObserved = null;
+      observation.selectedLegRedirected = false;
       observation.lifecycle = "ACTIVE";
       return;
     }
@@ -474,7 +502,8 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
     if (
       observation === null ||
       observation.writeRequestId !== requestId ||
-      observation.lifecycle !== "ACTIVE"
+      observation.lifecycle !== "ACTIVE" ||
+      observation.selectedLegRedirected
     ) {
       return;
     }
@@ -487,9 +516,13 @@ class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
     }
 
     const observation = this.activeTurnObservation;
-    if (observation?.writeRequestId === requestId) {
+    if (observation?.writeRequestId === requestId && observation.lifecycle === "ACTIVE") {
       observation.lifecycle =
-        failed || observation.successfulResponseObserved !== true ? "FAILED" : "FINISHED";
+        failed ||
+        observation.selectedLegRedirected ||
+        observation.successfulResponseObserved !== true
+          ? "FAILED"
+          : "FINISHED";
     }
   }
 
