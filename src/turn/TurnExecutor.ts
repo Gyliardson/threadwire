@@ -363,7 +363,7 @@ export class TurnExecutor {
           lastFreshRouteError = sanitizedTurnCause(error);
         }
 
-        // Final route congruence requires an awaited CDP read. Re-read the
+        // Final route authority requires an awaited CDP read. Re-read the
         // still-armed scoped observer synchronously after that await and before
         // any registration so a late distinct write cannot be missed.
         const finalWrite = this.readTurnObservation(observation, lease).write;
@@ -379,10 +379,11 @@ export class TurnExecutor {
           throw operationAborted(signal);
         }
 
-        if (currentFreshLocator === freshLocator) {
-          // The final observer read above is synchronous, and registration/return
-          // follows synchronously with no additional await/interleaving boundary.
-          const registration = this.registry.registerWithStatus(freshLocator);
+        if (currentFreshLocator !== null) {
+          // The current supported locator at this safe finalization boundary is
+          // authoritative. Registration/return follows the final synchronous
+          // observer read with no additional await/interleaving boundary.
+          const registration = this.registry.registerWithStatus(currentFreshLocator);
           if (registration.created) {
             return Object.freeze({
               kind: "THREAD" as const,
@@ -395,10 +396,6 @@ export class TurnExecutor {
             threadHandle: registration.threadHandle,
             created: false as const,
           }) satisfies ExistingTurnResult;
-        }
-
-        if (currentFreshLocator !== null) {
-          throw new FreshConversationNotCreatedError();
         }
 
         if (this.clock() - writeObservedAt >= this.freshConversationTimeoutMs) {
