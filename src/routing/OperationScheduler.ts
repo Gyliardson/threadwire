@@ -1,5 +1,5 @@
-import { RuntimeLease, RuntimeLeaseSource } from "../domain/RuntimeGeneration.js";
-import { OperationAbortedError } from "../domain/errors.js";
+import { RuntimeLease, RuntimeLeaseSource, sameRuntimeLease } from "../domain/RuntimeGeneration.js";
+import { OperationAbortedError, TurnStateUncertainError } from "../domain/errors.js";
 import { throwIfAborted } from "../utils/timeout.js";
 
 export type MutationOperationKind = "ROUTE" | "TURN";
@@ -23,8 +23,13 @@ interface QueueEntry {
 export class OperationScheduler {
   private readonly queue: QueueEntry[] = [];
   private running = false;
+  private uncertainLease: RuntimeLease | null = null;
 
   public constructor(private readonly runtime: RuntimeLeaseSource) {}
+
+  public markRuntimeMutationStateUncertain(lease: RuntimeLease): void {
+    this.uncertainLease = lease;
+  }
 
   public schedule<T>(
     kind: MutationOperationKind,
@@ -40,6 +45,7 @@ export class OperationScheduler {
     let lease: RuntimeLease;
     try {
       lease = this.runtime.getCurrentRuntimeLease();
+      this.assertMutationStateSafeForLease(lease);
     } catch (error) {
       return Promise.reject(error);
     }
@@ -62,6 +68,7 @@ export class OperationScheduler {
           try {
             throwIfAborted(options.signal);
             this.runtime.assertRuntimeLeaseCurrent(entry.lease);
+            this.assertMutationStateSafeForLease(entry.lease);
             const result = await operation(options.signal, entry.lease);
             entry.settled = true;
             resolve(result);
@@ -91,6 +98,18 @@ export class OperationScheduler {
       this.queue.push(entry);
       void this.drain();
     });
+  }
+
+  private assertMutationStateSafeForLease(lease: RuntimeLease): void {
+    if (this.uncertainLease === null) {
+      return;
+    }
+
+    if (sameRuntimeLease(this.uncertainLease, lease)) {
+      throw new TurnStateUncertainError();
+    }
+
+    this.uncertainLease = null;
   }
 
   private async drain(): Promise<void> {

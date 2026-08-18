@@ -11,7 +11,8 @@ const target: CdpTargetInfo = {
 };
 const expected = createConversationLocator("https://chatgpt.com/c/synthetic-a");
 
-type RequestListener = (event: { requestId: string; request: { url: string } }) => void;
+type RequestListener = (event: { requestId: string; request: { url: string; method?: string } }) => void;
+type ResponseListener = (event: { requestId: string; response: { status: number } }) => void;
 type SettledListener = (event: { requestId: string }) => void;
 
 class FakeCriClient {
@@ -35,6 +36,7 @@ class FakeCriClient {
   public readonly focusIds: number[] = [];
   private readonly disconnectListeners = new Set<() => void>();
   private readonly requestListeners = new Set<RequestListener>();
+  private readonly responseListeners = new Set<ResponseListener>();
   private readonly finishedListeners = new Set<SettledListener>();
   private readonly failedListeners = new Set<SettledListener>();
 
@@ -58,12 +60,20 @@ class FakeCriClient {
     focus: async ({ backendNodeId }: { backendNodeId: number }) => { this.focusIds.push(backendNodeId); this.events.push("dom.focus"); },
   };
 
+  public readonly Input = {
+    insertText: async (_params: { text: string }) => undefined,
+    dispatchKeyEvent: async (_params: Record<string, unknown>) => undefined,
+  };
+
   public enableOptions: unknown[] = [];
 
   public readonly Network = {
     enable: async (options: Record<string, unknown>) => { this.enableOptions.push(options); this.events.push("network.enable"); },
     requestWillBeSent: (listener: RequestListener) => {
       this.events.push("subscribe.request"); this.requestListeners.add(listener); return () => this.requestListeners.delete(listener);
+    },
+    responseReceived: (listener: ResponseListener) => {
+      this.events.push("subscribe.response"); this.responseListeners.add(listener); return () => this.responseListeners.delete(listener);
     },
     loadingFinished: (listener: SettledListener) => {
       this.events.push("subscribe.finished"); this.finishedListeners.add(listener); return () => this.finishedListeners.delete(listener);
@@ -81,7 +91,7 @@ class FakeCriClient {
   public emitFailed(requestId: string): void { for (const listener of this.failedListeners) listener({ requestId }); }
   public emitDisconnect(): void { for (const listener of [...this.disconnectListeners]) listener(); }
   public networkListenerCount(): number {
-    return this.requestListeners.size + this.finishedListeners.size + this.failedListeners.size;
+    return this.requestListeners.size + this.responseListeners.size + this.finishedListeners.size + this.failedListeners.size;
   }
 }
 
@@ -95,8 +105,8 @@ test("Network listeners and Network.enable are established before route navigati
   const { client, session } = await createSession();
   await session.initializeReadinessObservation();
   await session.navigate(expected);
-  assert.deepEqual(client.events.slice(0, 5), [
-    "subscribe.request", "subscribe.finished", "subscribe.failed", "network.enable", `navigate:${expected}`,
+  assert.deepEqual(client.events.slice(0, 6), [
+    "subscribe.request", "subscribe.response", "subscribe.finished", "subscribe.failed", "network.enable", `navigate:${expected}`,
   ]);
   assert.deepEqual(client.enableOptions, [{}]);
 });
@@ -136,28 +146,23 @@ test("FRESH_ROOT route matching semantics", async () => {
   const { client, session } = await createSession();
   await session.initializeReadinessObservation();
 
-  // Canonical root matches
   client.frame.url = "https://chatgpt.com/";
   let snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
   assert.equal(snapshot.mainFrame.expectedRoute, true);
 
-  // Root with query/fragment matches, but does not leak
   client.frame.url = "https://chatgpt.com/?synthetic=1#fragment";
   snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
   assert.equal(snapshot.mainFrame.expectedRoute, true);
   assert.equal(JSON.stringify(snapshot).includes("synthetic=1"), false);
 
-  // Thread locator URL does NOT match FRESH_ROOT
   client.frame.url = "https://chatgpt.com/c/synthetic";
   snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
   assert.equal(snapshot.mainFrame.expectedRoute, false);
 
-  // Other synthetic pathnames do NOT match FRESH_ROOT
   client.frame.url = "https://chatgpt.com/g/g-some-gpt";
   snapshot = await session.getReadinessSnapshot({ kind: "FRESH_ROOT" });
   assert.equal(snapshot.mainFrame.expectedRoute, false);
 
-  // THREAD expectation works with thread locator URL
   client.frame.url = "https://chatgpt.com/c/synthetic-a";
   snapshot = await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
   assert.equal(snapshot.mainFrame.expectedRoute, true);
@@ -202,7 +207,7 @@ test("disconnect clears readiness request tracking/listeners and closes the obse
   const { client, session } = await createSession(); await session.initializeReadinessObservation();
   client.emitRequest("req-3", "https://chatgpt.com/backend-api/models");
   assert.equal((await session.getReadinessSnapshot({ kind: "THREAD", locator: expected })).backendActivity.activeCount, 1);
-  assert.equal(client.networkListenerCount(), 3);
+  assert.equal(client.networkListenerCount(), 4);
 
   client.emitDisconnect();
 

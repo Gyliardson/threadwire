@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RuntimeGenerationTracker } from "../../src/domain/RuntimeGeneration.js";
-import { OperationAbortedError, RuntimeGenerationChangedError } from "../../src/domain/errors.js";
+import {
+  OperationAbortedError,
+  RuntimeGenerationChangedError,
+  TurnStateUncertainError,
+} from "../../src/domain/errors.js";
 import { OperationScheduler } from "../../src/routing/OperationScheduler.js";
 
 interface Deferred<T> {
@@ -126,4 +130,51 @@ test("runtime replacement while queued rejects stale work before callback invoca
   await turn;
   await assert.rejects(route, RuntimeGenerationChangedError);
   assert.equal(routeRan, false);
+});
+
+test("uncertain same-generation turn state blocks queued ROUTE and newly scheduled mutations", async () => {
+  const runtime = createRuntime();
+  const scheduler = new OperationScheduler(runtime);
+  const activeGate = deferred<void>();
+  const active = scheduler.schedule("TURN", async (_signal, lease) => {
+    scheduler.markRuntimeMutationStateUncertain(lease);
+    await activeGate.promise;
+  });
+
+  let queuedRouteRan = false;
+  const queuedRoute = scheduler.schedule("ROUTE", async () => {
+    queuedRouteRan = true;
+  });
+  await Promise.resolve();
+  activeGate.resolve();
+  await active;
+  await assert.rejects(queuedRoute, TurnStateUncertainError);
+  assert.equal(queuedRouteRan, false);
+
+  let newTurnRan = false;
+  await assert.rejects(
+    () => scheduler.schedule("TURN", async () => {
+      newTurnRan = true;
+    }),
+    TurnStateUncertainError,
+  );
+  assert.equal(newTurnRan, false);
+});
+
+test("runtime replacement clears the old uncertain latch for the replacement generation", async () => {
+  const runtime = createRuntime();
+  const scheduler = new OperationScheduler(runtime);
+  scheduler.markRuntimeMutationStateUncertain(runtime.getCurrentRuntimeLease());
+
+  await assert.rejects(
+    () => scheduler.schedule("ROUTE", async () => undefined),
+    TurnStateUncertainError,
+  );
+
+  runtime.observe({ pid: 200, creationTime: "runtime-b" });
+  let ran = false;
+  await scheduler.schedule("TURN", async () => {
+    ran = true;
+  });
+  assert.equal(ran, true);
 });

@@ -14,10 +14,31 @@ import {
   CdpTransport,
   CdpTransportConnectOptions,
   CdpTransportSession,
+  CdpTurnComposerState,
+  CdpTurnObservationHandle,
+  CdpTurnObservationSnapshot,
+  CdpTurnTransportSession,
+  CdpWriteLifecycleState,
 } from "./CdpTransport.js";
 
 type CriClient = Awaited<ReturnType<typeof CDP>>;
 type CriAxNode = Awaited<ReturnType<CriClient["Accessibility"]["getFullAXTree"]>>["nodes"][number];
+
+type TurnRequestKind = "PREPARE" | "WRITE";
+
+interface EligibleComposerTarget extends ReadinessEditableTarget {
+  readonly empty: boolean;
+}
+
+interface ActiveTurnObservation {
+  readonly handle: CdpTurnObservationHandle;
+  prepareCount: number;
+  writeRequestId: string | null;
+  successfulResponseObserved: boolean | null;
+  selectedLegRedirected: boolean;
+  lifecycle: CdpWriteLifecycleState | null;
+  ambiguousWrite: boolean;
+}
 
 export interface ChromeRemoteInterfaceTransportOptions {
   readonly connect?: (options: Readonly<{ host: string; port: number; target: string }>) => Promise<unknown>;
@@ -43,8 +64,11 @@ function isCriClient(value: unknown): value is CriClient {
     hasFunction(value.Page, "getFrameTree") &&
     hasFunction(value.Accessibility, "getFullAXTree") &&
     hasFunction(value.DOM, "focus") &&
+    hasFunction(value.Input, "insertText") &&
+    hasFunction(value.Input, "dispatchKeyEvent") &&
     hasFunction(value.Network, "enable") &&
     hasFunction(value.Network, "requestWillBeSent") &&
+    hasFunction(value.Network, "responseReceived") &&
     hasFunction(value.Network, "loadingFinished") &&
     hasFunction(value.Network, "loadingFailed")
   );
@@ -54,10 +78,7 @@ function getAxProperty(node: CriAxNode, name: string): unknown {
   return node.properties?.find((property) => property.name === name)?.value.value;
 }
 
-function axBoolean(
-  node: CriAxNode,
-  name: string,
-): boolean {
+function axBoolean(node: CriAxNode, name: string): boolean {
   return getAxProperty(node, name) === true;
 }
 
@@ -65,9 +86,11 @@ function isEditableValue(value: unknown): boolean {
   return value === true || value === "plaintext" || value === "richtext";
 }
 
-function toEligibleEditable(
-  node: CriAxNode,
-): ReadinessEditableTarget | null {
+function isKnownEmptyAxValue(value: unknown): boolean {
+  return value === undefined || (isObject(value) && value.value === "");
+}
+
+function toEligibleComposer(node: CriAxNode): EligibleComposerTarget | null {
   const backendDOMNodeId = node.backendDOMNodeId;
   if (
     node.ignored ||
@@ -87,6 +110,14 @@ function toEligibleEditable(
   return Object.freeze({
     backendDOMNodeId,
     focused: axBoolean(node, "focused"),
+    empty: isKnownEmptyAxValue(node.value),
+  });
+}
+
+function toReadinessEditable(target: EligibleComposerTarget): ReadinessEditableTarget {
+  return Object.freeze({
+    backendDOMNodeId: target.backendDOMNodeId,
+    focused: target.focused,
   });
 }
 
@@ -118,12 +149,40 @@ function isRelevantBackendUrl(rawUrl: string): boolean {
   }
 }
 
-class ChromeRemoteInterfaceSession implements CdpTransportSession {
+function classifyTurnRequest(rawUrl: string, method: string | undefined): TurnRequestKind | null {
+  if (method !== "POST") {
+    return null;
+  }
+
+  try {
+    const url = new URL(rawUrl);
+    if (url.origin !== CHATGPT_ORIGIN) {
+      return null;
+    }
+    if (url.pathname === "/backend-api/f/conversation/prepare") {
+      return "PREPARE";
+    }
+    if (url.pathname === "/backend-api/f/conversation") {
+      return "WRITE";
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function isSuccessfulHttpStatus(status: number): boolean {
+  return Number.isFinite(status) && status >= 200 && status < 300;
+}
+
+class ChromeRemoteInterfaceSession implements CdpTurnTransportSession {
   private readonly activeRelevantRequestIds = new Set<string>();
   private readonly disconnectListeners = new Set<() => void>();
   private activityEpoch = 0;
   private readinessInitialized = false;
   private readinessUnsubscribers: Array<() => unknown> = [];
+  private activeTurnObservation: ActiveTurnObservation | null = null;
   private closed = false;
 
   public constructor(private readonly client: CriClient) {
@@ -162,10 +221,18 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
 
     const unsubscribers = [
       this.client.Network.requestWillBeSent((event) =>
-        this.onRequestWillBeSent(event.requestId, event.request.url),
+        this.onRequestWillBeSent(
+          event.requestId,
+          event.request.url,
+          event.request.method,
+          event.redirectResponse !== undefined,
+        ),
       ),
-      this.client.Network.loadingFinished((event) => this.onRequestSettled(event.requestId)),
-      this.client.Network.loadingFailed((event) => this.onRequestSettled(event.requestId)),
+      this.client.Network.responseReceived((event) =>
+        this.onResponseReceived(event.requestId, event.response.status),
+      ),
+      this.client.Network.loadingFinished((event) => this.onRequestSettled(event.requestId, false)),
+      this.client.Network.loadingFailed((event) => this.onRequestSettled(event.requestId, true)),
     ];
     this.readinessUnsubscribers = unsubscribers;
 
@@ -183,7 +250,12 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
       throw new Error("CDP session is closed.");
     }
 
-    const result = await this.client.Page.navigate({ url });
+    let result: Awaited<ReturnType<CriClient["Page"]["navigate"]>>;
+    try {
+      result = await this.client.Page.navigate({ url });
+    } catch {
+      throw new Error("CDP Page.navigate command failed without retained protocol metadata.");
+    }
     if (typeof result.errorText === "string" && result.errorText.length > 0) {
       throw new Error("CDP Page.navigate reported a navigation error.");
     }
@@ -200,8 +272,9 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
     const mainFrame = frameTree.frameTree.frame;
     const axTree = await this.client.Accessibility.getFullAXTree({ frameId: mainFrame.id });
     const eligibleEditables = axTree.nodes
-      .map(toEligibleEditable)
-      .filter((target): target is ReadinessEditableTarget => target !== null);
+      .map(toEligibleComposer)
+      .filter((target): target is EligibleComposerTarget => target !== null)
+      .map(toReadinessEditable);
 
     return Object.freeze({
       mainFrame: Object.freeze({
@@ -224,6 +297,133 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
     await this.client.DOM.focus({ backendNodeId: backendDOMNodeId });
   }
 
+  public async getTurnComposerState(
+    expectedRoute: RouteExpectation,
+  ): Promise<CdpTurnComposerState> {
+    if (this.closed || !this.readinessInitialized) {
+      throw new Error("CDP turn observation is unavailable.");
+    }
+
+    const frameTree = await this.client.Page.getFrameTree();
+    const mainFrame = frameTree.frameTree.frame;
+    const routeValid = routeMatchesExpected(mainFrame.url, expectedRoute);
+    const axTree = await this.client.Accessibility.getFullAXTree({ frameId: mainFrame.id });
+    const eligible = axTree.nodes
+      .map(toEligibleComposer)
+      .filter((target): target is EligibleComposerTarget => target !== null);
+
+    if (eligible.length !== 1) {
+      return Object.freeze({
+        expectedRoute: routeValid,
+        eligible: false,
+        focused: false,
+        empty: false,
+      });
+    }
+
+    const target = eligible[0]!;
+    return Object.freeze({
+      expectedRoute: routeValid,
+      eligible: true,
+      focused: target.focused,
+      empty: target.empty,
+    });
+  }
+
+  public armTurnObservation(): CdpTurnObservationHandle {
+    if (this.closed || !this.readinessInitialized) {
+      throw new Error("CDP turn observation is unavailable.");
+    }
+    if (this.activeTurnObservation !== null) {
+      throw new Error("A CDP turn observation is already active.");
+    }
+
+    const handle = Object.freeze({}) as unknown as CdpTurnObservationHandle;
+    this.activeTurnObservation = {
+      handle,
+      prepareCount: 0,
+      writeRequestId: null,
+      successfulResponseObserved: null,
+      selectedLegRedirected: false,
+      lifecycle: null,
+      ambiguousWrite: false,
+    };
+    return handle;
+  }
+
+  public getTurnObservation(handle: CdpTurnObservationHandle): CdpTurnObservationSnapshot {
+    const observation = this.requireTurnObservation(handle);
+    if (observation.ambiguousWrite) {
+      throw new Error("The scoped turn write identity became ambiguous or unsafe.");
+    }
+    if (observation.writeRequestId === null || observation.lifecycle === null) {
+      return Object.freeze({ prepareCount: observation.prepareCount, write: null });
+    }
+
+    return Object.freeze({
+      prepareCount: observation.prepareCount,
+      write: Object.freeze({
+        lifecycle: observation.lifecycle,
+      }),
+    });
+  }
+
+  public releaseTurnObservation(handle: CdpTurnObservationHandle): void {
+    const observation = this.activeTurnObservation;
+    if (observation === null || observation.handle !== handle) {
+      return;
+    }
+    this.activeTurnObservation = null;
+  }
+
+  public async insertText(text: string): Promise<void> {
+    if (this.closed) {
+      throw new Error("CDP session is closed.");
+    }
+    try {
+      await this.client.Input.insertText({ text });
+    } catch {
+      throw new Error("CDP insertText command failed without retained protocol metadata.");
+    }
+  }
+
+  public async dispatchEnterKeyDown(): Promise<void> {
+    await this.dispatchEnter("keyDown");
+  }
+
+  public async dispatchEnterKeyUp(): Promise<void> {
+    await this.dispatchEnter("keyUp");
+  }
+
+  public async getCurrentConversationLocator(): Promise<ConversationLocator | null> {
+    if (this.closed) {
+      throw new Error("CDP session is closed.");
+    }
+    const frameTree = await this.client.Page.getFrameTree();
+    try {
+      return createConversationLocator(frameTree.frameTree.frame.url);
+    } catch {
+      return null;
+    }
+  }
+
+  private async dispatchEnter(type: "keyDown" | "keyUp"): Promise<void> {
+    if (this.closed) {
+      throw new Error("CDP session is closed.");
+    }
+    try {
+      await this.client.Input.dispatchKeyEvent({
+        type,
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      });
+    } catch {
+      throw new Error("CDP Enter command failed without retained protocol metadata.");
+    }
+  }
+
   private readonly handleDisconnect = (): void => {
     if (this.closed) {
       return;
@@ -237,26 +437,107 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
     }
   };
 
-  private onRequestWillBeSent(requestId: string, rawUrl: string): void {
+  private onRequestWillBeSent(
+    requestId: string,
+    rawUrl: string,
+    method: string | undefined,
+    redirectedFromPreviousRequest: boolean,
+  ): void {
     const relevant = isRelevantBackendUrl(rawUrl);
     const wasRelevant = this.activeRelevantRequestIds.has(requestId);
 
     if (relevant && !wasRelevant) {
       this.activeRelevantRequestIds.add(requestId);
       this.activityEpoch += 1;
-      return;
-    }
-
-    if (!relevant && wasRelevant) {
+    } else if (!relevant && wasRelevant) {
       this.activeRelevantRequestIds.delete(requestId);
       this.activityEpoch += 1;
     }
+
+    const observation = this.activeTurnObservation;
+    if (observation === null) {
+      return;
+    }
+
+    if (observation.writeRequestId === requestId) {
+      if (observation.lifecycle !== "ACTIVE") {
+        observation.ambiguousWrite = true;
+        return;
+      }
+      if (!redirectedFromPreviousRequest) {
+        observation.ambiguousWrite = true;
+        return;
+      }
+
+      // requestWillBeSent reuses Network.RequestId across redirects. Presence
+      // of redirectResponse proves the originally selected conversation POST
+      // did not itself obtain the required direct successful HTTP outcome.
+      // Keep the overall chain ACTIVE until loadingFinished/loadingFailed, but
+      // make selected-leg failure sticky so a later hop's 2xx cannot upgrade it.
+      observation.selectedLegRedirected = true;
+      observation.successfulResponseObserved = false;
+      return;
+    }
+
+    const kind = classifyTurnRequest(rawUrl, method);
+    if (kind === "PREPARE") {
+      observation.prepareCount += 1;
+      return;
+    }
+
+    if (kind !== "WRITE") {
+      return;
+    }
+
+    if (observation.writeRequestId === null) {
+      observation.writeRequestId = requestId;
+      observation.successfulResponseObserved = null;
+      observation.selectedLegRedirected = false;
+      observation.lifecycle = "ACTIVE";
+      return;
+    }
+
+    observation.ambiguousWrite = true;
   }
 
-  private onRequestSettled(requestId: string): void {
+  private onResponseReceived(requestId: string, status: number): void {
+    const observation = this.activeTurnObservation;
+    if (
+      observation === null ||
+      observation.writeRequestId !== requestId ||
+      observation.lifecycle !== "ACTIVE" ||
+      observation.selectedLegRedirected
+    ) {
+      return;
+    }
+    observation.successfulResponseObserved = isSuccessfulHttpStatus(status);
+  }
+
+  private onRequestSettled(requestId: string, failed: boolean): void {
     if (this.activeRelevantRequestIds.delete(requestId)) {
       this.activityEpoch += 1;
     }
+
+    const observation = this.activeTurnObservation;
+    if (observation?.writeRequestId === requestId && observation.lifecycle === "ACTIVE") {
+      observation.lifecycle =
+        failed ||
+        observation.selectedLegRedirected ||
+        observation.successfulResponseObserved !== true
+          ? "FAILED"
+          : "FINISHED";
+    }
+  }
+
+  private requireTurnObservation(handle: CdpTurnObservationHandle): ActiveTurnObservation {
+    if (this.closed || !this.readinessInitialized) {
+      throw new Error("CDP turn observation is unavailable.");
+    }
+    const observation = this.activeTurnObservation;
+    if (observation === null || observation.handle !== handle) {
+      throw new Error("CDP turn observation handle is not active.");
+    }
+    return observation;
   }
 
   private disposeReadinessObservation(): void {
@@ -268,6 +549,7 @@ class ChromeRemoteInterfaceSession implements CdpTransportSession {
       }
     }
     this.activeRelevantRequestIds.clear();
+    this.activeTurnObservation = null;
     this.activityEpoch = 0;
     this.readinessInitialized = false;
   }

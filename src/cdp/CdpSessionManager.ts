@@ -6,6 +6,7 @@ import {
   RuntimeLeaseSource,
   sameRuntimeLease,
 } from "../domain/RuntimeGeneration.js";
+import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import { CdpConnectionState } from "../domain/RuntimeState.js";
 import {
   CdpAttachFailedError,
@@ -20,7 +21,14 @@ import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.
 import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
-import { CdpTransport, CdpTransportSession } from "./CdpTransport.js";
+import {
+  CdpTransport,
+  CdpTransportSession,
+  CdpTurnComposerState,
+  CdpTurnObservationHandle,
+  CdpTurnObservationSnapshot,
+  CdpTurnTransportSession,
+} from "./CdpTransport.js";
 
 const DEFAULT_ATTACH_TIMEOUT_MS = 5000;
 
@@ -32,6 +40,30 @@ export interface CdpSessionManagerOptions {
   readonly discovery?: CdpTargetDiscoveryLike;
   readonly transport?: CdpTransport;
   readonly attachTimeoutMs?: number;
+}
+
+function isTurnTransportSession(session: CdpTransportSession): session is CdpTurnTransportSession {
+  const candidate = session as Partial<CdpTurnTransportSession>;
+  return (
+    typeof candidate.getTurnComposerState === "function" &&
+    typeof candidate.armTurnObservation === "function" &&
+    typeof candidate.getTurnObservation === "function" &&
+    typeof candidate.releaseTurnObservation === "function" &&
+    typeof candidate.insertText === "function" &&
+    typeof candidate.dispatchEnterKeyDown === "function" &&
+    typeof candidate.dispatchEnterKeyUp === "function" &&
+    typeof candidate.getCurrentConversationLocator === "function"
+  );
+}
+
+function sanitizedNavigationCause(error: unknown): Error {
+  if (error instanceof CdpDisconnectedError) {
+    return new CdpDisconnectedError();
+  }
+  if (error instanceof CdpNavigationFailedError) {
+    return new CdpNavigationFailedError();
+  }
+  return new Error("CDP navigation failed without retained low-level metadata.");
 }
 
 export class CdpSessionManager {
@@ -176,7 +208,10 @@ export class CdpSessionManager {
     try {
       await session.navigate(url);
     } catch (error) {
-      throw new CdpNavigationFailedError(undefined, { cause: error });
+      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+        throw error;
+      }
+      throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
     }
   }
 
@@ -222,6 +257,68 @@ export class CdpSessionManager {
     }
   }
 
+  public async getTurnComposerState(
+    expectedRoute: RouteExpectation,
+    lease: RuntimeLease,
+  ): Promise<CdpTurnComposerState> {
+    const session = this.requireTurnSessionForLease(lease);
+    return await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => session.getTurnComposerState(expectedRoute),
+    );
+  }
+
+  public armTurnObservation(lease: RuntimeLease): CdpTurnObservationHandle {
+    const session = this.requireTurnSessionForLease(lease);
+    return session.armTurnObservation();
+  }
+
+  public getTurnObservation(
+    handle: CdpTurnObservationHandle,
+    lease: RuntimeLease,
+  ): CdpTurnObservationSnapshot {
+    const session = this.requireTurnSessionForLease(lease);
+    return session.getTurnObservation(handle);
+  }
+
+  public releaseTurnObservation(handle: CdpTurnObservationHandle): void {
+    const session = this.session;
+    if (session !== null && isTurnTransportSession(session)) {
+      try {
+        session.releaseTurnObservation(handle);
+      } catch {
+        // Cleanup is best-effort and never exposes protocol metadata.
+      }
+    }
+  }
+
+  public async insertText(text: string, lease: RuntimeLease): Promise<void> {
+    const session = this.requireTurnSessionForLease(lease);
+    await this.runTurnSessionOperation(session, lease, () => session.insertText(text));
+  }
+
+  public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
+    const session = this.requireTurnSessionForLease(lease);
+    await this.runTurnSessionOperation(session, lease, () => session.dispatchEnterKeyDown());
+  }
+
+  public async dispatchEnterKeyUp(lease: RuntimeLease): Promise<void> {
+    const session = this.requireTurnSessionForLease(lease);
+    await this.runTurnSessionOperation(session, lease, () => session.dispatchEnterKeyUp());
+  }
+
+  public async getCurrentConversationLocator(
+    lease: RuntimeLease,
+  ): Promise<ConversationLocator | null> {
+    const session = this.requireTurnSessionForLease(lease);
+    return await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => session.getCurrentConversationLocator(),
+    );
+  }
+
   private async runReadinessSessionOperation<T>(
     session: CdpTransportSession,
     lease: RuntimeLease,
@@ -264,6 +361,22 @@ export class CdpSessionManager {
     }
   }
 
+  private async runTurnSessionOperation<T>(
+    session: CdpTurnTransportSession,
+    lease: RuntimeLease,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    this.assertSessionForLeaseCurrent(session, lease);
+    try {
+      const result = await operation();
+      this.assertSessionForLeaseCurrent(session, lease);
+      return result;
+    } catch (error) {
+      this.assertSessionForLeaseCurrent(session, lease);
+      throw error;
+    }
+  }
+
   private invalidateSessionAfterInFlightAbort(session: CdpTransportSession): void {
     if (this.session !== session) {
       return;
@@ -287,6 +400,14 @@ export class CdpSessionManager {
       throw new RuntimeGenerationChangedError();
     }
     return this.session;
+  }
+
+  private requireTurnSessionForLease(lease: RuntimeLease): CdpTurnTransportSession {
+    const session = this.requireSessionForLease(lease);
+    if (!isTurnTransportSession(session)) {
+      throw new CdpDisconnectedError("The connected CDP session does not support turn execution.");
+    }
+    return session;
   }
 
   private assertSessionForLeaseCurrent(session: CdpTransportSession, lease: RuntimeLease): void {

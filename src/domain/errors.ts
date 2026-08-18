@@ -26,7 +26,11 @@ export type ThreadwireErrorCode =
   | "THREAD_HANDLE_COLLISION"
   | "ROUTE_NAVIGATION_FAILED"
   | "EXISTING_ROUTE_READINESS_TIMEOUT"
-  | "FRESH_ROUTE_READINESS_TIMEOUT";
+  | "FRESH_ROUTE_READINESS_TIMEOUT"
+  | "TURN_INPUT_FAILED"
+  | "TURN_WRITE_FAILED"
+  | "FRESH_CONVERSATION_NOT_CREATED"
+  | "TURN_STATE_UNCERTAIN";
 
 export class ThreadwireError extends Error {
   public readonly code: ThreadwireErrorCode;
@@ -231,5 +235,33 @@ export class FreshRouteReadinessTimeoutError extends ThreadwireError {
   constructor(message: string = "Fresh conversation route did not become ready before the deadline.", options?: ErrorOptions) {
     super(message, "FRESH_ROUTE_READINESS_TIMEOUT", options);
     this.name = "FreshRouteReadinessTimeoutError";
+  }
+}
+
+export class TurnInputFailedError extends ThreadwireError {
+  constructor(message: string = "Turn input could not be submitted safely.", options?: ErrorOptions) {
+    super(message, "TURN_INPUT_FAILED", options);
+    this.name = "TurnInputFailedError";
+  }
+}
+
+export class TurnWriteFailedError extends ThreadwireError {
+  constructor(message: string = "The legitimate conversation write failed before safe completion.", options?: ErrorOptions) {
+    super(message, "TURN_WRITE_FAILED", options);
+    this.name = "TurnWriteFailedError";
+  }
+}
+
+export class FreshConversationNotCreatedError extends ThreadwireError {
+  constructor(message: string = "The fresh turn did not establish a supported conversation route.", options?: ErrorOptions) {
+    super(message, "FRESH_CONVERSATION_NOT_CREATED", options);
+    this.name = "FreshConversationNotCreatedError";
+  }
+}
+
+export class TurnStateUncertainError extends ThreadwireError {
+  constructor(message: string = "Turn state is uncertain; mutating operations are blocked until the runtime generation changes.", options?: ErrorOptions) {
+    super(message, "TURN_STATE_UNCERTAIN", options);
+    this.name = "TurnStateUncertainError";
   }
 }
