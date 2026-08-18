@@ -21,19 +21,6 @@ import { ThreadRegistry } from "../../src/routing/ThreadRegistry.js";
 import { TurnExecutor } from "../../src/turn/TurnExecutor.js";
 import { TurnCdpPort, TurnComposerPreflightPort } from "../../src/turn/types.js";
 
-interface Deferred<T> {
-  readonly promise: Promise<T>;
-  resolve(value: T): void;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolver) => {
-    resolve = resolver;
-  });
-  return { promise, resolve };
-}
-
 class ManualSleep {
   public entries = 0;
   private readonly releases: Array<() => void> = [];
@@ -289,7 +276,16 @@ async function fixture(options: { settlementTimeoutMs?: number } = {}) {
       sleep: manualSleep.sleep,
     },
   );
-  return { runtime, scheduler, registry, client, manualSleep, now, executor };
+  return {
+    runtime,
+    scheduler,
+    registry,
+    client,
+    manualSleep,
+    now,
+    executor,
+    handleAllocations: () => handleIndex,
+  };
 }
 
 function observeSettlement<T>(promise: Promise<T>): { readonly settled: () => boolean } {
@@ -305,32 +301,27 @@ function observeSettlement<T>(promise: Promise<T>): { readonly settled: () => bo
   return { settled: () => done };
 }
 
-test("FRESH route may appear before exact successful write settlement without resolving early", async () => {
+test("FRESH early route succeeds only after later write settlement and never resolves while ACTIVE", async () => {
   const f = await fixture();
   const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
   const state = observeSettlement(turn);
 
   await f.manualSleep.waitForEntry(1);
   assert.equal(state.settled(), false, "capturing the /c/... route while write A is ACTIVE must not resolve FRESH");
-  assert.equal(f.registry.registerWithStatus(freshLocator).created, true, "executor must not register before settlement");
+  assert.equal(f.handleAllocations(), 0, "captured locator must not be registered before settlement");
 
-  // Undo only the test probe's registration by using a separate fixture for
-  // the actual result assertion; the probe above proves no prior registration.
-});
+  f.manualSleep.releaseOne();
+  await f.manualSleep.waitForEntry(2);
+  assert.equal(state.settled(), false, "a later polling iteration with A still ACTIVE must keep TURN ownership");
+  assert.equal(f.handleAllocations(), 0);
 
-test("FRESH early route succeeds only after A loadingFinished and does not latch uncertainty", async () => {
-  const f = await fixture();
-  const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
-  const state = observeSettlement(turn);
-
-  await f.manualSleep.waitForEntry(1);
-  assert.equal(state.settled(), false);
   f.client.emitFinished();
   f.manualSleep.releaseOne();
 
   const result = await turn;
   assert.equal(result.created, true);
   assert.equal(f.registry.resolve(result.threadHandle), freshLocator);
+  assert.equal(f.handleAllocations(), 1);
 
   let routeRan = false;
   await f.scheduler.schedule("ROUTE", async () => {
@@ -344,12 +335,12 @@ test("FRESH early route followed by exact write failure returns TURN_WRITE_FAILE
   const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
 
   await f.manualSleep.waitForEntry(1);
+  assert.equal(f.handleAllocations(), 0);
   f.client.emitFailed();
   f.manualSleep.releaseOne();
 
   await assert.rejects(turn, TurnWriteFailedError);
-  const registration = f.registry.registerWithStatus(freshLocator);
-  assert.equal(registration.created, true, "failed write must not have registered the captured locator");
+  assert.equal(f.handleAllocations(), 0, "failed write must not register the captured locator");
 });
 
 test("FRESH early route keeps waiting until the existing write settlement deadline then fails closed", async () => {
@@ -363,6 +354,7 @@ test("FRESH early route keeps waiting until the existing write settlement deadli
   });
   await Promise.resolve();
   assert.equal(routeCallbackCount, 0);
+  assert.equal(f.handleAllocations(), 0);
 
   f.now.value = 5;
   f.manualSleep.releaseOne();
@@ -370,6 +362,7 @@ test("FRESH early route keeps waiting until the existing write settlement deadli
   await assert.rejects(turn, TurnStateUncertainError);
   await assert.rejects(queuedRoute, TurnStateUncertainError);
   assert.equal(routeCallbackCount, 0);
+  assert.equal(f.handleAllocations(), 0);
   await assert.rejects(
     () => f.scheduler.schedule("TURN", async () => undefined),
     TurnStateUncertainError,
@@ -387,6 +380,7 @@ test("FRESH late distinct write after locator capture still fails closed and blo
   });
   await Promise.resolve();
   assert.equal(routeCallbackCount, 0);
+  assert.equal(f.handleAllocations(), 0);
 
   f.client.emitWrite("write-b");
   f.manualSleep.releaseOne();
@@ -394,8 +388,7 @@ test("FRESH late distinct write after locator capture still fails closed and blo
   await assert.rejects(turn, TurnStateUncertainError);
   await assert.rejects(queuedRoute, TurnStateUncertainError);
   assert.equal(routeCallbackCount, 0);
-  const registration = f.registry.registerWithStatus(freshLocator);
-  assert.equal(registration.created, true, "ambiguous turn must not register the captured locator");
+  assert.equal(f.handleAllocations(), 0, "ambiguous turn must not register the captured locator");
 });
 
 test("FRESH post-commit abort with early locator waits for FINISHED before outward abort", async () => {
@@ -409,9 +402,14 @@ test("FRESH post-commit abort with early locator waits for FINISHED before outwa
   await Promise.resolve();
   assert.equal(state.settled(), false, "caller abort must not release TURN while exact write remains ACTIVE");
 
+  f.manualSleep.releaseOne();
+  await f.manualSleep.waitForEntry(2);
+  assert.equal(state.settled(), false, "post-commit abort must remain deferred across another ACTIVE poll");
+
   f.client.emitFinished();
   f.manualSleep.releaseOne();
   await assert.rejects(turn, OperationAbortedError);
+  assert.equal(f.handleAllocations(), 0, "aborted fresh result must not be registered");
 });
 
 test("FRESH post-commit abort with early locator preserves FAILED write precedence", async () => {
@@ -425,4 +423,5 @@ test("FRESH post-commit abort with early locator preserves FAILED write preceden
   f.manualSleep.releaseOne();
 
   await assert.rejects(turn, TurnWriteFailedError);
+  assert.equal(f.handleAllocations(), 0);
 });
