@@ -41,10 +41,10 @@ export type ConversationRouteResult = ExistingConversationRouteResult | FreshCon
 
 function sanitizedRouteNavigationCause(error: unknown): Error {
   if (error instanceof CdpDisconnectedError) {
-    return new CdpDisconnectedError(error.message);
+    return new CdpDisconnectedError();
   }
   if (error instanceof CdpNavigationFailedError) {
-    return new CdpNavigationFailedError(error.message);
+    return new CdpNavigationFailedError();
   }
   return new Error("Route navigation failed without retained low-level metadata.");
 }
@@ -93,7 +93,7 @@ export class ConversationRouter {
         throw error;
       }
       if (error instanceof RouteNavigationFailedError) {
-        throw new RouteNavigationFailedError(error.message);
+        throw new RouteNavigationFailedError();
       }
       throw new RouteNavigationFailedError(undefined, {
         cause: sanitizedRouteNavigationCause(error),
