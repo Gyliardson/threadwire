@@ -5,6 +5,8 @@ import {
 } from "../domain/ThreadIdentity.js";
 import { RuntimeLease } from "../domain/RuntimeGeneration.js";
 import {
+  CdpDisconnectedError,
+  CdpNavigationFailedError,
   OperationAbortedError,
   RouteNavigationFailedError,
   RuntimeGenerationChangedError,
@@ -36,6 +38,16 @@ export type ExistingConversationRouteResult = Readonly<{
 }>;
 export type FreshConversationRouteResult = Readonly<{ kind: "FRESH" }>;
 export type ConversationRouteResult = ExistingConversationRouteResult | FreshConversationRouteResult;
+
+function sanitizedRouteNavigationCause(error: unknown): Error {
+  if (error instanceof CdpDisconnectedError) {
+    return new CdpDisconnectedError(error.message);
+  }
+  if (error instanceof CdpNavigationFailedError) {
+    return new CdpNavigationFailedError(error.message);
+  }
+  return new Error("Route navigation failed without retained low-level metadata.");
+}
 
 export class ConversationRouter {
   public constructor(
@@ -81,9 +93,11 @@ export class ConversationRouter {
         throw error;
       }
       if (error instanceof RouteNavigationFailedError) {
-        throw error;
+        throw new RouteNavigationFailedError(error.message);
       }
-      throw new RouteNavigationFailedError(undefined, { cause: error });
+      throw new RouteNavigationFailedError(undefined, {
+        cause: sanitizedRouteNavigationCause(error),
+      });
     }
   }
 }
