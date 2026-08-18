@@ -58,10 +58,10 @@ function isTurnTransportSession(session: CdpTransportSession): session is CdpTur
 
 function sanitizedNavigationCause(error: unknown): Error {
   if (error instanceof CdpDisconnectedError) {
-    return new CdpDisconnectedError(error.message);
+    return new CdpDisconnectedError();
   }
   if (error instanceof CdpNavigationFailedError) {
-    return new CdpNavigationFailedError(error.message);
+    return new CdpNavigationFailedError();
   }
   return new Error("CDP navigation failed without retained low-level metadata.");
 }
