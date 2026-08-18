@@ -349,9 +349,23 @@ export class TurnExecutor {
       }
 
       if (freshLocator !== null) {
-        // This final synchronous observer read is immediately followed by
-        // synchronous registration/return; no event callback can interleave
-        // before the finally block releases the scoped observation.
+        let currentFreshLocator: ConversationLocator | null = null;
+        try {
+          currentFreshLocator = await withTimeout(
+            async () => await this.cdp.getCurrentConversationLocator(lease),
+            this.commandTimeoutMs,
+            { message: "Timed out revalidating the resulting conversation route." },
+          );
+        } catch (error) {
+          if (error instanceof RuntimeGenerationChangedError) {
+            throw error;
+          }
+          lastFreshRouteError = sanitizedTurnCause(error);
+        }
+
+        // Final route congruence requires an awaited CDP read. Re-read the
+        // still-armed scoped observer synchronously after that await and before
+        // any registration so a late distinct write cannot be missed.
         const finalWrite = this.readTurnObservation(observation, lease).write;
         if (finalWrite === null || finalWrite.lifecycle === "ACTIVE") {
           this.failClosed(lease, new Error("The fresh turn write was not terminal at finalization."));
@@ -360,19 +374,42 @@ export class TurnExecutor {
           throw new TurnWriteFailedError();
         }
 
-        const registration = this.registry.registerWithStatus(freshLocator);
-        if (registration.created) {
+        callerCancelled ||= signal?.aborted ?? false;
+        if (callerCancelled) {
+          throw operationAborted(signal);
+        }
+
+        if (currentFreshLocator === freshLocator) {
+          // The final observer read above is synchronous, and registration/return
+          // follows synchronously with no additional await/interleaving boundary.
+          const registration = this.registry.registerWithStatus(freshLocator);
+          if (registration.created) {
+            return Object.freeze({
+              kind: "THREAD" as const,
+              threadHandle: registration.threadHandle,
+              created: true as const,
+            }) satisfies FreshTurnResult;
+          }
           return Object.freeze({
             kind: "THREAD" as const,
             threadHandle: registration.threadHandle,
-            created: true as const,
-          }) satisfies FreshTurnResult;
+            created: false as const,
+          }) satisfies ExistingTurnResult;
         }
-        return Object.freeze({
-          kind: "THREAD" as const,
-          threadHandle: registration.threadHandle,
-          created: false as const,
-        }) satisfies ExistingTurnResult;
+
+        if (currentFreshLocator !== null) {
+          throw new FreshConversationNotCreatedError();
+        }
+
+        if (this.clock() - writeObservedAt >= this.freshConversationTimeoutMs) {
+          throw new FreshConversationNotCreatedError(
+            undefined,
+            lastFreshRouteError === null ? undefined : { cause: lastFreshRouteError },
+          );
+        }
+
+        await this.sleep(this.pollIntervalMs);
+        continue;
       }
 
       if (write.lifecycle === "FINISHED" && now - writeObservedAt >= this.freshConversationTimeoutMs) {
