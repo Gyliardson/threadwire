@@ -411,7 +411,7 @@ type RequestListener = (event: {
 type ResponseListener = (event: { requestId: string; response: { status: number } }) => void;
 type SettledListener = (event: { requestId: string }) => void;
 
-type WriteMode = "NONE" | "SAME_ID" | "DISTINCT_IDS";
+type WriteMode = "NONE" | "UNKNOWN_SAME_ID" | "DISTINCT_IDS";
 
 class MultiWriteCriClient {
   public writeMode: WriteMode = "NONE";
@@ -480,7 +480,7 @@ class MultiWriteCriClient {
       if (params.type !== "keyDown") {
         return;
       }
-      if (this.writeMode === "SAME_ID") {
+      if (this.writeMode === "UNKNOWN_SAME_ID") {
         this.emitWrite("write-a");
         this.emitWrite("write-a");
         this.emitResponse("write-a", 200);
@@ -641,13 +641,21 @@ test("distinct second conversation write fails closed even after the selected fi
   assert.equal(routeRan, false);
 });
 
-test("same request ID continuation is not misclassified as a distinct second write", async () => {
-  const f = await multiWriteFixture("SAME_ID");
+test("same request ID repeat without redirect metadata fails closed", async () => {
+  const f = await multiWriteFixture("UNKNOWN_SAME_ID");
 
-  const result = await f.executor.execute(
-    { kind: "THREAD", threadHandle: f.handle },
-    "synthetic prompt",
+  await assert.rejects(
+    () => f.executor.execute({ kind: "THREAD", threadHandle: f.handle }, "synthetic prompt"),
+    TurnStateUncertainError,
   );
 
-  assert.equal(result.created, false);
+  let routeRan = false;
+  await assert.rejects(
+    () =>
+      f.scheduler.schedule("ROUTE", async () => {
+        routeRan = true;
+      }),
+    TurnStateUncertainError,
+  );
+  assert.equal(routeRan, false);
 });
