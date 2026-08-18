@@ -10,6 +10,7 @@ import {
 import { CdpTargetInfo } from "../../src/cdp/types.js";
 import { RuntimeGenerationTracker, RuntimeLease } from "../../src/domain/RuntimeGeneration.js";
 import {
+  FreshConversationNotCreatedError,
   OperationAbortedError,
   TurnStateUncertainError,
   TurnWriteFailedError,
@@ -70,6 +71,7 @@ type ResponseListener = (event: { requestId: string; response: { status: number 
 type SettledListener = (event: { requestId: string }) => void;
 
 const freshLocator = createConversationLocator("https://chatgpt.com/c/m5-early-route");
+const differentFreshLocator = createConversationLocator("https://chatgpt.com/c/m5-different-route");
 
 class EarlyRouteCriClient {
   public frame = {
@@ -77,6 +79,13 @@ class EarlyRouteCriClient {
     loaderId: "loader-root",
     url: "https://chatgpt.com/",
   };
+  public frameTreeReads = 0;
+  public blockFrameTreeReadAt: number | null = null;
+  private frameTreeRelease: (() => void) | null = null;
+  private frameTreeBlockedResolve!: () => void;
+  public readonly frameTreeBlocked = new Promise<void>((resolve) => {
+    this.frameTreeBlockedResolve = resolve;
+  });
   private readonly requestListeners = new Set<RequestListener>();
   private readonly responseListeners = new Set<ResponseListener>();
   private readonly finishedListeners = new Set<SettledListener>();
@@ -85,7 +94,16 @@ class EarlyRouteCriClient {
 
   public readonly Page = {
     navigate: async (_params: { url: string }) => ({}),
-    getFrameTree: async () => ({ frameTree: { frame: this.frame } }),
+    getFrameTree: async () => {
+      this.frameTreeReads += 1;
+      if (this.frameTreeReads === this.blockFrameTreeReadAt) {
+        this.frameTreeBlockedResolve();
+        await new Promise<void>((resolve) => {
+          this.frameTreeRelease = resolve;
+        });
+      }
+      return { frameTree: { frame: this.frame } };
+    },
   };
 
   public readonly Accessibility = {
@@ -153,6 +171,15 @@ class EarlyRouteCriClient {
     if (event === "disconnect") {
       this.disconnectListeners.add(listener);
     }
+  }
+
+  public releaseBlockedFrameTreeRead(): void {
+    const release = this.frameTreeRelease;
+    if (release === null) {
+      throw new Error("No blocked frame-tree read is available to release.");
+    }
+    this.frameTreeRelease = null;
+    release();
   }
 
   public emitWrite(requestId: string): void {
@@ -301,7 +328,33 @@ function observeSettlement<T>(promise: Promise<T>): { readonly settled: () => bo
   return { settled: () => done };
 }
 
-test("FRESH early route succeeds only after later write settlement and never resolves while ACTIVE", async () => {
+function errorGraphContainsText(value: unknown, needle: string, seen = new Set<unknown>()): boolean {
+  if (typeof value === "string") {
+    return value.includes(needle);
+  }
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+    return false;
+  }
+  if (seen.has(value)) {
+    return false;
+  }
+  seen.add(value);
+
+  if (value instanceof Error) {
+    if (value.name.includes(needle) || value.message.includes(needle)) {
+      return true;
+    }
+    if ("cause" in value && errorGraphContainsText((value as Error & { cause?: unknown }).cause, needle, seen)) {
+      return true;
+    }
+  }
+
+  return Object.values(value as Record<string, unknown>).some((nested) =>
+    errorGraphContainsText(nested, needle, seen),
+  );
+}
+
+test("FRESH early route succeeds only after later write settlement and final route congruence", async () => {
   const f = await fixture();
   const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
   const state = observeSettlement(turn);
@@ -314,6 +367,7 @@ test("FRESH early route succeeds only after later write settlement and never res
   await f.manualSleep.waitForEntry(2);
   assert.equal(state.settled(), false, "a later polling iteration with A still ACTIVE must keep TURN ownership");
   assert.equal(f.handleAllocations(), 0);
+  assert.equal(f.client.frame.url, freshLocator);
 
   f.client.emitFinished();
   f.manualSleep.releaseOne();
@@ -321,6 +375,7 @@ test("FRESH early route succeeds only after later write settlement and never res
   const result = await turn;
   assert.equal(result.created, true);
   assert.equal(f.registry.resolve(result.threadHandle), freshLocator);
+  assert.equal(f.registry.knownThreads().length, 1);
   assert.equal(f.handleAllocations(), 1);
 
   let routeRan = false;
@@ -328,6 +383,76 @@ test("FRESH early route succeeds only after later write settlement and never res
     routeRan = true;
   });
   assert.equal(routeRan, true, "successful settlement must not poison the runtime uncertainty latch");
+});
+
+test("FRESH captured locator that becomes unsupported is not registered and times out safely", async () => {
+  const f = await fixture();
+  const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
+
+  await f.manualSleep.waitForEntry(1);
+  f.client.frame = {
+    id: "main",
+    loaderId: "loader-root-again",
+    url: "https://chatgpt.com/",
+  };
+  f.client.emitFinished();
+  f.manualSleep.releaseOne();
+
+  await f.manualSleep.waitForEntry(2);
+  assert.equal(f.registry.knownThreads().length, 0);
+  assert.equal(f.handleAllocations(), 0, "stale captured locator must not be registered while current route is unsupported");
+
+  f.now.value = 20;
+  f.manualSleep.releaseOne();
+
+  await assert.rejects(turn, FreshConversationNotCreatedError);
+  assert.equal(f.registry.knownThreads().length, 0);
+  assert.equal(f.handleAllocations(), 0);
+});
+
+test("FRESH captured locator that changes to a different supported locator fails without registration", async () => {
+  const f = await fixture();
+  const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
+
+  await f.manualSleep.waitForEntry(1);
+  f.client.frame = {
+    id: "main",
+    loaderId: "loader-different-conversation",
+    url: differentFreshLocator,
+  };
+  f.client.emitFinished();
+  f.manualSleep.releaseOne();
+
+  let captured: unknown;
+  try {
+    await turn;
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(captured instanceof FreshConversationNotCreatedError);
+  assert.equal(f.registry.knownThreads().length, 0);
+  assert.equal(f.handleAllocations(), 0, "neither captured nor current differing locator may allocate a handle");
+  assert.equal(errorGraphContainsText(captured, "m5-early-route"), false);
+  assert.equal(errorGraphContainsText(captured, "m5-different-route"), false);
+});
+
+test("FRESH late distinct write during final route revalidation fails closed before registration", async () => {
+  const f = await fixture();
+  f.client.blockFrameTreeReadAt = 3;
+  const turn = f.executor.execute({ kind: "FRESH" }, "synthetic prompt");
+
+  await f.manualSleep.waitForEntry(1);
+  f.client.emitFinished();
+  f.manualSleep.releaseOne();
+
+  await f.client.frameTreeBlocked;
+  assert.equal(f.handleAllocations(), 0, "final route await must occur before registration");
+  f.client.emitWrite("write-b");
+  f.client.releaseBlockedFrameTreeRead();
+
+  await assert.rejects(turn, TurnStateUncertainError);
+  assert.equal(f.registry.knownThreads().length, 0);
+  assert.equal(f.handleAllocations(), 0, "ambiguous write delivered during final route await must prevent registration");
 });
 
 test("FRESH early route followed by exact write failure returns TURN_WRITE_FAILED without registration", async () => {
