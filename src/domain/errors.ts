@@ -30,7 +30,10 @@ export type ThreadwireErrorCode =
   | "TURN_INPUT_FAILED"
   | "TURN_WRITE_FAILED"
   | "FRESH_CONVERSATION_NOT_CREATED"
-  | "TURN_STATE_UNCERTAIN";
+  | "TURN_STATE_UNCERTAIN"
+  | "RESPONSE_STREAM_UNAVAILABLE"
+  | "RESPONSE_STREAM_FAILED"
+  | "RESPONSE_PARSE_FAILED";
 
 export class ThreadwireError extends Error {
   public readonly code: ThreadwireErrorCode;
@@ -263,5 +266,26 @@ export class TurnStateUncertainError extends ThreadwireError {
   constructor(message: string = "Turn state is uncertain; mutating operations are blocked until the runtime generation changes.", options?: ErrorOptions) {
     super(message, "TURN_STATE_UNCERTAIN", options);
     this.name = "TurnStateUncertainError";
+  }
+}
+
+export class ResponseStreamUnavailableError extends ThreadwireError {
+  constructor(message: string = "Response streaming is unavailable for the selected legitimate conversation write.", options?: ErrorOptions) {
+    super(message, "RESPONSE_STREAM_UNAVAILABLE", options);
+    this.name = "ResponseStreamUnavailableError";
+  }
+}
+
+export class ResponseStreamFailedError extends ThreadwireError {
+  constructor(message: string = "The legitimate conversation response stream could not be consumed safely.", options?: ErrorOptions) {
+    super(message, "RESPONSE_STREAM_FAILED", options);
+    this.name = "ResponseStreamFailedError";
+  }
+}
+
+export class ResponseParseFailedError extends ThreadwireError {
+  constructor(message: string = "The legitimate conversation response stream could not be normalized safely.", options?: ErrorOptions) {
+    super(message, "RESPONSE_PARSE_FAILED", options);
+    this.name = "ResponseParseFailedError";
   }
 }

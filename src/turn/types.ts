@@ -1,11 +1,13 @@
 import {
   CdpTurnComposerState,
   CdpTurnObservationHandle,
+  CdpTurnObservationOptions,
   CdpTurnObservationSnapshot,
 } from "../cdp/CdpTransport.js";
 import { RuntimeLease } from "../domain/RuntimeGeneration.js";
 import { ConversationLocator, ThreadHandle } from "../domain/ThreadIdentity.js";
 import { RouteExpectation } from "../readiness/types.js";
+import { ResponseStreamEvent } from "../response/types.js";
 
 export type TurnTarget =
   | Readonly<{ kind: "THREAD"; threadHandle: ThreadHandle }>
@@ -25,6 +27,8 @@ export type FreshTurnResult = Readonly<{
 
 export type TurnResult = ExistingTurnResult | FreshTurnResult;
 
+export type TurnResponseEventListener = (event: ResponseStreamEvent) => void;
+
 export interface TurnComposerPreflightPort {
   waitForTurnComposer(
     expectedRoute: RouteExpectation,
@@ -38,11 +42,19 @@ export interface TurnCdpPort {
     expectedRoute: RouteExpectation,
     lease: RuntimeLease,
   ): Promise<CdpTurnComposerState>;
-  armTurnObservation(lease: RuntimeLease): CdpTurnObservationHandle;
+  armTurnObservation(
+    lease: RuntimeLease,
+    options?: CdpTurnObservationOptions,
+  ): CdpTurnObservationHandle;
   getTurnObservation(
     handle: CdpTurnObservationHandle,
     lease: RuntimeLease,
   ): CdpTurnObservationSnapshot;
+  takeTurnResponseEvents?(
+    handle: CdpTurnObservationHandle,
+    lease: RuntimeLease,
+  ): readonly ResponseStreamEvent[];
+  discardTurnResponse?(handle: CdpTurnObservationHandle, lease: RuntimeLease): void;
   releaseTurnObservation(handle: CdpTurnObservationHandle): void;
   insertText(text: string, lease: RuntimeLease): Promise<void>;
   dispatchEnterKeyDown(lease: RuntimeLease): Promise<void>;

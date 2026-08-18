@@ -15,17 +15,21 @@ import {
   CdpReadinessFailedError,
   OperationAbortedError,
   RuntimeGenerationChangedError,
+  ResponseStreamUnavailableError,
   ThreadwireError,
 } from "../domain/errors.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
+import { ResponseStreamEvent } from "../response/types.js";
 import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
 import {
+  CdpResponseTurnTransportSession,
   CdpTransport,
   CdpTransportSession,
   CdpTurnComposerState,
   CdpTurnObservationHandle,
+  CdpTurnObservationOptions,
   CdpTurnObservationSnapshot,
   CdpTurnTransportSession,
 } from "./CdpTransport.js";
@@ -53,6 +57,16 @@ function isTurnTransportSession(session: CdpTransportSession): session is CdpTur
     typeof candidate.dispatchEnterKeyDown === "function" &&
     typeof candidate.dispatchEnterKeyUp === "function" &&
     typeof candidate.getCurrentConversationLocator === "function"
+  );
+}
+
+function isResponseTurnTransportSession(
+  session: CdpTransportSession,
+): session is CdpResponseTurnTransportSession {
+  return (
+    isTurnTransportSession(session) &&
+    typeof (session as Partial<CdpResponseTurnTransportSession>).takeTurnResponseEvents === "function" &&
+    typeof (session as Partial<CdpResponseTurnTransportSession>).discardTurnResponse === "function"
   );
 }
 
@@ -125,7 +139,7 @@ export class CdpSessionManager {
             host: this.config.cdpHost,
             port: this.config.cdpPort,
             target,
-            signal: attachSignal,
+            ...(attachSignal ? { signal: attachSignal } : {}),
           }),
         this.attachTimeoutMs,
         signal
@@ -269,9 +283,16 @@ export class CdpSessionManager {
     );
   }
 
-  public armTurnObservation(lease: RuntimeLease): CdpTurnObservationHandle {
+  public armTurnObservation(
+    lease: RuntimeLease,
+    options?: CdpTurnObservationOptions,
+  ): CdpTurnObservationHandle {
+    if (options?.responseStream === true) {
+      const session = this.requireResponseTurnSessionForLease(lease);
+      return session.armTurnObservation(options);
+    }
     const session = this.requireTurnSessionForLease(lease);
-    return session.armTurnObservation();
+    return session.armTurnObservation(options);
   }
 
   public getTurnObservation(
@@ -280,6 +301,19 @@ export class CdpSessionManager {
   ): CdpTurnObservationSnapshot {
     const session = this.requireTurnSessionForLease(lease);
     return session.getTurnObservation(handle);
+  }
+
+  public takeTurnResponseEvents(
+    handle: CdpTurnObservationHandle,
+    lease: RuntimeLease,
+  ): readonly ResponseStreamEvent[] {
+    const session = this.requireResponseTurnSessionForLease(lease);
+    return session.takeTurnResponseEvents(handle);
+  }
+
+  public discardTurnResponse(handle: CdpTurnObservationHandle, lease: RuntimeLease): void {
+    const session = this.requireResponseTurnSessionForLease(lease);
+    session.discardTurnResponse(handle);
   }
 
   public releaseTurnObservation(handle: CdpTurnObservationHandle): void {
@@ -406,6 +440,14 @@ export class CdpSessionManager {
     const session = this.requireSessionForLease(lease);
     if (!isTurnTransportSession(session)) {
       throw new CdpDisconnectedError("The connected CDP session does not support turn execution.");
+    }
+    return session;
+  }
+
+  private requireResponseTurnSessionForLease(lease: RuntimeLease): CdpResponseTurnTransportSession {
+    const session = this.requireSessionForLease(lease);
+    if (!isResponseTurnTransportSession(session)) {
+      throw new ResponseStreamUnavailableError();
     }
     return session;
   }
