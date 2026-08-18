@@ -56,6 +56,16 @@ function isTurnTransportSession(session: CdpTransportSession): session is CdpTur
   );
 }
 
+function sanitizedNavigationCause(error: unknown): Error {
+  if (error instanceof CdpDisconnectedError) {
+    return new CdpDisconnectedError(error.message);
+  }
+  if (error instanceof CdpNavigationFailedError) {
+    return new CdpNavigationFailedError(error.message);
+  }
+  return new Error("CDP navigation failed without retained low-level metadata.");
+}
+
 export class CdpSessionManager {
   private currentState: CdpConnectionState = "DISCONNECTED";
   private session: CdpTransportSession | null = null;
@@ -198,7 +208,10 @@ export class CdpSessionManager {
     try {
       await session.navigate(url);
     } catch (error) {
-      throw new CdpNavigationFailedError(undefined, { cause: error });
+      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+        throw error;
+      }
+      throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
     }
   }
 
