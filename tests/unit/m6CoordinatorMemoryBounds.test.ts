@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   CdpResponseStreamTracker,
 } from "../../src/cdp/CdpResponseStreamTracker.js";
+import { CdpTurnObservationTracker } from "../../src/cdp/CdpTurnObservationTracker.js";
 import {
   ExperimentalNetworkDomain,
 } from "../../src/cdp/ChromeRemoteInterfaceHelpers.js";
@@ -107,4 +108,92 @@ test("pending live activation data bounds chunk count independently of base64 ch
   await Promise.resolve();
   assert.deepEqual(tracker.snapshot(), { lifecycle: "FAILED", failure: "BUFFER_OVERFLOW" });
   assert.deepEqual(tracker.drain(), []);
+});
+
+test("one oversized encoded chunk fails before base64 syntax processing and stays sanitized", () => {
+  const consumer = new ResponseStreamConsumer({ maxEncodedChunkChars: 8 });
+  const canary = "RAW_OVERSIZED_CANARY?";
+  assert.throws(
+    () => consumer.pushBase64(canary),
+    (error: unknown) => assertSanitizedOverflow(error, canary),
+  );
+});
+
+test("oversized bufferedData fails response stream without weakening M5 write settlement", async () => {
+  const canary = "RAW_BUFFERED_OVERSIZED_CANARY";
+  const network: ExperimentalNetworkDomain = {
+    streamResourceContent: async () => ({ bufferedData: canary }),
+  };
+  const tracker = new CdpTurnObservationTracker(
+    network,
+    () => true,
+    { maxEncodedChunkChars: 8 },
+  );
+  const handle = tracker.armTurnObservation({ responseStream: true });
+
+  tracker.onRequestWillBeSent(
+    "selected",
+    "https://chatgpt.com/backend-api/f/conversation",
+    "POST",
+    false,
+  );
+  tracker.onResponseReceived("selected", 200);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(tracker.getTurnObservation(handle).response, {
+    lifecycle: "FAILED",
+    failure: "BUFFER_OVERFLOW",
+  });
+  assert.equal(JSON.stringify(tracker.getTurnObservation(handle)).includes(canary), false);
+
+  tracker.onRequestSettled("selected", false);
+  const settled = tracker.getTurnObservation(handle);
+  assert.deepEqual(settled.write, { lifecycle: "FINISHED" });
+  assert.deepEqual(settled.response, { lifecycle: "FAILED", failure: "BUFFER_OVERFLOW" });
+
+  tracker.onDataReceived({ requestId: "selected", data: b64(delta("must-not-revive")) });
+  assert.deepEqual(tracker.getTurnObservation(handle).response, {
+    lifecycle: "FAILED",
+    failure: "BUFFER_OVERFLOW",
+  });
+});
+
+test("oversized live data after activation fails response stream while M5 remains independently safe", async () => {
+  const canary = "RAW_LIVE_OVERSIZED_CANARY";
+  const network: ExperimentalNetworkDomain = {
+    streamResourceContent: async () => ({}),
+  };
+  const tracker = new CdpTurnObservationTracker(
+    network,
+    () => true,
+    { maxEncodedChunkChars: 8 },
+  );
+  const handle = tracker.armTurnObservation({ responseStream: true });
+
+  tracker.onRequestWillBeSent(
+    "selected",
+    "https://chatgpt.com/backend-api/f/conversation",
+    "POST",
+    false,
+  );
+  tracker.onResponseReceived("selected", 200);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(tracker.getTurnObservation(handle).response?.lifecycle, "STREAMING");
+
+  tracker.onDataReceived({ requestId: "selected", data: canary });
+  let snapshot = tracker.getTurnObservation(handle);
+  assert.deepEqual(snapshot.write, { lifecycle: "ACTIVE" });
+  assert.deepEqual(snapshot.response, { lifecycle: "FAILED", failure: "BUFFER_OVERFLOW" });
+  assert.equal(JSON.stringify(snapshot).includes(canary), false);
+
+  tracker.onDataReceived({ requestId: "selected", data: b64(delta("must-not-revive")) });
+  snapshot = tracker.getTurnObservation(handle);
+  assert.deepEqual(snapshot.response, { lifecycle: "FAILED", failure: "BUFFER_OVERFLOW" });
+
+  tracker.onRequestSettled("selected", false);
+  snapshot = tracker.getTurnObservation(handle);
+  assert.deepEqual(snapshot.write, { lifecycle: "FINISHED" });
+  assert.deepEqual(snapshot.response, { lifecycle: "FAILED", failure: "BUFFER_OVERFLOW" });
 });

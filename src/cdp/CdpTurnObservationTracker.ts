@@ -1,3 +1,4 @@
+import { ResponseStreamConsumerOptions } from "../response/ResponseStreamConsumer.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import {
   CdpResponseTurnTransportSession,
@@ -40,6 +41,7 @@ export class CdpTurnObservationTracker implements ResponseTurnMethods {
   public constructor(
     private readonly network: ExperimentalNetworkDomain,
     private readonly dataObservationAvailable: () => boolean,
+    private readonly responseConsumerOptions: ResponseStreamConsumerOptions = {},
   ) {}
 
   public armTurnObservation(options: CdpTurnObservationOptions = {}): CdpTurnObservationHandle {
@@ -57,7 +59,11 @@ export class CdpTurnObservationTracker implements ResponseTurnMethods {
       lifecycle: null,
       ambiguousWrite: false,
       response: responseRequested
-        ? new CdpResponseStreamTracker(this.network, this.dataObservationAvailable())
+        ? new CdpResponseStreamTracker(
+            this.network,
+            this.dataObservationAvailable(),
+            this.responseConsumerOptions,
+          )
         : null,
     };
     return handle;

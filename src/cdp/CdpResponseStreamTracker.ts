@@ -1,6 +1,7 @@
 import {
   ResponseStreamConsumer,
   ResponseStreamConsumerError,
+  ResponseStreamConsumerOptions,
 } from "../response/ResponseStreamConsumer.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import {
@@ -19,7 +20,7 @@ export class CdpResponseStreamTracker {
   private selectedRequestId: string | null = null;
   private lifecycle: "PENDING" | "STREAMING" | "COMPLETED" | "FAILED" = "PENDING";
   private failure: CdpResponseStreamFailureKind | null = null;
-  private consumer: ResponseStreamConsumer | null = new ResponseStreamConsumer();
+  private consumer: ResponseStreamConsumer | null;
   private activationPending = false;
   private activated = false;
   private transportSettledWhileActivationPending = false;
@@ -30,7 +31,10 @@ export class CdpResponseStreamTracker {
   public constructor(
     private readonly network: ExperimentalNetworkDomain,
     private readonly dataObservationAvailable: boolean,
-  ) {}
+    consumerOptions: ResponseStreamConsumerOptions = {},
+  ) {
+    this.consumer = new ResponseStreamConsumer(consumerOptions);
+  }
 
   public snapshot(): CdpTurnResponseObservation {
     return Object.freeze({ lifecycle: this.lifecycle, failure: this.failure });

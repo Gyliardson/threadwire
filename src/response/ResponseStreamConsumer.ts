@@ -1,6 +1,7 @@
 import { TextDecoder } from "node:util";
 import { ResponseStreamEvent } from "./types.js";
 
+const DEFAULT_MAX_ENCODED_CHUNK_CHARS = 1_398_104;
 const DEFAULT_MAX_QUEUED_EVENTS = 1024;
 const DEFAULT_MAX_QUEUED_TEXT_CHARS = 1_048_576;
 const DEFAULT_MAX_PENDING_TEXT_CHARS = 1_048_576;
@@ -20,6 +21,7 @@ export class ResponseStreamConsumerError extends Error {
 }
 
 export interface ResponseStreamConsumerOptions {
+  readonly maxEncodedChunkChars?: number;
   readonly maxQueuedEvents?: number;
   readonly maxQueuedTextChars?: number;
   readonly maxPendingTextChars?: number;
@@ -50,6 +52,7 @@ function isValidBase64(value: string): boolean {
 
 export class ResponseStreamConsumer {
   private readonly decoder = new TextDecoder("utf-8", { fatal: true });
+  private readonly maxEncodedChunkChars: number;
   private readonly maxQueuedEvents: number;
   private readonly maxQueuedTextChars: number;
   private readonly maxPendingTextChars: number;
@@ -64,6 +67,12 @@ export class ResponseStreamConsumer {
   private disposed = false;
 
   public constructor(options: ResponseStreamConsumerOptions = {}) {
+    // Engineering memory-safety limit: roughly 1 MiB of decoded bytes at Base64
+    // expansion. This is not an observed or claimed Classic protocol maximum.
+    this.maxEncodedChunkChars = positiveSafeInteger(
+      options.maxEncodedChunkChars ?? DEFAULT_MAX_ENCODED_CHUNK_CHARS,
+      "maxEncodedChunkChars",
+    );
     this.maxQueuedEvents = positiveSafeInteger(
       options.maxQueuedEvents ?? DEFAULT_MAX_QUEUED_EVENTS,
       "maxQueuedEvents",
@@ -90,7 +99,13 @@ export class ResponseStreamConsumer {
     if (this.disposed || this.completedState) {
       return;
     }
-    if (typeof encoded !== "string" || !isValidBase64(encoded)) {
+    if (typeof encoded !== "string") {
+      throw new ResponseStreamConsumerError("PARSE_FAILED");
+    }
+    if (encoded.length > this.maxEncodedChunkChars) {
+      throw new ResponseStreamConsumerError("BUFFER_OVERFLOW");
+    }
+    if (!isValidBase64(encoded)) {
       throw new ResponseStreamConsumerError("PARSE_FAILED");
     }
 
