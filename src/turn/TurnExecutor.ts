@@ -334,6 +334,15 @@ export class TurnExecutor {
         }
       }
 
+      // Route creation and exact write settlement are independent. Once a
+      // supported fresh locator exists, an exactly observable ACTIVE write is
+      // still safe to wait on while TURN ownership and the existing settlement
+      // deadline remain in force.
+      if (target.kind === "FRESH" && freshLocator !== null && write.lifecycle === "ACTIVE") {
+        await this.sleep(this.pollIntervalMs);
+        continue;
+      }
+
       callerCancelled ||= signal?.aborted ?? false;
       if (callerCancelled) {
         throw operationAborted(signal);
