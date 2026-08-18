@@ -50,3 +50,18 @@ test("M5 Input and Page.navigate protocol failures are caught before raw CRI err
   assert.match(source, /Page\.navigate\(\{ url \}\);\s*\} catch \{/s);
   assert.match(source, /CDP Page\.navigate command failed without retained protocol metadata\./);
 });
+
+test("navigation defense boundaries reconstruct stable errors without copying low-level messages", async () => {
+  const manager = await readFile(new URL("../../src/cdp/CdpSessionManager.ts", import.meta.url), "utf8");
+  const router = await readFile(new URL("../../src/routing/ConversationRouter.ts", import.meta.url), "utf8");
+
+  const managerSanitizer = manager.match(/function sanitizedNavigationCause[\s\S]*?\n\}/)?.[0];
+  const routerSanitizer = router.match(/function sanitizedRouteNavigationCause[\s\S]*?\n\}/)?.[0];
+  assert.ok(managerSanitizer);
+  assert.ok(routerSanitizer);
+  assert.equal(managerSanitizer.includes("error.message"), false);
+  assert.equal(routerSanitizer.includes("error.message"), false);
+  assert.match(managerSanitizer, /new CdpNavigationFailedError\(\)/);
+  assert.match(routerSanitizer, /new CdpNavigationFailedError\(\)/);
+  assert.match(router, /throw new RouteNavigationFailedError\(\);/);
+});
