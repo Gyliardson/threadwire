@@ -527,14 +527,20 @@ export class TurnExecutor {
         }
 
         if (currentFreshLocator !== null) {
+          if (
+            responseState !== null &&
+            responseState.terminalError === null &&
+            !responseState.semanticCompleted
+          ) {
+            await this.sleep(this.pollIntervalMs);
+            continue;
+          }
+
+          const registration = this.registry.registerWithStatus(currentFreshLocator);
+          if (responseState?.terminalError !== null && responseState?.terminalError !== undefined) {
+            throw responseState.terminalError;
+          }
           if (responseState !== null) {
-            if (responseState.terminalError !== null) {
-              throw responseState.terminalError;
-            }
-            if (!responseState.semanticCompleted) {
-              await this.sleep(this.pollIntervalMs);
-              continue;
-            }
             const finalized = await this.finalizeResponseDelivery(
               responseState,
               { kind: "THREAD", locator: currentFreshLocator },
@@ -549,7 +555,6 @@ export class TurnExecutor {
             }
           }
 
-          const registration = this.registry.registerWithStatus(currentFreshLocator);
           if (registration.created) {
             return Object.freeze({
               kind: "THREAD" as const,
