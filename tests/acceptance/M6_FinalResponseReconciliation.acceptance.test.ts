@@ -91,6 +91,7 @@ test(
       assert.equal(freshResult.kind, "THREAD");
       assert.equal(freshResult.created, true);
       assert.equal(registry.knownThreads().length, 1);
+      assert.ok(freshDeltaCount >= 1);
       assert.equal(freshSafeText.includes(input1), false);
       assert.equal(freshFinalCount, 1);
       assert.equal(freshFinalText.trim() === output1, true);
@@ -100,7 +101,6 @@ test(
       assert.equal(freshOrder.filter((type) => type === "COMPLETED").length, 1);
       assert.equal(freshOrder.indexOf("FINAL_TEXT") < freshOrder.indexOf("COMPLETED"), true);
       assert.equal(freshOrder.at(-1), "COMPLETED");
-      assert.equal(freshDeltaCount >= 0, true);
 
       lease = supervisor.getCurrentRuntimeLease();
       const registeredLocator = registry.resolve(freshResult.threadHandle);
@@ -122,6 +122,7 @@ test(
       const prompt2 = `Reply with exactly ${output2} and do not repeat ${input2}.`;
       let existingSafeText = "";
       let existingFinalText = "";
+      let existingDeltaCount = 0;
       let existingFinalCount = 0;
       let existingCompletedCount = 0;
       const existingOrder: string[] = [];
@@ -132,6 +133,7 @@ test(
         (event) => {
           existingOrder.push(event.type);
           if (event.type === "TEXT_DELTA") {
+            existingDeltaCount += 1;
             existingSafeText += event.text;
             return;
           }
@@ -148,6 +150,7 @@ test(
       assert.equal(existingResult.created, false);
       assert.equal(existingResult.threadHandle, freshResult.threadHandle);
       assert.equal(registry.knownThreads().length, 1);
+      assert.ok(existingDeltaCount >= 1);
       assert.equal(existingSafeText.includes(input2), false);
       assert.equal(existingSafeText.includes(input1), false);
       assert.equal(freshSafeText.includes(input2), false);
