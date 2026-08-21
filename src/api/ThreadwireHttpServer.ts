@@ -5,25 +5,22 @@ import {
   ServerResponse,
 } from "node:http";
 import { AddressInfo } from "node:net";
-import { ThreadHandle } from "../domain/ThreadIdentity.js";
-import { ThreadwireError } from "../domain/errors.js";
+import { ControllerBusyError } from "../controller/ControllerTurnQueue.js";
 import {
   ControllerHealth,
   ControllerTurnRequest,
   ThreadwireController,
 } from "../controller/ThreadwireController.js";
-import { ControllerBusyError } from "../controller/ControllerTurnQueue.js";
+import { ThreadHandle } from "../domain/ThreadIdentity.js";
+import { ThreadwireError } from "../domain/errors.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import { TurnResult } from "../turn/types.js";
 import { ThreadwireApiConfig } from "./ApiConfig.js";
-import {
-  ApiRequestError,
-  PublicApiError,
-  serializePublicError,
-} from "./PublicError.js";
+import { ApiRequestError, serializePublicError } from "./PublicError.js";
 
 export const DEFAULT_API_MAX_BODY_BYTES = 128 * 1024;
 export const DEFAULT_API_MAX_PROMPT_BYTES = 64 * 1024;
+export const DEFAULT_API_MAX_INFLIGHT_TURNS = 8;
 export const DEFAULT_API_MAX_SSE_BUFFER_BYTES = 8 * 1024 * 1024;
 
 export interface ThreadwireApiController {
@@ -41,6 +38,7 @@ export interface ThreadwireHttpServerOptions {
   readonly portOverride?: number;
   readonly maxBodyBytes?: number;
   readonly maxPromptBytes?: number;
+  readonly maxInflightTurns?: number;
   readonly maxSseBufferBytes?: number;
 }
 
@@ -59,10 +57,7 @@ function nonNegativeSafeInteger(value: number, name: string): number {
 }
 
 function isAllowedHost(host: string | undefined): boolean {
-  if (host === undefined) {
-    return false;
-  }
-  return /^(?:127\.0\.0\.1|localhost)(?::\d{1,5})?$/i.test(host);
+  return host !== undefined && /^(?:127\.0\.0\.1|localhost)(?::\d{1,5})?$/i.test(host);
 }
 
 function hasExactKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -109,7 +104,10 @@ function parseTurnRequest(value: unknown, maxPromptBytes: number): ControllerTur
     if (!hasExactKeys(target, ["kind"])) {
       throw new ApiRequestError("API_REQUEST_INVALID", 400);
     }
-    return Object.freeze({ target: Object.freeze({ kind: "FRESH" as const }), prompt: body.prompt });
+    return Object.freeze({
+      target: Object.freeze({ kind: "FRESH" as const }),
+      prompt: body.prompt,
+    });
   }
   if (target.kind === "THREAD") {
     if (!hasExactKeys(target, ["kind", "threadHandle"])) {
@@ -139,11 +137,17 @@ function preStreamStatus(error: unknown): number {
   return 500;
 }
 
+function boundaryStatus(error: unknown): number {
+  return error instanceof ApiRequestError ? error.statusCode : 500;
+}
+
 export class ThreadwireHttpServer {
   private server: Server | null = null;
+  private inflightTurns = 0;
   private readonly port: number;
   private readonly maxBodyBytes: number;
   private readonly maxPromptBytes: number;
+  private readonly maxInflightTurns: number;
   private readonly maxSseBufferBytes: number;
 
   public constructor(
@@ -159,6 +163,10 @@ export class ThreadwireHttpServer {
     this.maxPromptBytes = positiveSafeInteger(
       options.maxPromptBytes ?? DEFAULT_API_MAX_PROMPT_BYTES,
       "maxPromptBytes",
+    );
+    this.maxInflightTurns = positiveSafeInteger(
+      options.maxInflightTurns ?? DEFAULT_API_MAX_INFLIGHT_TURNS,
+      "maxInflightTurns",
     );
     this.maxSseBufferBytes = positiveSafeInteger(
       options.maxSseBufferBytes ?? DEFAULT_API_MAX_SSE_BUFFER_BYTES,
@@ -177,11 +185,11 @@ export class ThreadwireHttpServer {
     }
 
     const server = createServer((request, response) => {
-      void this.handleRequest(request, response).catch(() => {
+      void this.handleRequest(request, response).catch((error: unknown) => {
         if (!response.headersSent) {
-          this.writeJson(response, 500, serializePublicError(new Error("internal")));
+          this.writeJson(response, boundaryStatus(error), serializePublicError(error));
         } else if (!response.writableEnded && !response.destroyed) {
-          this.writeSseEvent(response, "ERROR", serializePublicError(new Error("internal")));
+          this.writeSseEvent(response, "ERROR", serializePublicError(error));
           response.end();
         }
       });
@@ -221,7 +229,6 @@ export class ThreadwireHttpServer {
 
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     this.validateBoundary(request);
-
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.search !== "") {
       throw new ApiRequestError("API_REQUEST_INVALID", 400);
@@ -229,8 +236,7 @@ export class ThreadwireHttpServer {
 
     if (request.method === "GET" && url.pathname === "/v1/health") {
       try {
-        const health = await this.controller.health();
-        this.writeJson(response, 200, health);
+        this.writeJson(response, 200, await this.controller.health());
       } catch (error) {
         this.writeJson(response, 503, serializePublicError(error));
       }
@@ -245,7 +251,11 @@ export class ThreadwireHttpServer {
 
     if (url.pathname === "/v1/turns" && request.method !== "POST") {
       response.setHeader("Allow", "POST");
-      this.writeJson(response, 405, serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 405)));
+      this.writeJson(
+        response,
+        405,
+        serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 405)),
+      );
       return;
     }
 
@@ -254,7 +264,11 @@ export class ThreadwireHttpServer {
       return;
     }
 
-    this.writeJson(response, 404, serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 404)));
+    this.writeJson(
+      response,
+      404,
+      serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 404)),
+    );
   }
 
   private validateBoundary(request: IncomingMessage): void {
@@ -262,36 +276,59 @@ export class ThreadwireHttpServer {
     if (remoteAddress !== "127.0.0.1" && remoteAddress !== "::ffff:127.0.0.1") {
       throw new ApiRequestError("API_REQUEST_REJECTED", 403);
     }
-    const origin = request.headers.origin;
-    if (origin !== undefined) {
-      throw new ApiRequestError("API_REQUEST_REJECTED", 403);
-    }
-    const host = request.headers.host;
-    if (!isAllowedHost(host)) {
+    if (request.headers.origin !== undefined || !isAllowedHost(request.headers.host)) {
       throw new ApiRequestError("API_REQUEST_REJECTED", 403);
     }
   }
 
   private async handleTurn(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (this.inflightTurns >= this.maxInflightTurns) {
+      this.writeJson(response, 429, serializePublicError(new ControllerBusyError()));
+      return;
+    }
+
+    this.inflightTurns += 1;
+    try {
+      await this.handleAdmittedTurn(request, response);
+    } finally {
+      this.inflightTurns -= 1;
+    }
+  }
+
+  private async handleAdmittedTurn(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
     const contentType = request.headers["content-type"];
-    if (typeof contentType !== "string" || contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
-      this.writeJson(response, 415, serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 415)));
+    if (
+      typeof contentType !== "string" ||
+      contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+    ) {
+      this.writeJson(
+        response,
+        415,
+        serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 415)),
+      );
       return;
     }
     const contentEncoding = request.headers["content-encoding"];
     if (contentEncoding !== undefined && contentEncoding !== "identity") {
-      this.writeJson(response, 415, serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 415)));
+      this.writeJson(
+        response,
+        415,
+        serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 415)),
+      );
       return;
     }
 
     let body: ControllerTurnRequest;
     try {
-      const raw = await this.readBody(request);
-      body = parseTurnRequest(JSON.parse(raw) as unknown, this.maxPromptBytes);
+      body = parseTurnRequest(JSON.parse(await this.readBody(request)) as unknown, this.maxPromptBytes);
     } catch (error) {
-      const apiError = error instanceof ApiRequestError
-        ? error
-        : new ApiRequestError("API_REQUEST_INVALID", 400);
+      const apiError =
+        error instanceof ApiRequestError
+          ? error
+          : new ApiRequestError("API_REQUEST_INVALID", 400);
       this.writeJson(response, apiError.statusCode, serializePublicError(apiError));
       return;
     }
@@ -316,8 +353,7 @@ export class ThreadwireHttpServer {
         domainCompleted = true;
         return;
       }
-      const written = this.writeSseEvent(response, event.type, { text: event.text });
-      if (!written) {
+      if (!this.writeSseEvent(response, event.type, { text: event.text })) {
         transportOpen = false;
         abortController.abort();
       }
@@ -340,13 +376,10 @@ export class ThreadwireHttpServer {
         throw new Error("Turn completed without the public completion boundary.");
       }
       if (transportOpen && !response.destroyed && !response.writableEnded) {
-        const written = this.writeSseEvent(response, "COMPLETED", {
+        transportOpen = this.writeSseEvent(response, "COMPLETED", {
           threadHandle: result.threadHandle,
           newlyRegistered: result.created,
         });
-        if (!written) {
-          transportOpen = false;
-        }
       }
     } catch (error) {
       if (transportOpen && !response.destroyed && !response.writableEnded) {
@@ -408,12 +441,11 @@ export class ThreadwireHttpServer {
     if (response.headersSent) {
       return;
     }
-    const payload = JSON.stringify(body);
     response.statusCode = statusCode;
     response.setHeader("Content-Type", "application/json; charset=utf-8");
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
-    response.end(payload);
+    response.end(JSON.stringify(body));
   }
 }
 
