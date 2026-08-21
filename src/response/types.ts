@@ -1,3 +1,13 @@
+export type ResponseStreamTextDeltaEvent = Readonly<{
+  type: "TEXT_DELTA";
+  text: string;
+}>;
+
+export type NormalizedResponseStreamEvent =
+  | ResponseStreamTextDeltaEvent
+  | Readonly<{ type: "COMPLETED" }>;
+
 export type ResponseStreamEvent =
-  | Readonly<{ type: "TEXT_DELTA"; text: string }>
+  | ResponseStreamTextDeltaEvent
+  | Readonly<{ type: "FINAL_TEXT"; text: string }>
   | Readonly<{ type: "COMPLETED" }>;
