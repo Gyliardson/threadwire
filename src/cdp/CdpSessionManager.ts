@@ -19,11 +19,13 @@ import {
   ThreadwireError,
 } from "../domain/errors.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
-import { ResponseStreamEvent } from "../response/types.js";
+import { NormalizedResponseStreamEvent } from "../response/types.js";
 import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
 import {
+  CdpFinalRenderedAssistantSnapshot,
+  CdpResponseRenderBaseline,
   CdpResponseTurnTransportSession,
   CdpTransport,
   CdpTransportSession,
@@ -63,10 +65,13 @@ function isTurnTransportSession(session: CdpTransportSession): session is CdpTur
 function isResponseTurnTransportSession(
   session: CdpTransportSession,
 ): session is CdpResponseTurnTransportSession {
+  const candidate = session as Partial<CdpResponseTurnTransportSession>;
   return (
     isTurnTransportSession(session) &&
-    typeof (session as Partial<CdpResponseTurnTransportSession>).takeTurnResponseEvents === "function" &&
-    typeof (session as Partial<CdpResponseTurnTransportSession>).discardTurnResponse === "function"
+    typeof candidate.captureTurnResponseRenderBaseline === "function" &&
+    typeof candidate.getFinalRenderedAssistantSnapshot === "function" &&
+    typeof candidate.takeTurnResponseEvents === "function" &&
+    typeof candidate.discardTurnResponse === "function"
   );
 }
 
@@ -283,6 +288,30 @@ export class CdpSessionManager {
     );
   }
 
+  public async captureTurnResponseRenderBaseline(
+    lease: RuntimeLease,
+  ): Promise<CdpResponseRenderBaseline> {
+    const session = this.requireResponseTurnSessionForLease(lease);
+    return await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => session.captureTurnResponseRenderBaseline(),
+    );
+  }
+
+  public async getFinalRenderedAssistantSnapshot(
+    baseline: CdpResponseRenderBaseline,
+    expectedRoute: RouteExpectation,
+    lease: RuntimeLease,
+  ): Promise<CdpFinalRenderedAssistantSnapshot | null> {
+    const session = this.requireResponseTurnSessionForLease(lease);
+    return await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => session.getFinalRenderedAssistantSnapshot(baseline, expectedRoute),
+    );
+  }
+
   public armTurnObservation(
     lease: RuntimeLease,
     options?: CdpTurnObservationOptions,
@@ -306,7 +335,7 @@ export class CdpSessionManager {
   public takeTurnResponseEvents(
     handle: CdpTurnObservationHandle,
     lease: RuntimeLease,
-  ): readonly ResponseStreamEvent[] {
+  ): readonly NormalizedResponseStreamEvent[] {
     const session = this.requireResponseTurnSessionForLease(lease);
     return session.takeTurnResponseEvents(handle);
   }
