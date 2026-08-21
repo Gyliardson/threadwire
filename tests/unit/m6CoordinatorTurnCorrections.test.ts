@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CdpResponseRenderBaseline,
   CdpTurnComposerState,
   CdpTurnObservationHandle,
   CdpTurnObservationOptions,
@@ -17,7 +18,10 @@ import {
   TurnStateUncertainError,
 } from "../../src/domain/errors.js";
 import { RouteExpectation } from "../../src/readiness/types.js";
-import { ResponseStreamEvent } from "../../src/response/types.js";
+import {
+  NormalizedResponseStreamEvent,
+  ResponseStreamEvent,
+} from "../../src/response/types.js";
 import { OperationScheduler } from "../../src/routing/OperationScheduler.js";
 import { ThreadRegistry } from "../../src/routing/ThreadRegistry.js";
 import { TurnExecutor } from "../../src/turn/TurnExecutor.js";
@@ -59,7 +63,7 @@ class FakeStreamingTurnPort implements TurnCdpPort {
     write: null,
     response: Object.freeze({ lifecycle: "PENDING" as const, failure: null }),
   });
-  public readonly responseEvents: ResponseStreamEvent[] = [];
+  public readonly responseEvents: NormalizedResponseStreamEvent[] = [];
   public keyDownAction: (() => void) | null = null;
   public armOptions: CdpTurnObservationOptions | undefined;
   public armError: Error | null = null;
@@ -70,6 +74,14 @@ class FakeStreamingTurnPort implements TurnCdpPort {
   public insertTextCalls = 0;
   public keyDownCalls = 0;
   public keyUpCalls = 0;
+  public baselineCalls = 0;
+  public finalSnapshotCalls = 0;
+  public finalSnapshot: Readonly<{ text: string }> | null = Object.freeze({ text: "fresh-final" });
+  public finalSnapshotExpectedRoute: RouteExpectation | null = null;
+  public readonly renderBaseline: CdpResponseRenderBaseline = Object.freeze({
+    userCount: 0,
+    assistantCount: 0,
+  });
   public readonly conversationLocators: Array<ConversationLocator | null> = [];
   public locatorReadCount = 0;
   public blockLocatorReadAt: number | null = null;
@@ -81,6 +93,23 @@ class FakeStreamingTurnPort implements TurnCdpPort {
     _lease: RuntimeLease,
   ): Promise<CdpTurnComposerState> {
     return { expectedRoute: true, eligible: true, focused: true, empty: true };
+  }
+  public async captureTurnResponseRenderBaseline(
+    _lease: RuntimeLease,
+  ): Promise<CdpResponseRenderBaseline> {
+    this.runtime?.assertRuntimeLeaseCurrent(_lease);
+    this.baselineCalls += 1;
+    return this.renderBaseline;
+  }
+  public async getFinalRenderedAssistantSnapshot(
+    _baseline: CdpResponseRenderBaseline,
+    expectedRoute: RouteExpectation,
+    _lease: RuntimeLease,
+  ): Promise<Readonly<{ text: string }> | null> {
+    this.runtime?.assertRuntimeLeaseCurrent(_lease);
+    this.finalSnapshotCalls += 1;
+    this.finalSnapshotExpectedRoute = expectedRoute;
+    return this.finalSnapshot;
   }
   public armTurnObservation(
     _lease: RuntimeLease,
@@ -105,7 +134,7 @@ class FakeStreamingTurnPort implements TurnCdpPort {
   public takeTurnResponseEvents(
     _handle: CdpTurnObservationHandle,
     _lease: RuntimeLease,
-  ): readonly ResponseStreamEvent[] {
+  ): readonly NormalizedResponseStreamEvent[] {
     return this.responseEvents.splice(0, this.responseEvents.length);
   }
   public discardTurnResponse(_handle: CdpTurnObservationHandle, _lease: RuntimeLease): void {
@@ -167,6 +196,7 @@ async function fixture(port = new FakeStreamingTurnPort(), sleep = new BlockingS
     writeObservationTimeoutMs: 100,
     writeSettlementTimeoutMs: 100,
     responseCompletionTimeoutMs: 100,
+    finalResponseSnapshotTimeoutMs: 100,
     freshConversationTimeoutMs: 100,
     pollIntervalMs: 1,
     sleep: sleep.sleep,
@@ -186,6 +216,7 @@ async function freshFixture(port = new FakeStreamingTurnPort(), sleep = new Bloc
     writeObservationTimeoutMs: 100,
     writeSettlementTimeoutMs: 100,
     responseCompletionTimeoutMs: 100,
+    finalResponseSnapshotTimeoutMs: 100,
     freshConversationTimeoutMs: 100,
     pollIntervalMs: 1,
     sleep: sleep.sleep,
@@ -217,6 +248,7 @@ test("response-stream arming capability failure preserves RESPONSE_STREAM_UNAVAI
     },
   );
 
+  assert.equal(f.port.baselineCalls, 1);
   assert.deepEqual(f.port.armOptions, { responseStream: true });
   assert.equal(f.port.insertTextCalls, 0);
   assert.equal(f.port.keyDownCalls, 0);
@@ -229,11 +261,12 @@ test("response-stream arming capability failure preserves RESPONSE_STREAM_UNAVAI
   assert.equal(routeRan, true, "pre-commit M6 capability failure must not latch mutation uncertainty");
 });
 
-test("FRESH streaming keeps final locator authority after response completion while write is still ACTIVE", async () => {
+test("FRESH streaming keeps final locator authority and reconciles only after the write is terminal", async () => {
   const f = await freshFixture();
   const earlyLocator = createConversationLocator("https://chatgpt.com/c/m6-fresh-early");
   const finalLocator = createConversationLocator("https://chatgpt.com/c/m6-fresh-final");
   f.port.conversationLocators.push(earlyLocator, finalLocator);
+  f.port.finalSnapshot = Object.freeze({ text: "fresh-authoritative" });
   const delivered: ResponseStreamEvent[] = [];
 
   f.port.keyDownAction = () => {
@@ -256,13 +289,11 @@ test("FRESH streaming keeps final locator authority after response completion wh
   const isSettled = settledState(turn);
   await f.sleep.entered.promise;
 
-  assert.deepEqual(delivered, [
-    { type: "TEXT_DELTA", text: "fresh-answer" },
-    { type: "COMPLETED" },
-  ]);
-  assert.equal(isSettled(), false, "response completion must not redefine transport settlement");
+  assert.deepEqual(delivered, [{ type: "TEXT_DELTA", text: "fresh-answer" }]);
+  assert.equal(isSettled(), false, "semantic [DONE] must not redefine transport settlement");
   assert.equal(f.registry.knownThreads().length, 0, "early supported locator must not register while write is ACTIVE");
   assert.equal(f.handleAllocations(), 0);
+  assert.equal(f.port.finalSnapshotCalls, 0);
 
   f.port.snapshot = Object.freeze({
     prepareCount: 1,
@@ -278,6 +309,13 @@ test("FRESH streaming keeps final locator authority after response completion wh
   assert.notEqual(f.registry.resolve(result.threadHandle), earlyLocator);
   assert.equal(f.registry.knownThreads().length, 1);
   assert.equal(f.handleAllocations(), 1);
+  assert.equal(f.port.finalSnapshotCalls, 1);
+  assert.deepEqual(f.port.finalSnapshotExpectedRoute, { kind: "THREAD", locator: finalLocator });
+  assert.deepEqual(delivered, [
+    { type: "TEXT_DELTA", text: "fresh-answer" },
+    { type: "FINAL_TEXT", text: "fresh-authoritative" },
+    { type: "COMPLETED" },
+  ]);
 });
 
 test("FRESH streaming late distinct write during final route revalidation fails closed before registration", async () => {
@@ -318,6 +356,7 @@ test("FRESH streaming late distinct write during final route revalidation fails 
   await assert.rejects(turn, TurnStateUncertainError);
   assert.equal(f.registry.knownThreads().length, 0);
   assert.equal(f.handleAllocations(), 0);
+  assert.equal(f.port.finalSnapshotCalls, 0);
   await assert.rejects(
     () => f.scheduler.schedule("ROUTE", async () => undefined),
     TurnStateUncertainError,
@@ -358,6 +397,7 @@ test("FRESH streaming registers authoritative conversation before surfacing safe
   assert.equal(f.registry.resolve(handles[0]!), finalLocator);
   assert.notEqual(f.registry.resolve(handles[0]!), earlyLocator);
   assert.equal(f.handleAllocations(), 1);
+  assert.equal(f.port.finalSnapshotCalls, 0);
 
   let routeRan = false;
   await f.scheduler.schedule("ROUTE", async () => {
