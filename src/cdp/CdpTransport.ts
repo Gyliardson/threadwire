@@ -1,6 +1,6 @@
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
-import { ResponseStreamEvent } from "../response/types.js";
+import { NormalizedResponseStreamEvent } from "../response/types.js";
 import { CdpTargetInfo } from "./types.js";
 
 export interface CdpTransportConnectOptions {
@@ -20,6 +20,15 @@ export interface CdpTurnComposerState {
   readonly eligible: boolean;
   readonly focused: boolean;
   readonly empty: boolean;
+}
+
+export interface CdpResponseRenderBaseline {
+  readonly userCount: number;
+  readonly assistantCount: number;
+}
+
+export interface CdpFinalRenderedAssistantSnapshot {
+  readonly text: string;
 }
 
 export type CdpWriteLifecycleState = "ACTIVE" | "FINISHED" | "FAILED";
@@ -74,7 +83,12 @@ export interface CdpTurnTransportSession extends CdpTransportSession {
 }
 
 export interface CdpResponseTurnTransportSession extends CdpTurnTransportSession {
-  takeTurnResponseEvents(handle: CdpTurnObservationHandle): readonly ResponseStreamEvent[];
+  captureTurnResponseRenderBaseline(): Promise<CdpResponseRenderBaseline>;
+  getFinalRenderedAssistantSnapshot(
+    baseline: CdpResponseRenderBaseline,
+    expectedRoute: RouteExpectation,
+  ): Promise<CdpFinalRenderedAssistantSnapshot | null>;
+  takeTurnResponseEvents(handle: CdpTurnObservationHandle): readonly NormalizedResponseStreamEvent[];
   discardTurnResponse(handle: CdpTurnObservationHandle): void;
 }
 
