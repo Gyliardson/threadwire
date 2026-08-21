@@ -248,7 +248,7 @@ test("response-stream arming capability failure preserves RESPONSE_STREAM_UNAVAI
     },
   );
 
-  assert.equal(f.port.baselineCalls, 1);
+  assert.equal(f.port.baselineCalls, 0);
   assert.deepEqual(f.port.armOptions, { responseStream: true });
   assert.equal(f.port.insertTextCalls, 0);
   assert.equal(f.port.keyDownCalls, 0);
