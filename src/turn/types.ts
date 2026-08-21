@@ -1,4 +1,6 @@
 import {
+  CdpFinalRenderedAssistantSnapshot,
+  CdpResponseRenderBaseline,
   CdpTurnComposerState,
   CdpTurnObservationHandle,
   CdpTurnObservationOptions,
@@ -7,7 +9,7 @@ import {
 import { RuntimeLease } from "../domain/RuntimeGeneration.js";
 import { ConversationLocator, ThreadHandle } from "../domain/ThreadIdentity.js";
 import { RouteExpectation } from "../readiness/types.js";
-import { ResponseStreamEvent } from "../response/types.js";
+import { NormalizedResponseStreamEvent, ResponseStreamEvent } from "../response/types.js";
 
 export type TurnTarget =
   | Readonly<{ kind: "THREAD"; threadHandle: ThreadHandle }>
@@ -42,6 +44,14 @@ export interface TurnCdpPort {
     expectedRoute: RouteExpectation,
     lease: RuntimeLease,
   ): Promise<CdpTurnComposerState>;
+  captureTurnResponseRenderBaseline?(
+    lease: RuntimeLease,
+  ): Promise<CdpResponseRenderBaseline>;
+  getFinalRenderedAssistantSnapshot?(
+    baseline: CdpResponseRenderBaseline,
+    expectedRoute: RouteExpectation,
+    lease: RuntimeLease,
+  ): Promise<CdpFinalRenderedAssistantSnapshot | null>;
   armTurnObservation(
     lease: RuntimeLease,
     options?: CdpTurnObservationOptions,
@@ -53,7 +63,7 @@ export interface TurnCdpPort {
   takeTurnResponseEvents?(
     handle: CdpTurnObservationHandle,
     lease: RuntimeLease,
-  ): readonly ResponseStreamEvent[];
+  ): readonly NormalizedResponseStreamEvent[];
   discardTurnResponse?(handle: CdpTurnObservationHandle, lease: RuntimeLease): void;
   releaseTurnObservation(handle: CdpTurnObservationHandle): void;
   insertText(text: string, lease: RuntimeLease): Promise<void>;
