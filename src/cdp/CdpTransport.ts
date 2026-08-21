@@ -1,5 +1,6 @@
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
+import { ResponseStreamEvent } from "../response/types.js";
 import { CdpTargetInfo } from "./types.js";
 
 export interface CdpTransportConnectOptions {
@@ -27,9 +28,29 @@ export interface CdpTurnWriteObservation {
   readonly lifecycle: CdpWriteLifecycleState;
 }
 
+export type CdpResponseStreamLifecycleState = "PENDING" | "STREAMING" | "COMPLETED" | "FAILED";
+
+export type CdpResponseStreamFailureKind =
+  | "UNAVAILABLE"
+  | "ACTIVATION_FAILED"
+  | "PARSE_FAILED"
+  | "INCOMPLETE"
+  | "BUFFER_OVERFLOW"
+  | "CONSUMER_STOPPED";
+
+export interface CdpTurnResponseObservation {
+  readonly lifecycle: CdpResponseStreamLifecycleState;
+  readonly failure: CdpResponseStreamFailureKind | null;
+}
+
 export interface CdpTurnObservationSnapshot {
   readonly prepareCount: number;
   readonly write: CdpTurnWriteObservation | null;
+  readonly response?: CdpTurnResponseObservation;
+}
+
+export interface CdpTurnObservationOptions {
+  readonly responseStream?: boolean;
 }
 
 export interface CdpTransportSession {
@@ -43,13 +64,18 @@ export interface CdpTransportSession {
 
 export interface CdpTurnTransportSession extends CdpTransportSession {
   getTurnComposerState(expectedRoute: RouteExpectation): Promise<CdpTurnComposerState>;
-  armTurnObservation(): CdpTurnObservationHandle;
+  armTurnObservation(options?: CdpTurnObservationOptions): CdpTurnObservationHandle;
   getTurnObservation(handle: CdpTurnObservationHandle): CdpTurnObservationSnapshot;
   releaseTurnObservation(handle: CdpTurnObservationHandle): void;
   insertText(text: string): Promise<void>;
   dispatchEnterKeyDown(): Promise<void>;
   dispatchEnterKeyUp(): Promise<void>;
   getCurrentConversationLocator(): Promise<ConversationLocator | null>;
+}
+
+export interface CdpResponseTurnTransportSession extends CdpTurnTransportSession {
+  takeTurnResponseEvents(handle: CdpTurnObservationHandle): readonly ResponseStreamEvent[];
+  discardTurnResponse(handle: CdpTurnObservationHandle): void;
 }
 
 export interface CdpTransport {

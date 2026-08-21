@@ -4,7 +4,7 @@ import test from "node:test";
 
 test("M5 Network observation dereferences only route classification, redirect presence, and numeric response status", async () => {
   const source = await readFile(
-    new URL("../../src/cdp/ChromeRemoteInterfaceTransport.ts", import.meta.url),
+    new URL("../../src/cdp/ChromeRemoteInterfaceSession.ts", import.meta.url),
     "utf8",
   );
 
@@ -26,7 +26,6 @@ test("M5 Network observation dereferences only route classification, redirect pr
     "requestWillBeSentExtraInfo",
     "responseReceivedExtraInfo",
     "getResponseBody",
-    "streamResourceContent",
   ]) {
     assert.equal(source.includes(forbidden), false, forbidden);
   }
@@ -42,7 +41,7 @@ test("M5 transport contract contains no premature response-body ownership seam",
 
 test("M5 Input and Page.navigate protocol failures are caught before raw CRI errors leave the adapter", async () => {
   const source = await readFile(
-    new URL("../../src/cdp/ChromeRemoteInterfaceTransport.ts", import.meta.url),
+    new URL("../../src/cdp/ChromeRemoteInterfaceSession.ts", import.meta.url),
     "utf8",
   );
   assert.match(source, /Input\.insertText\(\{ text \}\);\s*\} catch \{/s);
