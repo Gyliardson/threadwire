@@ -340,6 +340,7 @@ export class TurnExecutor {
 
       return await this.waitForTurnOutcome(
         target,
+        expectedRoute,
         observation,
         lease,
         signal,
@@ -354,6 +355,7 @@ export class TurnExecutor {
 
   private async waitForTurnOutcome(
     target: TurnTarget,
+    expectedRoute: RouteExpectation,
     observation: CdpTurnObservationHandle,
     lease: RuntimeLease,
     signal: AbortSignal | undefined,
