@@ -1,5 +1,5 @@
 import { ResponseStreamConsumerOptions } from "../response/ResponseStreamConsumer.js";
-import { ResponseStreamEvent } from "../response/types.js";
+import { NormalizedResponseStreamEvent } from "../response/types.js";
 import {
   CdpResponseTurnTransportSession,
   CdpTurnObservationHandle,
@@ -89,7 +89,7 @@ export class CdpTurnObservationTracker implements ResponseTurnMethods {
     });
   }
 
-  public takeTurnResponseEvents(handle: CdpTurnObservationHandle): readonly ResponseStreamEvent[] {
+  public takeTurnResponseEvents(handle: CdpTurnObservationHandle): readonly NormalizedResponseStreamEvent[] {
     return this.require(handle).response?.drain() ?? Object.freeze([]);
   }
 
