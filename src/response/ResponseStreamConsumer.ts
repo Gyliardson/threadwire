@@ -1,5 +1,5 @@
 import { TextDecoder } from "node:util";
-import { ResponseStreamEvent } from "./types.js";
+import { NormalizedResponseStreamEvent } from "./types.js";
 
 const DEFAULT_MAX_ENCODED_CHUNK_CHARS = 1_398_104;
 const DEFAULT_MAX_QUEUED_EVENTS = 1024;
@@ -57,7 +57,7 @@ export class ResponseStreamConsumer {
   private readonly maxQueuedTextChars: number;
   private readonly maxPendingTextChars: number;
   private readonly maxPendingDataLines: number;
-  private readonly events: ResponseStreamEvent[] = [];
+  private readonly events: NormalizedResponseStreamEvent[] = [];
   private queuedTextChars = 0;
   private textBuffer = "";
   private eventName: string | null = null;
@@ -142,7 +142,7 @@ export class ResponseStreamConsumer {
     this.dispatchRecord();
   }
 
-  public drain(): readonly ResponseStreamEvent[] {
+  public drain(): readonly NormalizedResponseStreamEvent[] {
     if (this.events.length === 0) {
       return Object.freeze([]);
     }
@@ -271,7 +271,7 @@ export class ResponseStreamConsumer {
     this.emit(Object.freeze({ type: "TEXT_DELTA" as const, text: parsed.v }));
   }
 
-  private emit(event: ResponseStreamEvent): void {
+  private emit(event: NormalizedResponseStreamEvent): void {
     if (this.events.length >= this.maxQueuedEvents) {
       throw new ResponseStreamConsumerError("BUFFER_OVERFLOW");
     }
