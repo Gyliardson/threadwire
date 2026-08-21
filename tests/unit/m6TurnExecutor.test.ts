@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CdpResponseRenderBaseline,
   CdpTurnComposerState,
   CdpTurnObservationHandle,
   CdpTurnObservationOptions,
@@ -11,12 +12,16 @@ import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
 import {
   OperationAbortedError,
   ResponseParseFailedError,
+  ResponseStreamFailedError,
   RuntimeGenerationChangedError,
   ResponseStreamUnavailableError,
   TurnWriteFailedError,
 } from "../../src/domain/errors.js";
 import { RouteExpectation } from "../../src/readiness/types.js";
-import { ResponseStreamEvent } from "../../src/response/types.js";
+import {
+  NormalizedResponseStreamEvent,
+  ResponseStreamEvent,
+} from "../../src/response/types.js";
 import { OperationScheduler } from "../../src/routing/OperationScheduler.js";
 import { ThreadRegistry } from "../../src/routing/ThreadRegistry.js";
 import { TurnExecutor } from "../../src/turn/TurnExecutor.js";
@@ -58,18 +63,45 @@ class FakeStreamingTurnPort implements TurnCdpPort {
     write: null,
     response: Object.freeze({ lifecycle: "PENDING" as const, failure: null }),
   });
-  public readonly responseEvents: ResponseStreamEvent[] = [];
+  public readonly responseEvents: NormalizedResponseStreamEvent[] = [];
   public keyDownAction: (() => void) | null = null;
   public armOptions: CdpTurnObservationOptions | undefined;
   public discarded = false;
   public released = false;
   public runtime: RuntimeGenerationTracker | null = null;
+  public baselineCalls = 0;
+  public finalSnapshotCalls = 0;
+  public finalSnapshot: Readonly<{ text: string }> | null = Object.freeze({ text: "hello-final" });
+  public finalSnapshotError: Error | null = null;
+  public readonly renderBaseline: CdpResponseRenderBaseline = Object.freeze({
+    userCount: 2,
+    assistantCount: 2,
+  });
 
   public async getTurnComposerState(
     _expectedRoute: RouteExpectation,
     _lease: RuntimeLease,
   ): Promise<CdpTurnComposerState> {
     return { expectedRoute: true, eligible: true, focused: true, empty: true };
+  }
+  public async captureTurnResponseRenderBaseline(
+    _lease: RuntimeLease,
+  ): Promise<CdpResponseRenderBaseline> {
+    this.runtime?.assertRuntimeLeaseCurrent(_lease);
+    this.baselineCalls += 1;
+    return this.renderBaseline;
+  }
+  public async getFinalRenderedAssistantSnapshot(
+    _baseline: CdpResponseRenderBaseline,
+    _expectedRoute: RouteExpectation,
+    _lease: RuntimeLease,
+  ): Promise<Readonly<{ text: string }> | null> {
+    this.runtime?.assertRuntimeLeaseCurrent(_lease);
+    this.finalSnapshotCalls += 1;
+    if (this.finalSnapshotError !== null) {
+      throw this.finalSnapshotError;
+    }
+    return this.finalSnapshot;
   }
   public armTurnObservation(
     _lease: RuntimeLease,
@@ -88,7 +120,7 @@ class FakeStreamingTurnPort implements TurnCdpPort {
   public takeTurnResponseEvents(
     _handle: CdpTurnObservationHandle,
     _lease: RuntimeLease,
-  ): readonly ResponseStreamEvent[] {
+  ): readonly NormalizedResponseStreamEvent[] {
     return this.responseEvents.splice(0, this.responseEvents.length);
   }
   public discardTurnResponse(_handle: CdpTurnObservationHandle, _lease: RuntimeLease): void {
@@ -134,14 +166,15 @@ async function fixture(port = new FakeStreamingTurnPort(), sleep = new BlockingS
     writeObservationTimeoutMs: 100,
     writeSettlementTimeoutMs: 100,
     responseCompletionTimeoutMs: 100,
+    finalResponseSnapshotTimeoutMs: 100,
     freshConversationTimeoutMs: 100,
     pollIntervalMs: 1,
     sleep: sleep.sleep,
   });
-  return { scheduler, registry, handle, port, sleep, executor };
+  return { runtime, scheduler, registry, handle, port, sleep, executor };
 }
 
-test("executeStreaming arms response observation before commit and delivers normalized events while retaining TURN through settlement", async () => {
+test("executeStreaming keeps [DONE] internal and publishes FINAL_TEXT then COMPLETED after safe settlement", async () => {
   const f = await fixture();
   const delivered: ResponseStreamEvent[] = [];
   f.port.keyDownAction = () => {
@@ -164,11 +197,10 @@ test("executeStreaming arms response observation before commit and delivers norm
   const isSettled = settledState(turn);
   await f.sleep.entered.promise;
   assert.deepEqual(f.port.armOptions, { responseStream: true });
-  assert.deepEqual(delivered, [
-    { type: "TEXT_DELTA", text: "hello" },
-    { type: "COMPLETED" },
-  ]);
-  assert.equal(isSettled(), false, "semantic completion must not redefine M5 transport settlement");
+  assert.equal(f.port.baselineCalls, 1);
+  assert.deepEqual(delivered, [{ type: "TEXT_DELTA", text: "hello" }]);
+  assert.equal(isSettled(), false, "semantic [DONE] must not redefine M5 transport settlement");
+  assert.equal(f.port.finalSnapshotCalls, 0);
 
   let routeRan = false;
   const route = f.scheduler.schedule("ROUTE", async () => {
@@ -186,8 +218,45 @@ test("executeStreaming arms response observation before commit and delivers norm
   const result = await turn;
   await route;
   assert.equal(result.created, false);
+  assert.deepEqual(delivered, [
+    { type: "TEXT_DELTA", text: "hello" },
+    { type: "FINAL_TEXT", text: "hello-final" },
+    { type: "COMPLETED" },
+  ]);
+  assert.equal(f.port.finalSnapshotCalls, 1);
   assert.equal(routeRan, true);
   assert.equal(f.port.released, true);
+});
+
+test("authoritative FINAL_TEXT reconciles a safe normalized prefix without broadening TEXT_DELTA", async () => {
+  const f = await fixture();
+  const delivered: ResponseStreamEvent[] = [];
+  f.port.finalSnapshot = Object.freeze({ text: "authoritative-final" });
+  f.port.keyDownAction = () => {
+    f.port.snapshot = Object.freeze({
+      prepareCount: 1,
+      write: Object.freeze({ lifecycle: "FINISHED" as const }),
+      response: Object.freeze({ lifecycle: "COMPLETED" as const, failure: null }),
+    });
+    f.port.responseEvents.push(
+      Object.freeze({ type: "TEXT_DELTA" as const, text: "safe-prefix" }),
+      Object.freeze({ type: "COMPLETED" as const }),
+    );
+  };
+
+  const result = await f.executor.executeStreaming(
+    { kind: "THREAD", threadHandle: f.handle },
+    "synthetic prompt",
+    (event) => delivered.push(event),
+  );
+
+  assert.equal(result.created, false);
+  assert.deepEqual(delivered, [
+    { type: "TEXT_DELTA", text: "safe-prefix" },
+    { type: "FINAL_TEXT", text: "authoritative-final" },
+    { type: "COMPLETED" },
+  ]);
+  assert.equal(f.port.finalSnapshotCalls, 1);
 });
 
 test("M6 parse failure waits for safe M5 settlement and does not latch TURN_STATE_UNCERTAIN", async () => {
@@ -219,6 +288,7 @@ test("M6 parse failure waits for safe M5 settlement and does not latch TURN_STAT
   });
   f.sleep.release.resolve();
   await assert.rejects(turn, ResponseParseFailedError);
+  assert.equal(f.port.finalSnapshotCalls, 0);
 
   let routeRan = false;
   await f.scheduler.schedule("ROUTE", async () => {
@@ -244,9 +314,94 @@ test("M5 write failure dominates an M6 response failure", async () => {
     ),
     TurnWriteFailedError,
   );
+  assert.equal(f.port.finalSnapshotCalls, 0);
 });
 
-test("caller cancellation after Enter commit stops response delivery but retains M5 safety observation until settlement", async () => {
+test("final rendered snapshot failure surfaces RESPONSE_STREAM_FAILED after safe write settlement without latching uncertainty", async () => {
+  const f = await fixture();
+  f.port.finalSnapshotError = new Error("RAW_RENDERED_RESPONSE_CANARY");
+  f.port.keyDownAction = () => {
+    f.port.snapshot = Object.freeze({
+      prepareCount: 1,
+      write: Object.freeze({ lifecycle: "FINISHED" as const }),
+      response: Object.freeze({ lifecycle: "COMPLETED" as const, failure: null }),
+    });
+    f.port.responseEvents.push(Object.freeze({ type: "COMPLETED" as const }));
+  };
+
+  let captured: unknown;
+  try {
+    await f.executor.executeStreaming(
+      { kind: "THREAD", threadHandle: f.handle },
+      "synthetic prompt",
+      () => undefined,
+    );
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(captured instanceof ResponseStreamFailedError);
+  assert.equal(captured.code, "RESPONSE_STREAM_FAILED");
+  assert.equal(captured.message.includes("RAW_RENDERED_RESPONSE_CANARY"), false);
+  assert.equal(JSON.stringify(captured).includes("RAW_RENDERED_RESPONSE_CANARY"), false);
+
+  let routeRan = false;
+  await f.scheduler.schedule("ROUTE", async () => {
+    routeRan = true;
+  });
+  assert.equal(routeRan, true);
+});
+
+test("final rendered snapshot ambiguity times out fail-closed without poisoning the scheduler", async () => {
+  const port = new FakeStreamingTurnPort();
+  port.finalSnapshot = null;
+  const runtime = new RuntimeGenerationTracker();
+  runtime.observe({ pid: 602, creationTime: "m6-final-timeout" });
+  port.runtime = runtime;
+  const scheduler = new OperationScheduler(runtime);
+  const registry = new ThreadRegistry({ handleFactory: () => "m6_timeout_handle" });
+  const locator = createConversationLocator("https://chatgpt.com/c/m6-final-timeout");
+  const handle = registry.register(locator);
+  const now = { value: 0 };
+  port.keyDownAction = () => {
+    port.snapshot = Object.freeze({
+      prepareCount: 1,
+      write: Object.freeze({ lifecycle: "FINISHED" as const }),
+      response: Object.freeze({ lifecycle: "COMPLETED" as const, failure: null }),
+    });
+    port.responseEvents.push(Object.freeze({ type: "COMPLETED" as const }));
+  };
+  const executor = new TurnExecutor(registry, scheduler, new NoopPreflight(), port, {
+    commandTimeoutMs: 100,
+    writeObservationTimeoutMs: 100,
+    writeSettlementTimeoutMs: 100,
+    responseCompletionTimeoutMs: 100,
+    finalResponseSnapshotTimeoutMs: 3,
+    freshConversationTimeoutMs: 100,
+    pollIntervalMs: 1,
+    clock: () => now.value,
+    sleep: async (ms) => {
+      now.value += Math.max(ms, 1);
+    },
+  });
+
+  await assert.rejects(
+    executor.executeStreaming(
+      { kind: "THREAD", threadHandle: handle },
+      "synthetic prompt",
+      () => undefined,
+    ),
+    ResponseStreamFailedError,
+  );
+  assert.ok(port.finalSnapshotCalls >= 1);
+
+  let routeRan = false;
+  await scheduler.schedule("ROUTE", async () => {
+    routeRan = true;
+  });
+  assert.equal(routeRan, true);
+});
+
+test("caller cancellation after Enter commit stops response delivery and final reconciliation but retains M5 safety observation until settlement", async () => {
   const f = await fixture();
   const abort = new AbortController();
   const delivered: ResponseStreamEvent[] = [];
@@ -290,9 +445,9 @@ test("caller cancellation after Enter commit stops response delivery but retains
   await route;
   assert.deepEqual(delivered, []);
   assert.equal(f.port.discarded, true);
+  assert.equal(f.port.finalSnapshotCalls, 0);
   assert.equal(routeRan, true);
 });
-
 
 test("runtime-generation replacement invalidates response work and releases the scoped observation", async () => {
   const f = await fixture();
@@ -318,7 +473,7 @@ test("runtime-generation replacement invalidates response work and releases the 
   assert.equal(f.port.released, true, "finally must release and dispose the stale scoped response observation");
 });
 
-test("streaming is rejected before commit when the TurnCdpPort lacks the M6 response seam", async () => {
+test("streaming is rejected before commit when the TurnCdpPort lacks the complete response seam", async () => {
   const f = await fixture();
   const legacyPort: TurnCdpPort = {
     getTurnComposerState: f.port.getTurnComposerState.bind(f.port),
