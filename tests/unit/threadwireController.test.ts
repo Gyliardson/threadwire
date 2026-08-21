@@ -18,7 +18,10 @@ const FRESH_REQUEST: ControllerTurnRequest = {
 };
 
 function result(created = true): TurnResult {
-  return Object.freeze({ kind: "THREAD" as const, threadHandle: HANDLE, created });
+  if (created) {
+    return Object.freeze({ kind: "THREAD" as const, threadHandle: HANDLE, created: true as const });
+  }
+  return Object.freeze({ kind: "THREAD" as const, threadHandle: HANDLE, created: false as const });
 }
 
 function dependencies(overrides: Partial<ThreadwireControllerDependencies> = {}) {
@@ -81,7 +84,10 @@ function dependencies(overrides: Partial<ThreadwireControllerDependencies> = {})
     },
   };
 
-  return { calls, dependencies: { ...base, ...overrides } satisfies ThreadwireControllerDependencies };
+  return {
+    calls,
+    dependencies: { ...base, ...overrides } satisfies ThreadwireControllerDependencies,
+  };
 }
 
 test("health is read-only and exposes no process identity", async () => {
@@ -98,7 +104,11 @@ test("unknown handles fail before runtime startup or routing", () => {
   const unknown = "tw_unknown" as ThreadHandle;
 
   assert.throws(
-    () => controller.executeTurn({ target: { kind: "THREAD", threadHandle: unknown }, prompt: "x" }, () => undefined),
+    () =>
+      controller.executeTurn(
+        { target: { kind: "THREAD", threadHandle: unknown }, prompt: "x" },
+        () => undefined,
+      ),
     ThreadNotFoundError,
   );
   assert.deepEqual(fixture.calls, [`resolve:${unknown}`]);
