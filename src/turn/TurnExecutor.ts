@@ -1,4 +1,5 @@
 import {
+  CdpResponseRenderBaseline,
   CdpResponseStreamFailureKind,
   CdpTurnObservationHandle,
   CdpTurnObservationSnapshot,
@@ -21,7 +22,7 @@ import {
 } from "../domain/errors.js";
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import { RouteExpectation } from "../readiness/types.js";
-import { ResponseStreamEvent } from "../response/types.js";
+import { NormalizedResponseStreamEvent } from "../response/types.js";
 import { OperationScheduler } from "../routing/OperationScheduler.js";
 import { ThreadRegistry } from "../routing/ThreadRegistry.js";
 import { delay, throwIfAborted, withTimeout } from "../utils/timeout.js";
@@ -39,6 +40,7 @@ export const DEFAULT_TURN_COMMAND_TIMEOUT_MS = 5_000;
 export const DEFAULT_TURN_WRITE_OBSERVATION_TIMEOUT_MS = 15_000;
 export const DEFAULT_TURN_WRITE_SETTLEMENT_TIMEOUT_MS = 120_000;
 export const DEFAULT_TURN_RESPONSE_COMPLETION_TIMEOUT_MS = 120_000;
+export const DEFAULT_TURN_FINAL_RESPONSE_SNAPSHOT_TIMEOUT_MS = 15_000;
 export const DEFAULT_FRESH_CONVERSATION_TIMEOUT_MS = 15_000;
 export const DEFAULT_TURN_POLL_INTERVAL_MS = 25;
 
@@ -47,6 +49,7 @@ export interface TurnExecutorOptions {
   readonly writeObservationTimeoutMs?: number;
   readonly writeSettlementTimeoutMs?: number;
   readonly responseCompletionTimeoutMs?: number;
+  readonly finalResponseSnapshotTimeoutMs?: number;
   readonly freshConversationTimeoutMs?: number;
   readonly pollIntervalMs?: number;
   readonly clock?: () => number;
@@ -55,7 +58,10 @@ export interface TurnExecutorOptions {
 
 interface ResponseDeliveryState {
   readonly listener: TurnResponseEventListener;
+  readonly renderBaseline: CdpResponseRenderBaseline;
   semanticCompleted: boolean;
+  finalized: boolean;
+  finalizationStartedAt: number | null;
   terminalError: ThreadwireError | null;
   discarded: boolean;
 }
@@ -106,6 +112,7 @@ export class TurnExecutor {
   private readonly writeObservationTimeoutMs: number;
   private readonly writeSettlementTimeoutMs: number;
   private readonly responseCompletionTimeoutMs: number;
+  private readonly finalResponseSnapshotTimeoutMs: number;
   private readonly freshConversationTimeoutMs: number;
   private readonly pollIntervalMs: number;
   private readonly clock: () => number;
@@ -133,6 +140,10 @@ export class TurnExecutor {
     this.responseCompletionTimeoutMs = positiveFinite(
       options.responseCompletionTimeoutMs ?? DEFAULT_TURN_RESPONSE_COMPLETION_TIMEOUT_MS,
       "responseCompletionTimeoutMs",
+    );
+    this.finalResponseSnapshotTimeoutMs = positiveFinite(
+      options.finalResponseSnapshotTimeoutMs ?? DEFAULT_TURN_FINAL_RESPONSE_SNAPSHOT_TIMEOUT_MS,
+      "finalResponseSnapshotTimeoutMs",
     );
     this.freshConversationTimeoutMs = positiveFinite(
       options.freshConversationTimeoutMs ?? DEFAULT_FRESH_CONVERSATION_TIMEOUT_MS,
@@ -192,6 +203,7 @@ export class TurnExecutor {
     responseListener: TurnResponseEventListener | undefined,
   ): Promise<TurnResult> {
     const expectedRoute = this.resolveExpectedRoute(target);
+    let responseRenderBaseline: CdpResponseRenderBaseline | null = null;
 
     try {
       await this.preflight.waitForTurnComposer(expectedRoute, lease, signal);
@@ -205,12 +217,35 @@ export class TurnExecutor {
       if (!composer.expectedRoute || !composer.eligible || !composer.focused || !composer.empty) {
         throw new TurnInputFailedError();
       }
-      if (
-        responseListener !== undefined &&
-        (typeof this.cdp.takeTurnResponseEvents !== "function" ||
-          typeof this.cdp.discardTurnResponse !== "function")
-      ) {
-        throw new ResponseStreamUnavailableError();
+      if (responseListener !== undefined) {
+        const captureBaseline = this.cdp.captureTurnResponseRenderBaseline;
+        const getFinalSnapshot = this.cdp.getFinalRenderedAssistantSnapshot;
+        if (
+          typeof this.cdp.takeTurnResponseEvents !== "function" ||
+          typeof this.cdp.discardTurnResponse !== "function" ||
+          typeof captureBaseline !== "function" ||
+          typeof getFinalSnapshot !== "function"
+        ) {
+          throw new ResponseStreamUnavailableError();
+        }
+        try {
+          responseRenderBaseline = await withTimeout(
+            async () => await captureBaseline.call(this.cdp, lease),
+            this.commandTimeoutMs,
+            signal
+              ? { signal, message: "Timed out capturing the rendered response baseline." }
+              : { message: "Timed out capturing the rendered response baseline." },
+          );
+        } catch (error) {
+          if (
+            error instanceof RuntimeGenerationChangedError ||
+            error instanceof OperationAbortedError ||
+            error instanceof CdpDisconnectedError
+          ) {
+            throw error;
+          }
+          throw new ResponseStreamUnavailableError();
+        }
       }
     } catch (error) {
       if (error instanceof ResponseStreamUnavailableError) {
@@ -234,7 +269,10 @@ export class TurnExecutor {
         ? null
         : {
             listener: responseListener,
+            renderBaseline: responseRenderBaseline!,
             semanticCompleted: false,
+            finalized: false,
+            finalizationStartedAt: null,
             terminalError: null,
             discarded: false,
           };
@@ -380,6 +418,18 @@ export class TurnExecutor {
             await this.sleep(this.pollIntervalMs);
             continue;
           }
+          const finalized = await this.finalizeResponseDelivery(
+            responseState,
+            expectedRoute,
+            lease,
+          );
+          if (responseState.terminalError !== null) {
+            throw responseState.terminalError;
+          }
+          if (!finalized) {
+            await this.sleep(this.pollIntervalMs);
+            continue;
+          }
         }
         return Object.freeze({
           kind: "THREAD" as const,
@@ -477,15 +527,29 @@ export class TurnExecutor {
         }
 
         if (currentFreshLocator !== null) {
-          if (responseState !== null && !responseState.semanticCompleted && responseState.terminalError === null) {
-            await this.sleep(this.pollIntervalMs);
-            continue;
+          if (responseState !== null) {
+            if (responseState.terminalError !== null) {
+              throw responseState.terminalError;
+            }
+            if (!responseState.semanticCompleted) {
+              await this.sleep(this.pollIntervalMs);
+              continue;
+            }
+            const finalized = await this.finalizeResponseDelivery(
+              responseState,
+              { kind: "THREAD", locator: currentFreshLocator },
+              lease,
+            );
+            if (responseState.terminalError !== null) {
+              throw responseState.terminalError;
+            }
+            if (!finalized) {
+              await this.sleep(this.pollIntervalMs);
+              continue;
+            }
           }
 
           const registration = this.registry.registerWithStatus(currentFreshLocator);
-          if (responseState?.terminalError !== null && responseState?.terminalError !== undefined) {
-            throw responseState.terminalError;
-          }
           if (registration.created) {
             return Object.freeze({
               kind: "THREAD" as const,
@@ -573,7 +637,7 @@ export class TurnExecutor {
       return;
     }
 
-    let events: readonly ResponseStreamEvent[];
+    let events: readonly NormalizedResponseStreamEvent[];
     try {
       events = take.call(this.cdp, observation, lease);
     } catch (error) {
@@ -589,6 +653,10 @@ export class TurnExecutor {
     }
 
     for (const event of events) {
+      if (event.type === "COMPLETED") {
+        state.semanticCompleted = true;
+        continue;
+      }
       try {
         state.listener(event);
       } catch {
@@ -596,10 +664,73 @@ export class TurnExecutor {
         this.discardResponse(state, observation, lease, false);
         return;
       }
-      if (event.type === "COMPLETED") {
-        state.semanticCompleted = true;
-      }
     }
+  }
+
+  private async finalizeResponseDelivery(
+    state: ResponseDeliveryState,
+    expectedRoute: RouteExpectation,
+    lease: RuntimeLease,
+  ): Promise<boolean> {
+    if (state.finalized) {
+      return true;
+    }
+    if (!state.semanticCompleted || state.terminalError !== null) {
+      return false;
+    }
+
+    const getFinalSnapshot = this.cdp.getFinalRenderedAssistantSnapshot;
+    if (typeof getFinalSnapshot !== "function") {
+      state.terminalError = new ResponseStreamUnavailableError();
+      return false;
+    }
+
+    state.finalizationStartedAt ??= this.clock();
+    if (this.clock() - state.finalizationStartedAt >= this.finalResponseSnapshotTimeoutMs) {
+      state.terminalError = new ResponseStreamFailedError(
+        "The final rendered assistant response did not become safely attributable before the deadline.",
+      );
+      return false;
+    }
+
+    let finalSnapshot: Awaited<ReturnType<NonNullable<TurnCdpPort["getFinalRenderedAssistantSnapshot"]>>>;
+    try {
+      finalSnapshot = await withTimeout(
+        async () => await getFinalSnapshot.call(this.cdp, state.renderBaseline, expectedRoute, lease),
+        this.commandTimeoutMs,
+        { message: "Timed out reconciling the final rendered assistant response." },
+      );
+    } catch (error) {
+      if (error instanceof RuntimeGenerationChangedError) {
+        throw error;
+      }
+      state.terminalError = new ResponseStreamFailedError();
+      return false;
+    }
+
+    if (finalSnapshot === null) {
+      if (this.clock() - state.finalizationStartedAt >= this.finalResponseSnapshotTimeoutMs) {
+        state.terminalError = new ResponseStreamFailedError(
+          "The final rendered assistant response did not become safely attributable before the deadline.",
+        );
+      }
+      return false;
+    }
+    if (typeof finalSnapshot.text !== "string" || finalSnapshot.text.trim().length === 0) {
+      state.terminalError = new ResponseStreamFailedError();
+      return false;
+    }
+
+    try {
+      state.listener(Object.freeze({ type: "FINAL_TEXT" as const, text: finalSnapshot.text }));
+      state.listener(Object.freeze({ type: "COMPLETED" as const }));
+    } catch {
+      state.terminalError = new ResponseStreamFailedError();
+      return false;
+    }
+
+    state.finalized = true;
+    return true;
   }
 
   private applyResponseDeadline(
