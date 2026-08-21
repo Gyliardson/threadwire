@@ -203,7 +203,6 @@ export class TurnExecutor {
     responseListener: TurnResponseEventListener | undefined,
   ): Promise<TurnResult> {
     const expectedRoute = this.resolveExpectedRoute(target);
-    let responseRenderBaseline: CdpResponseRenderBaseline | null = null;
 
     try {
       await this.preflight.waitForTurnComposer(expectedRoute, lease, signal);
@@ -217,35 +216,14 @@ export class TurnExecutor {
       if (!composer.expectedRoute || !composer.eligible || !composer.focused || !composer.empty) {
         throw new TurnInputFailedError();
       }
-      if (responseListener !== undefined) {
-        const captureBaseline = this.cdp.captureTurnResponseRenderBaseline;
-        const getFinalSnapshot = this.cdp.getFinalRenderedAssistantSnapshot;
-        if (
-          typeof this.cdp.takeTurnResponseEvents !== "function" ||
+      if (
+        responseListener !== undefined &&
+        (typeof this.cdp.takeTurnResponseEvents !== "function" ||
           typeof this.cdp.discardTurnResponse !== "function" ||
-          typeof captureBaseline !== "function" ||
-          typeof getFinalSnapshot !== "function"
-        ) {
-          throw new ResponseStreamUnavailableError();
-        }
-        try {
-          responseRenderBaseline = await withTimeout(
-            async () => await captureBaseline.call(this.cdp, lease),
-            this.commandTimeoutMs,
-            signal
-              ? { signal, message: "Timed out capturing the rendered response baseline." }
-              : { message: "Timed out capturing the rendered response baseline." },
-          );
-        } catch (error) {
-          if (
-            error instanceof RuntimeGenerationChangedError ||
-            error instanceof OperationAbortedError ||
-            error instanceof CdpDisconnectedError
-          ) {
-            throw error;
-          }
-          throw new ResponseStreamUnavailableError();
-        }
+          typeof this.cdp.captureTurnResponseRenderBaseline !== "function" ||
+          typeof this.cdp.getFinalRenderedAssistantSnapshot !== "function")
+      ) {
+        throw new ResponseStreamUnavailableError();
       }
     } catch (error) {
       if (error instanceof ResponseStreamUnavailableError) {
@@ -264,19 +242,7 @@ export class TurnExecutor {
       this.rethrowPreCommit(error);
     }
 
-    const responseState: ResponseDeliveryState | null =
-      responseListener === undefined
-        ? null
-        : {
-            listener: responseListener,
-            renderBaseline: responseRenderBaseline!,
-            semanticCompleted: false,
-            finalized: false,
-            finalizationStartedAt: null,
-            terminalError: null,
-            discarded: false,
-          };
-
+    let responseState: ResponseDeliveryState | null = null;
     let committed = false;
     let callerCancelled = false;
     const onAbort = (): void => {
@@ -287,6 +253,42 @@ export class TurnExecutor {
     signal?.addEventListener("abort", onAbort);
 
     try {
+      throwIfAborted(signal);
+
+      if (responseListener !== undefined) {
+        const captureBaseline = this.cdp.captureTurnResponseRenderBaseline!;
+        let renderBaseline: CdpResponseRenderBaseline;
+        try {
+          renderBaseline = await withTimeout(
+            async () => await captureBaseline.call(this.cdp, lease),
+            this.commandTimeoutMs,
+            signal
+              ? { signal, message: "Timed out capturing the rendered response baseline." }
+              : { message: "Timed out capturing the rendered response baseline." },
+          );
+        } catch (error) {
+          if (
+            error instanceof RuntimeGenerationChangedError ||
+            error instanceof OperationAbortedError ||
+            error instanceof CdpDisconnectedError
+          ) {
+            throw error;
+          }
+          throw new ResponseStreamUnavailableError();
+        }
+
+        this.assertNoObservedPreSubmitWrite(observation, lease);
+        responseState = {
+          listener: responseListener,
+          renderBaseline,
+          semanticCompleted: false,
+          finalized: false,
+          finalizationStartedAt: null,
+          terminalError: null,
+          discarded: false,
+        };
+      }
+
       throwIfAborted(signal);
 
       try {
@@ -422,6 +424,7 @@ export class TurnExecutor {
             responseState,
             expectedRoute,
             lease,
+            signal,
           );
           if (responseState.terminalError !== null) {
             throw responseState.terminalError;
@@ -545,6 +548,7 @@ export class TurnExecutor {
               responseState,
               { kind: "THREAD", locator: currentFreshLocator },
               lease,
+              signal,
             );
             if (responseState.terminalError !== null) {
               throw responseState.terminalError;
@@ -676,6 +680,7 @@ export class TurnExecutor {
     state: ResponseDeliveryState,
     expectedRoute: RouteExpectation,
     lease: RuntimeLease,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     if (state.finalized) {
       return true;
@@ -684,6 +689,7 @@ export class TurnExecutor {
       return false;
     }
 
+    throwIfAborted(signal);
     const getFinalSnapshot = this.cdp.getFinalRenderedAssistantSnapshot;
     if (typeof getFinalSnapshot !== "function") {
       state.terminalError = new ResponseStreamUnavailableError();
@@ -706,13 +712,14 @@ export class TurnExecutor {
         { message: "Timed out reconciling the final rendered assistant response." },
       );
     } catch (error) {
-      if (error instanceof RuntimeGenerationChangedError) {
+      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
         throw error;
       }
       state.terminalError = new ResponseStreamFailedError();
       return false;
     }
 
+    throwIfAborted(signal);
     if (finalSnapshot === null) {
       if (this.clock() - state.finalizationStartedAt >= this.finalResponseSnapshotTimeoutMs) {
         state.terminalError = new ResponseStreamFailedError(
