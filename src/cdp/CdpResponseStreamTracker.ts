@@ -3,7 +3,7 @@ import {
   ResponseStreamConsumerError,
   ResponseStreamConsumerOptions,
 } from "../response/ResponseStreamConsumer.js";
-import { ResponseStreamEvent } from "../response/types.js";
+import { NormalizedResponseStreamEvent } from "../response/types.js";
 import {
   CdpResponseStreamFailureKind,
   CdpTurnResponseObservation,
@@ -132,7 +132,7 @@ export class CdpResponseStreamTracker {
     }
   }
 
-  public drain(): readonly ResponseStreamEvent[] {
+  public drain(): readonly NormalizedResponseStreamEvent[] {
     return this.consumer?.drain() ?? Object.freeze([]);
   }
 
