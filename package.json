@@ -11,6 +11,7 @@
     "build": "tsc",
     "test": "tsx --test tests/unit/**/*.test.ts",
     "test:acceptance": "tsx --test --test-concurrency=1 tests/acceptance/**/*.acceptance.test.ts",
+    "test:acceptance:m6-final": "tsx --test tests/acceptance/M6_FinalResponseReconciliation.acceptance.test.ts",
     "test:acceptance:m7": "tsx --test tests/acceptance/M7_TrueColdStartStreaming.acceptance.test.ts",
     "lint": "eslint src tests",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
