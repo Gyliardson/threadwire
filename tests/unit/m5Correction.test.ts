@@ -428,6 +428,7 @@ class MultiWriteCriClient {
 
   public readonly Page = {
     navigate: async (_params: { url: string }) => ({}),
+    reload: async (_params?: { ignoreCache?: boolean }) => ({}),
     getFrameTree: async () => ({ frameTree: { frame: this.frame } }),
   };
 
