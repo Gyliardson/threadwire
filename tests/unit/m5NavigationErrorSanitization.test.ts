@@ -149,6 +149,7 @@ class NavigateFailingCriClient {
       this.navigateUrl = url;
       throw this.rawError;
     },
+    reload: async (_params: { ignoreCache?: boolean } = {}) => ({}),
     getFrameTree: async () => ({
       frameTree: {
         frame: { id: "main", loaderId: "loader", url: "https://chatgpt.com/" },
@@ -234,6 +235,9 @@ class UnsafeNavigationSession implements CdpTransportSession {
   public async navigate(_url: string): Promise<void> {
     throw this.rawError;
   }
+  public async reload(): Promise<void> {
+    throw this.rawError;
+  }
   public async getReadinessSnapshot(
     _expectedRoute: RouteExpectation,
   ): Promise<ExistingReadinessSnapshot> {
@@ -275,6 +279,10 @@ class PrewrappedUnsafeNavigation implements ConversationNavigationPort {
   public readonly rawError = createRawNavigateProtocolError(canaryLocator);
 
   public async navigate(_url: string, _signal?: AbortSignal): Promise<void> {
+    throw new RouteNavigationFailedError(undefined, { cause: this.rawError });
+  }
+
+  public async reload(_signal?: AbortSignal): Promise<void> {
     throw new RouteNavigationFailedError(undefined, { cause: this.rawError });
   }
 }
