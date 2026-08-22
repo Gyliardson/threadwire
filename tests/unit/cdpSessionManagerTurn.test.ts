@@ -54,6 +54,10 @@ class FakeTurnSession implements CdpTurnTransportSession {
     this.events.push("navigate");
   }
 
+  public async reload(): Promise<void> {
+    this.events.push("reload");
+  }
+
   public async getReadinessSnapshot(
     _expectedRoute: RouteExpectation,
   ): Promise<ExistingReadinessSnapshot> {

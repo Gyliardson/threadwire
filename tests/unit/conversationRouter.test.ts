@@ -42,8 +42,11 @@ function createRuntime(): RuntimeGenerationTracker {
 
 class RecordingNavigation implements ConversationNavigationPort {
   public readonly urls: string[] = [];
+  public reloadCalls = 0;
   public failure: Error | null = null;
+  public reloadFailure: Error | null = null;
   public block: Deferred<void> | null = null;
+  public reloadBlock: Deferred<void> | null = null;
   public readonly events: string[];
 
   public constructor(events: string[] = []) {
@@ -53,6 +56,35 @@ class RecordingNavigation implements ConversationNavigationPort {
   public async navigate(url: string): Promise<void> {
     this.urls.push(url);
     this.events.push("navigate");
+    if (this.failure) {
+      throw this.failure;
+    }
+    if (this.block) {
+      const gate = this.block;
+      this.block = null;
+      await gate.promise;
+    }
+  }
+
+  public async reload(): Promise<void> {
+    this.reloadCalls += 1;
+    this.events.push("reload");
+    if (this.reloadFailure) {
+      throw this.reloadFailure;
+    }
+    if (this.reloadBlock) {
+      const gate = this.reloadBlock;
+      this.reloadBlock = null;
+      await gate.promise;
+    }
+  }
+
+  public async navigateAndWaitForLoadSettlement(
+    url: string,
+    _expectedRoute: unknown,
+  ): Promise<void> {
+    this.urls.push(url);
+    this.events.push("navigate_settled");
     if (this.failure) {
       throw this.failure;
     }
@@ -133,6 +165,7 @@ test("unknown ThreadHandle performs no navigation", async () => {
   const { router, navigation, readiness } = createHarness();
   await assert.rejects(router.routeToThread("tw_unknown" as ThreadHandle), ThreadNotFoundError);
   assert.deepEqual(navigation.urls, []);
+  assert.equal(navigation.reloadCalls, 0);
   assert.equal(readiness.existingCalls, 0);
 });
 
@@ -141,11 +174,12 @@ test("known existing thread resolves internally and outward result contains only
   const result = await router.routeToThread(handleA);
 
   assert.deepEqual(navigation.urls, ["https://chatgpt.com/c/synthetic-a"]);
+  assert.equal(navigation.reloadCalls, 0);
   assert.deepEqual(result, { kind: "THREAD", threadHandle: handleA });
   assert.equal(JSON.stringify(result).includes("synthetic-a"), false);
 });
 
-test("routeFresh navigates to root and allocates no ThreadHandle", async () => {
+test("routeFresh navigates to root, reloads once, and allocates no ThreadHandle", async () => {
   let handleCalls = 0;
   const runtime = createRuntime();
   const registry = new ThreadRegistry({
@@ -168,6 +202,7 @@ test("routeFresh navigates to root and allocates no ThreadHandle", async () => {
   const result = await router.routeFresh();
   assert.deepEqual(result, { kind: "FRESH" });
   assert.deepEqual(navigation.urls, [CHATGPT_FRESH_ROUTE]);
+  assert.equal(navigation.reloadCalls, 1);
   assert.equal(handleCalls, before);
   assert.equal("threadHandle" in result, false);
   assert.equal(readiness.existingCalls, 0);
@@ -189,6 +224,7 @@ test("concurrent route requests are serialized through the shared scheduler", as
     "https://chatgpt.com/c/synthetic-a",
     "https://chatgpt.com/c/synthetic-b",
   ]);
+  assert.equal(navigation.reloadCalls, 0);
 });
 
 test("route waits behind an active synthetic TURN and then navigates when generation remains current", async () => {
@@ -202,6 +238,7 @@ test("route waits behind an active synthetic TURN and then navigates when genera
   turnGate.resolve();
   await Promise.all([turn, route]);
   assert.deepEqual(navigation.urls, ["https://chatgpt.com/c/synthetic-a"]);
+  assert.equal(navigation.reloadCalls, 0);
 });
 
 test("stale queued route rejects before navigation", async () => {
@@ -215,6 +252,7 @@ test("stale queued route rejects before navigation", async () => {
   await turn;
   await assert.rejects(route, RuntimeGenerationChangedError);
   assert.deepEqual(navigation.urls, []);
+  assert.equal(navigation.reloadCalls, 0);
   assert.equal(readiness.existingCalls, 0);
 });
 
@@ -230,6 +268,7 @@ test("navigation failure is normalized without locator or upstream error leakage
       !error.message.includes("synthetic-a") &&
       !error.message.includes("secret detail"),
   );
+  assert.equal(navigation.reloadCalls, 0);
   assert.equal(readiness.existingCalls, 0);
 });
 
@@ -253,6 +292,7 @@ test("existing route success boundary is navigation followed by readiness comple
   assert.deepEqual(await route, { kind: "THREAD", threadHandle: handleA });
   assert.equal(settled, true);
   assert.deepEqual(events, ["navigate", "readiness", "ready"]);
+  assert.equal(navigation.reloadCalls, 0);
 });
 
 test("concurrent second route waits until first route readiness releases the ROUTE slot", async () => {
@@ -271,6 +311,7 @@ test("concurrent second route waits until first route readiness releases the ROU
     "https://chatgpt.com/c/synthetic-a",
     "https://chatgpt.com/c/synthetic-b",
   ]);
+  assert.equal(navigation.reloadCalls, 0);
 });
 
 test("synthetic TURN queued behind existing route waits for readiness", async () => {
@@ -311,49 +352,89 @@ test("routeFresh never invokes existing readiness", async () => {
 
 // M4 ROUTEFRESH TESTS
 
-test("routeFresh calls fresh readiness exactly once and returns FRESH without allocating a handle", async () => {
-  const { router, readiness, registry } = createHarness();
+test("routeFresh performs settled navigate, reload, then fresh readiness exactly once", async () => {
+  const { router, readiness, registry, navigation, events } = createHarness();
   const initialThreads = registry.knownThreads();
   const result = await router.routeFresh();
-  
+
   assert.equal(readiness.freshCalls, 1);
   assert.equal(readiness.existingCalls, 0);
+  assert.equal(navigation.reloadCalls, 1);
+  assert.deepEqual(events, ["navigate_settled", "reload", "fresh_readiness", "fresh_ready"]);
   assert.deepEqual(result, { kind: "FRESH" });
   assert.deepEqual(registry.knownThreads(), initialThreads);
 });
 
+test("routeFresh settlement failure prevents reload, readiness, and thread allocation", async () => {
+  const { router, readiness, registry, navigation, events } = createHarness();
+  const initialThreads = registry.knownThreads();
+  navigation.failure = new Error("settlement upstream secret detail");
+
+  await assert.rejects(
+    router.routeFresh(),
+    (error: unknown) =>
+      error instanceof RouteNavigationFailedError &&
+      error.code === "ROUTE_NAVIGATION_FAILED" &&
+      !error.message.includes("secret detail"),
+  );
+
+  assert.deepEqual(events, ["navigate_settled"]);
+  assert.equal(navigation.reloadCalls, 0);
+  assert.equal(readiness.freshCalls, 0);
+  assert.deepEqual(registry.knownThreads(), initialThreads);
+});
+
+test("routeFresh reload failure is normalized and fresh readiness is not entered", async () => {
+  const { router, readiness, registry, navigation, events } = createHarness();
+  const initialThreads = registry.knownThreads();
+  navigation.reloadFailure = new Error("reload upstream secret detail");
+
+  await assert.rejects(
+    router.routeFresh(),
+    (error: unknown) =>
+      error instanceof RouteNavigationFailedError &&
+      error.code === "ROUTE_NAVIGATION_FAILED" &&
+      !error.message.includes("secret detail"),
+  );
+
+  assert.deepEqual(events, ["navigate_settled", "reload"]);
+  assert.equal(readiness.freshCalls, 0);
+  assert.deepEqual(registry.knownThreads(), initialThreads);
+});
+
 test("routeFresh does not settle while fresh readiness is blocked", async () => {
-  const { router, readiness } = createHarness();
+  const { router, readiness, events } = createHarness();
   const gate = deferred<void>();
   readiness.block = gate;
-  
+
   let settled = false;
   const p = router.routeFresh().then(() => { settled = true; });
-  
+
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(settled, false);
-  
+  assert.deepEqual(events, ["navigate_settled", "reload", "fresh_readiness"]);
+
   gate.resolve();
   await p;
   assert.equal(settled, true);
+  assert.deepEqual(events, ["navigate_settled", "reload", "fresh_readiness", "fresh_ready"]);
 });
 
-test("routeFresh holds the ROUTE slot and blocks a second ROUTE until fresh readiness releases", async () => {
+test("routeFresh holds the ROUTE slot through reload and fresh readiness", async () => {
   const { router, readiness, handleA } = createHarness();
   const gate = deferred<void>();
   readiness.block = gate;
-  
+
   const p1 = router.routeFresh();
   const p2 = router.routeToThread(handleA);
-  
+
   await new Promise((resolve) => setImmediate(resolve));
-  // p1 is stuck in fresh readiness, so p2 hasn't reached existing readiness yet
   assert.equal(readiness.freshCalls, 1);
   assert.equal(readiness.existingCalls, 0);
-  
+
   gate.resolve();
   await Promise.all([p1, p2]);
-  
+
   assert.equal(readiness.existingCalls, 1);
 });
 
@@ -361,48 +442,46 @@ test("a TURN queued behind routeFresh cannot execute early", async () => {
   const { router, scheduler, readiness } = createHarness();
   const gate = deferred<void>();
   readiness.block = gate;
-  
+
   let turnExecuted = false;
   const p1 = router.routeFresh();
   const p2 = scheduler.schedule("TURN", async () => { turnExecuted = true; });
-  
+
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(turnExecuted, false);
-  
+
   gate.resolve();
   await Promise.all([p1, p2]);
-  
+
   assert.equal(turnExecuted, true);
 });
 
 test("fresh readiness failure releases scheduler for later work", async () => {
   const { router, scheduler, readiness } = createHarness();
   readiness.failure = new Error("fresh fail");
-  
+
   await assert.rejects(router.routeFresh(), /fresh fail/);
-  
+
   let laterRan = false;
   await scheduler.schedule("TURN", async () => { laterRan = true; });
   assert.equal(laterRan, true);
 });
 
-test("stale queued routeFresh rejects before navigation or readiness when generation changes", async () => {
+test("stale queued routeFresh rejects before navigation, reload, or readiness when generation changes", async () => {
   const { router, runtime, scheduler, readiness, navigation } = createHarness();
-  
-  // Block the scheduler with a TURN
+
   const turnGate = deferred<void>();
   const turn = scheduler.schedule("TURN", async () => turnGate.promise);
-  
+
   const routeP = router.routeFresh();
-  
-  // Advance generation before ROUTE slot is acquired
+
   runtime.observe({ pid: 101, creationTime: "runtime-b" });
   turnGate.resolve();
-  
+
   await turn;
   await assert.rejects(routeP, RuntimeGenerationChangedError);
-  
+
   assert.equal(navigation.urls.length, 0);
+  assert.equal(navigation.reloadCalls, 0);
   assert.equal(readiness.freshCalls, 0);
 });
-

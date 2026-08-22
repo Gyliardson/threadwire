@@ -17,6 +17,7 @@ const DEFAULT_DISCOVERY_TIMEOUT_MS = 10000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 2000;
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const MAX_TARGET_LIST_BYTES = 1024 * 1024;
+const CHATBAR_VIEW_ROLE = "chatbar_view";
 
 export interface CdpTargetListClient {
   requestTargetList(signal?: AbortSignal): Promise<string>;
@@ -129,8 +130,18 @@ function parseTargetUrl(target: CdpTargetInfo): URL | null {
   }
 }
 
+function isKnownChatbarTarget(url: URL): boolean {
+  const queryEntries = [...url.searchParams.entries()];
+  return (
+    url.pathname === "/" &&
+    url.hash === "" &&
+    queryEntries.length === 1 &&
+    queryEntries[0]?.[1] === CHATBAR_VIEW_ROLE
+  );
+}
+
 export function selectPrimaryChatGptTarget(targets: CdpTargetList): CdpTargetInfo {
-  const eligible: CdpTargetInfo[] = [];
+  const eligible: Array<Readonly<{ target: CdpTargetInfo; url: URL }>> = [];
   for (const target of targets) {
     if (target.type !== "page") {
       continue;
@@ -145,16 +156,25 @@ export function selectPrimaryChatGptTarget(targets: CdpTargetList): CdpTargetInf
     if (!target.webSocketDebuggerUrl) {
       throw new CdpTargetListMalformedError();
     }
-    eligible.push(target);
+    eligible.push({ target, url: parsedUrl });
   }
 
   if (eligible.length === 0) {
     throw new CdpTargetNotFoundError();
   }
-  if (eligible.length > 1) {
-    throw new CdpTargetAmbiguousError();
+  if (eligible.length === 1) {
+    if (isKnownChatbarTarget(eligible[0]!.url)) {
+      throw new CdpTargetNotFoundError();
+    }
+    return eligible[0]!.target;
   }
-  return eligible[0]!;
+  if (eligible.length === 2) {
+    const chatbarTargets = eligible.filter((candidate) => isKnownChatbarTarget(candidate.url));
+    if (chatbarTargets.length === 1) {
+      return eligible.find((candidate) => !isKnownChatbarTarget(candidate.url))!.target;
+    }
+  }
+  throw new CdpTargetAmbiguousError();
 }
 
 export interface FindPrimaryTargetOptions {

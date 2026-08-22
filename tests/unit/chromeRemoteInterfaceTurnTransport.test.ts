@@ -74,6 +74,7 @@ class FakeTurnCriClient {
 
   public readonly Page = {
     navigate: async (_params: { url: string }) => ({}),
+    reload: async (_params: { ignoreCache?: boolean } = {}) => undefined,
     getFrameTree: async () => ({ frameTree: { frame: this.frame } }),
   };
 
@@ -295,7 +296,7 @@ test("typed Input primitives preserve insertText then Enter keyDown/keyUp orderi
     },
   ]);
   assert.equal("send" in session, false);
-  assert.equal("reload" in session, false);
+  assert.equal("reload" in session, true);
   assert.equal("evaluate" in session, false);
   assert.equal("getResponseBody" in session, false);
   assert.equal("streamResourceContent" in session, false);
