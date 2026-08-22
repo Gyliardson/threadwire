@@ -12,6 +12,8 @@ export type ConversationLocator = string & {
 
 // M2 supports the observed existing-thread route family only; this is not a universal ChatGPT routing rule.
 const EXISTING_CONVERSATION_PATH = /^\/c\/[^/]+\/?$/;
+const THREAD_HANDLE = /^tw_[A-Za-z0-9_-]{1,128}$/;
+const OPAQUE_THREAD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 export function createConversationLocator(value: string): ConversationLocator {
   let url: URL;
@@ -35,9 +37,16 @@ export function createConversationLocator(value: string): ConversationLocator {
   return `${CHATGPT_ORIGIN}${pathname}` as ConversationLocator;
 }
 
+export function createThreadHandle(value: string): ThreadHandle {
+  if (!THREAD_HANDLE.test(value)) {
+    throw new TypeError("Thread handle is invalid.");
+  }
+  return value as ThreadHandle;
+}
+
 export function createOpaqueThreadHandle(opaqueId: string): ThreadHandle {
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(opaqueId)) {
+  if (!OPAQUE_THREAD_ID.test(opaqueId)) {
     throw new TypeError("Thread handle factory returned an invalid opaque identifier.");
   }
-  return `tw_${opaqueId}` as ThreadHandle;
+  return createThreadHandle(`tw_${opaqueId}`);
 }
