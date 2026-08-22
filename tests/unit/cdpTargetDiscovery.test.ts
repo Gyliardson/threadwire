@@ -65,6 +65,56 @@ test("target selection rejects no-target and ambiguous eligible-target states", 
   );
 });
 
+test("target selection excludes only the exact known Classic chatbar companion role", () => {
+  const selectedAtRoot = selectPrimaryChatGptTarget([
+    target("chatbar", "https://chatgpt.com/?desktop_role=chatbar_view"),
+    target("main", "https://chatgpt.com/?desktop_role=main_view"),
+  ]);
+  assert.equal(selectedAtRoot.id, "main");
+
+  const selectedAfterNavigation = selectPrimaryChatGptTarget([
+    target("chatbar", "https://chatgpt.com/?desktop_role=chatbar_view"),
+    target("main", "https://chatgpt.com/c/abc"),
+  ]);
+  assert.equal(selectedAfterNavigation.id, "main");
+
+  assert.throws(
+    () =>
+      selectPrimaryChatGptTarget([
+        target("chatbar", "https://chatgpt.com/?desktop_role=chatbar_view"),
+      ]),
+    CdpTargetNotFoundError,
+  );
+
+  assert.throws(
+    () =>
+      selectPrimaryChatGptTarget([
+        target("main", "https://chatgpt.com/?desktop_role=main_view"),
+        target("not-exact", "https://chatgpt.com/?desktop_role=chatbar_view&extra=1"),
+      ]),
+    CdpTargetAmbiguousError,
+  );
+
+  assert.throws(
+    () =>
+      selectPrimaryChatGptTarget([
+        target("main", "https://chatgpt.com/?desktop_role=main_view"),
+        target("not-root", "https://chatgpt.com/c/aux?desktop_role=chatbar_view"),
+      ]),
+    CdpTargetAmbiguousError,
+  );
+
+  assert.throws(
+    () =>
+      selectPrimaryChatGptTarget([
+        target("chatbar", "https://chatgpt.com/?desktop_role=chatbar_view"),
+        target("main", "https://chatgpt.com/?desktop_role=main_view"),
+        target("unknown", "https://chatgpt.com/?desktop_role=other_view"),
+      ]),
+    CdpTargetAmbiguousError,
+  );
+});
+
 test("malformed target payloads are rejected explicitly", () => {
   assert.throws(() => parseCdpTargetList("not-json"), CdpTargetListMalformedError);
   assert.throws(
