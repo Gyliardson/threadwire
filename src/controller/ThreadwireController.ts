@@ -2,6 +2,7 @@ import { CdpSessionManager } from "../cdp/CdpSessionManager.js";
 import { ControllerConfig } from "../config/ControllerConfig.js";
 import { CdpConnectionState } from "../domain/RuntimeState.js";
 import { ThreadHandle } from "../domain/ThreadIdentity.js";
+import { ThreadRegistryStore } from "../persistence/ThreadRegistryStore.js";
 import { ReadinessController } from "../readiness/ReadinessController.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import { ConversationRouter } from "../routing/ConversationRouter.js";
@@ -72,6 +73,10 @@ export interface ThreadwireControllerOptions {
   readonly maxOutstandingTurns?: number;
 }
 
+export interface ThreadwireControllerFactoryOptions extends ThreadwireControllerOptions {
+  readonly threadRegistryStore?: ThreadRegistryStore;
+}
+
 export class ThreadwireController {
   private readonly turnQueue: ControllerTurnQueue;
 
@@ -138,10 +143,12 @@ export class ThreadwireController {
 
 export function createThreadwireController(
   config: ControllerConfig,
-  options: ThreadwireControllerOptions = {},
+  options: ThreadwireControllerFactoryOptions = {},
 ): ThreadwireController {
   const supervisor = new ClassicSupervisor(config);
-  const registry = new ThreadRegistry();
+  const registry = new ThreadRegistry(
+    options.threadRegistryStore === undefined ? {} : { store: options.threadRegistryStore },
+  );
   const scheduler = new OperationScheduler(supervisor);
   const cdp = new CdpSessionManager(config, supervisor);
   const readiness = new ReadinessController(cdp);
