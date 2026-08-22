@@ -34,6 +34,7 @@ class FakeCriClient {
     },
   ];
   public readonly focusIds: number[] = [];
+  public readonly reloadOptions: Array<{ ignoreCache?: boolean }> = [];
   private readonly disconnectListeners = new Set<() => void>();
   private readonly requestListeners = new Set<RequestListener>();
   private readonly responseListeners = new Set<ResponseListener>();
@@ -42,12 +43,17 @@ class FakeCriClient {
 
   public readonly Page: {
     navigate(params: { url: string }): Promise<Record<string, never>>;
+    reload(params?: { ignoreCache?: boolean }): Promise<void>;
     getFrameTree(): Promise<{ frameTree: { frame: { id: string; loaderId: string; url: string } } }>;
   };
 
   public constructor() {
     this.Page = {
       navigate: async ({ url }: { url: string }) => { this.events.push(`navigate:${url}`); return {}; },
+      reload: async (params: { ignoreCache?: boolean } = {}) => {
+        this.reloadOptions.push(params);
+        this.events.push("reload");
+      },
       getFrameTree: async () => ({ frameTree: { frame: this.frame } }),
     };
   }
@@ -109,6 +115,13 @@ test("Network listeners and Network.enable are established before route navigati
     "subscribe.request", "subscribe.response", "subscribe.finished", "subscribe.failed", "network.enable", `navigate:${expected}`,
   ]);
   assert.deepEqual(client.enableOptions, [{}]);
+});
+
+test("typed reload delegates only Page.reload with normal cache semantics", async () => {
+  const { client, session } = await createSession();
+  await session.reload();
+  assert.deepEqual(client.reloadOptions, [{ ignoreCache: false }]);
+  assert.deepEqual(client.events, ["reload"]);
 });
 
 test("relevant backend request IDs are metadata-only and loadingFinished clears them", async () => {
@@ -195,12 +208,12 @@ test("Accessibility classification requires exactly the narrow multiline editabl
   assert.deepEqual((await session.getReadinessSnapshot({ kind: "THREAD", locator: expected })).eligibleEditables, []);
 });
 
-test("typed DOM.focus delegates with backendNodeId and no generic mutation surface", async () => {
+test("typed mutation surface exposes focus and reload but not a generic send primitive", async () => {
   const { client, session } = await createSession(); await session.initializeReadinessObservation();
   await session.focusBackendNode(101);
   assert.deepEqual(client.focusIds, [101]);
   assert.equal("send" in session, false);
-  assert.equal("reload" in session, false);
+  assert.equal("reload" in session, true);
 });
 
 test("disconnect clears readiness request tracking/listeners and closes the observation lifecycle", async () => {
