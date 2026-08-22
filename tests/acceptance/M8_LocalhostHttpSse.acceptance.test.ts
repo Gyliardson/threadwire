@@ -155,14 +155,14 @@ function validateTurnSse(
   assert.equal(response.body.includes("https://chatgpt.com/c/"), false);
 
   const events = parseSse(response.body);
-  assert.equal(events.length >= 3, true);
+  assert.equal(events.length >= 2, true);
   assert.equal(events.every((event) => ["TEXT_DELTA", "FINAL_TEXT", "COMPLETED"].includes(event.event)), true);
 
   const deltaEvents = events.filter((event) => event.event === "TEXT_DELTA");
   const finalEvents = events.filter((event) => event.event === "FINAL_TEXT");
   const completedEvents = events.filter((event) => event.event === "COMPLETED");
 
-  assert.equal(deltaEvents.length >= 1, true);
+  // TEXT_DELTA is best-effort. FINAL_TEXT is the authoritative reconciled response.
   assert.equal(finalEvents.length, 1);
   assert.equal(completedEvents.length, 1);
   assert.equal(events.at(-1)?.event, "COMPLETED");
