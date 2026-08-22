@@ -24,6 +24,8 @@ export type ThreadwireErrorCode =
   | "CONVERSATION_LOCATOR_INVALID"
   | "THREAD_NOT_FOUND"
   | "THREAD_HANDLE_COLLISION"
+  | "THREAD_REGISTRY_STATE_INVALID"
+  | "THREAD_REGISTRY_PERSISTENCE_FAILED"
   | "ROUTE_NAVIGATION_FAILED"
   | "EXISTING_ROUTE_READINESS_TIMEOUT"
   | "FRESH_ROUTE_READINESS_TIMEOUT"
@@ -217,6 +219,20 @@ export class ThreadHandleCollisionError extends ThreadwireError {
   constructor(message: string = "Unable to allocate a unique Threadwire thread handle.", options?: ErrorOptions) {
     super(message, "THREAD_HANDLE_COLLISION", options);
     this.name = "ThreadHandleCollisionError";
+  }
+}
+
+export class ThreadRegistryStateInvalidError extends ThreadwireError {
+  constructor(message: string = "Threadwire thread registry state is invalid.", options?: ErrorOptions) {
+    super(message, "THREAD_REGISTRY_STATE_INVALID", options);
+    this.name = "ThreadRegistryStateInvalidError";
+  }
+}
+
+export class ThreadRegistryPersistenceError extends ThreadwireError {
+  constructor(message: string = "Threadwire thread registry state could not be persisted safely.", options?: ErrorOptions) {
+    super(message, "THREAD_REGISTRY_PERSISTENCE_FAILED", options);
+    this.name = "ThreadRegistryPersistenceError";
   }
 }
 
