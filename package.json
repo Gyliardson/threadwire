@@ -4,6 +4,7 @@
   "private": true,
   "description": "Threadwire Controller MVP",
   "type": "module",
+  "packageManager": "pnpm@11.22.0",
   "engines": {
     "node": ">=24 <25"
   },
