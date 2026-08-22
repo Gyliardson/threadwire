@@ -2,12 +2,16 @@ import { assertApiConfigCompatible, loadApiConfig } from "./api/ApiConfig.js";
 import { createThreadwireHttpServer } from "./api/ThreadwireHttpServer.js";
 import { loadConfig } from "./config/ControllerConfig.js";
 import { createThreadwireController } from "./controller/ThreadwireController.js";
+import { loadThreadRegistryPersistenceConfig } from "./persistence/ThreadRegistryPersistenceConfig.js";
+import { JsonFileThreadRegistryStore } from "./persistence/ThreadRegistryStore.js";
 
 const controllerConfig = loadConfig();
 const apiConfig = loadApiConfig();
+const persistenceConfig = loadThreadRegistryPersistenceConfig();
 assertApiConfigCompatible(apiConfig, controllerConfig);
 
-const controller = createThreadwireController(controllerConfig);
+const threadRegistryStore = new JsonFileThreadRegistryStore(persistenceConfig.stateFile);
+const controller = createThreadwireController(controllerConfig, { threadRegistryStore });
 const server = createThreadwireHttpServer(apiConfig, controller);
 await server.start();
 
