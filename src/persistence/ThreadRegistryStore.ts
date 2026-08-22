@@ -98,8 +98,8 @@ function parseRecords(value: unknown, maxEntries: number): readonly ThreadRegist
     try {
       threadHandle = createThreadHandle(raw.threadHandle);
       conversationLocator = createConversationLocator(raw.conversationLocator);
-    } catch (error) {
-      throw new ThreadRegistryStateInvalidError(undefined, { cause: error });
+    } catch {
+      throw new ThreadRegistryStateInvalidError();
     }
 
     if (conversationLocator !== raw.conversationLocator) {
@@ -183,8 +183,8 @@ export class JsonFileThreadRegistryStore implements ThreadRegistryStore {
     let decoded: unknown;
     try {
       decoded = JSON.parse(text) as unknown;
-    } catch (error) {
-      throw new ThreadRegistryStateInvalidError(undefined, { cause: error });
+    } catch {
+      throw new ThreadRegistryStateInvalidError();
     }
     return parseRecords(decoded, this.maxEntries);
   }
