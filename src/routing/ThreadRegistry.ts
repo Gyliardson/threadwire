@@ -1,17 +1,20 @@
 import { randomUUID } from "node:crypto";
+import { ThreadHandleCollisionError, ThreadNotFoundError, ThreadRegistryStateInvalidError } from "../domain/errors.js";
 import {
   ConversationLocator,
   ThreadHandle,
   createConversationLocator,
   createOpaqueThreadHandle,
+  createThreadHandle,
 } from "../domain/ThreadIdentity.js";
-import { ThreadHandleCollisionError, ThreadNotFoundError } from "../domain/errors.js";
+import { ThreadRegistryRecord, ThreadRegistryStore } from "../persistence/ThreadRegistryStore.js";
 
 export const DEFAULT_THREAD_HANDLE_COLLISION_ATTEMPTS = 8;
 export type ThreadHandleFactory = () => string;
 
 export interface ThreadRegistryOptions {
   readonly handleFactory?: ThreadHandleFactory;
+  readonly store?: ThreadRegistryStore;
 }
 
 export type ThreadRegistrationResult = Readonly<{
@@ -23,9 +26,12 @@ export class ThreadRegistry {
   private readonly handleToLocator = new Map<ThreadHandle, ConversationLocator>();
   private readonly locatorToHandle = new Map<ConversationLocator, ThreadHandle>();
   private readonly handleFactory: ThreadHandleFactory;
+  private readonly store: ThreadRegistryStore | null;
 
   public constructor(options: ThreadRegistryOptions = {}) {
     this.handleFactory = options.handleFactory ?? randomUUID;
+    this.store = options.store ?? null;
+    this.restore(this.store?.load() ?? []);
   }
 
   public register(locator: ConversationLocator): ThreadHandle {
@@ -44,6 +50,13 @@ export class ThreadRegistry {
       if (this.handleToLocator.has(handle)) {
         continue;
       }
+
+      const nextRecord = Object.freeze({
+        threadHandle: handle,
+        conversationLocator: normalized,
+      }) satisfies ThreadRegistryRecord;
+      this.store?.save([...this.snapshotRecords(), nextRecord]);
+
       this.handleToLocator.set(handle, normalized);
       this.locatorToHandle.set(normalized, handle);
       return Object.freeze({ threadHandle: handle, created: true });
@@ -62,5 +75,37 @@ export class ThreadRegistry {
 
   public knownThreads(): readonly ThreadHandle[] {
     return Object.freeze([...this.handleToLocator.keys()]);
+  }
+
+  private restore(records: readonly ThreadRegistryRecord[]): void {
+    for (const record of records) {
+      let threadHandle: ThreadHandle;
+      let conversationLocator: ConversationLocator;
+      try {
+        threadHandle = createThreadHandle(record.threadHandle);
+        conversationLocator = createConversationLocator(record.conversationLocator);
+      } catch (error) {
+        throw new ThreadRegistryStateInvalidError(undefined, { cause: error });
+      }
+
+      if (
+        conversationLocator !== record.conversationLocator ||
+        this.handleToLocator.has(threadHandle) ||
+        this.locatorToHandle.has(conversationLocator)
+      ) {
+        throw new ThreadRegistryStateInvalidError();
+      }
+
+      this.handleToLocator.set(threadHandle, conversationLocator);
+      this.locatorToHandle.set(conversationLocator, threadHandle);
+    }
+  }
+
+  private snapshotRecords(): readonly ThreadRegistryRecord[] {
+    return Object.freeze(
+      [...this.handleToLocator.entries()].map(([threadHandle, conversationLocator]) =>
+        Object.freeze({ threadHandle, conversationLocator }),
+      ),
+    );
   }
 }
