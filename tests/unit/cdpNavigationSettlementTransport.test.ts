@@ -35,12 +35,17 @@ class FakeSettlementCriClient {
   public navigateFails = false;
   public getFrameTreeFails = false;
   public returnDifferentFrameId = false;
+  public emitLifecycleDuringEnable = false;
 
   public readonly Page = {
     enable: async () => {
       this.operations.push("Page.enable");
       if (this.enableFails) {
         throw new Error("SECRET_ENABLE_FAILURE_INTERNAL");
+      }
+      if (this.emitLifecycleDuringEnable) {
+        this.emitLoadEvent();
+        this.emitFrameStopped(this.frame.id);
       }
       return {};
     },
@@ -292,4 +297,26 @@ test("raw Page protocol errors are sanitized and do not leak internal metadata",
       return true;
     },
   );
+});
+
+test("stale lifecycle events emitted before Page.navigate initiation do not satisfy settlement", async () => {
+  const client = new FakeSettlementCriClient();
+  client.emitLifecycleDuringEnable = true;
+  const session = await createSession(client);
+
+  let settled = false;
+  const navPromise = session.navigateAndWaitForLoadSettlement("https://chatgpt.com/", freshRoute).then(() => {
+    settled = true;
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.equal(settled, false, "Must not settle from stale pre-navigation lifecycle events");
+
+  client.emitLoadEvent();
+  client.emitFrameStopped(client.frame.id);
+
+  await navPromise;
+  assert.equal(settled, true);
 });

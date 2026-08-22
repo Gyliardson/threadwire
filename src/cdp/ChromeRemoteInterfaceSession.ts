@@ -172,6 +172,7 @@ export class ChromeRemoteInterfaceSession
       throw new Error("CDP Page lifecycle observation is unavailable.");
     }
 
+    let navigationInitiated = false;
     let loadEventFired = false;
     let matchingFrameStopped = false;
     let targetFrameId: string | null = null;
@@ -191,6 +192,9 @@ export class ChromeRemoteInterfaceSession
     const unsubscribers: Array<() => void> = [];
 
     const unsubLoad = page.loadEventFired(() => {
+      if (!navigationInitiated) {
+        return;
+      }
       loadEventFired = true;
       checkSettlement();
     });
@@ -201,6 +205,9 @@ export class ChromeRemoteInterfaceSession
     }
 
     const unsubFrameStopped = page.frameStoppedLoading((event) => {
+      if (!navigationInitiated) {
+        return;
+      }
       if (typeof event?.frameId === "string") {
         if (targetFrameId !== null) {
           if (event.frameId === targetFrameId) {
@@ -227,6 +234,7 @@ export class ChromeRemoteInterfaceSession
 
       throwIfAborted(signal);
 
+      navigationInitiated = true;
       let navResult: { frameId?: string; loaderId?: string; errorText?: string };
       try {
         navResult = await page.navigate({ url });
