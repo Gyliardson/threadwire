@@ -234,6 +234,20 @@ export class CdpSessionManager {
     }
   }
 
+  public async reload(signal?: AbortSignal): Promise<void> {
+    this.assertCurrentRuntime();
+    throwIfAborted(signal);
+    const session = this.session!;
+    try {
+      await session.reload();
+    } catch (error) {
+      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+        throw error;
+      }
+      throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
+    }
+  }
+
   public async getReadinessSnapshot(
     expectedRoute: RouteExpectation,
     lease: RuntimeLease,
