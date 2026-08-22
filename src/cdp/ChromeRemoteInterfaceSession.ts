@@ -3,6 +3,7 @@ import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.
 import { NormalizedResponseStreamEvent } from "../response/types.js";
 import {
   CdpFinalRenderedAssistantSnapshot,
+  CdpNavigationSettlementTransportSession,
   CdpResponseRenderBaseline,
   CdpResponseTurnTransportSession,
   CdpTurnComposerState,
@@ -10,6 +11,7 @@ import {
   CdpTurnObservationOptions,
   CdpTurnObservationSnapshot,
 } from "./CdpTransport.js";
+import { delay, throwIfAborted } from "../utils/timeout.js";
 import {
   CriClient,
   EligibleComposerTarget,
@@ -33,7 +35,9 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-export class ChromeRemoteInterfaceSession implements CdpResponseTurnTransportSession {
+export class ChromeRemoteInterfaceSession
+  implements CdpResponseTurnTransportSession, CdpNavigationSettlementTransportSession
+{
   private readonly activeRelevantRequestIds = new Set<string>();
   private readonly disconnectListeners = new Set<() => void>();
   private activityEpoch = 0;
@@ -137,6 +141,139 @@ export class ChromeRemoteInterfaceSession implements CdpResponseTurnTransportSes
       await this.client.Page.reload({ ignoreCache: false });
     } catch {
       throw new Error("CDP Page.reload command failed without retained protocol metadata.");
+    }
+  }
+
+  public async navigateAndWaitForLoadSettlement(
+    url: string,
+    expectedRoute: RouteExpectation,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.closed) {
+      throw new Error("CDP session is closed.");
+    }
+    throwIfAborted(signal);
+
+    const page = this.client.Page as unknown as {
+      enable?: (params?: Record<string, unknown>) => Promise<unknown>;
+      loadEventFired?: (listener: () => void) => (() => unknown) | unknown;
+      frameStoppedLoading?: (listener: (event: { frameId?: string }) => void) => (() => unknown) | unknown;
+      navigate?: (params: { url: string }) => Promise<{ frameId?: string; loaderId?: string; errorText?: string }>;
+      getFrameTree?: () => Promise<{ frameTree: { frame: { id: string; loaderId?: string; url: string } } }>;
+    };
+
+    if (
+      typeof page.enable !== "function" ||
+      typeof page.loadEventFired !== "function" ||
+      typeof page.frameStoppedLoading !== "function" ||
+      typeof page.navigate !== "function" ||
+      typeof page.getFrameTree !== "function"
+    ) {
+      throw new Error("CDP Page lifecycle observation is unavailable.");
+    }
+
+    let loadEventFired = false;
+    let matchingFrameStopped = false;
+    let targetFrameId: string | null = null;
+    const stoppedFrameIds = new Set<string>();
+
+    let settlementResolver: (() => void) | null = null;
+    const settlementPromise = new Promise<void>((resolve) => {
+      settlementResolver = resolve;
+    });
+
+    const checkSettlement = (): void => {
+      if (loadEventFired && matchingFrameStopped) {
+        settlementResolver?.();
+      }
+    };
+
+    const unsubscribers: Array<() => void> = [];
+
+    const unsubLoad = page.loadEventFired(() => {
+      loadEventFired = true;
+      checkSettlement();
+    });
+    if (typeof unsubLoad === "function") {
+      unsubscribers.push(() => {
+        (unsubLoad as () => unknown)();
+      });
+    }
+
+    const unsubFrameStopped = page.frameStoppedLoading((event) => {
+      if (typeof event?.frameId === "string") {
+        if (targetFrameId !== null) {
+          if (event.frameId === targetFrameId) {
+            matchingFrameStopped = true;
+            checkSettlement();
+          }
+        } else {
+          stoppedFrameIds.add(event.frameId);
+        }
+      }
+    });
+    if (typeof unsubFrameStopped === "function") {
+      unsubscribers.push(() => {
+        (unsubFrameStopped as () => unknown)();
+      });
+    }
+
+    try {
+      try {
+        await page.enable({});
+      } catch {
+        throw new Error("CDP Page.enable failed without retained protocol metadata.");
+      }
+
+      throwIfAborted(signal);
+
+      let navResult: { frameId?: string; loaderId?: string; errorText?: string };
+      try {
+        navResult = await page.navigate({ url });
+      } catch {
+        throw new Error("CDP Page.navigate command failed without retained protocol metadata.");
+      }
+
+      if (typeof navResult.errorText === "string" && navResult.errorText.length > 0) {
+        throw new Error("CDP Page.navigate reported a navigation error.");
+      }
+
+      if (typeof navResult.frameId === "string") {
+        targetFrameId = navResult.frameId;
+        if (stoppedFrameIds.has(targetFrameId)) {
+          matchingFrameStopped = true;
+          checkSettlement();
+        }
+      }
+
+      while (!loadEventFired || !matchingFrameStopped) {
+        throwIfAborted(signal);
+        await Promise.race([settlementPromise, delay(50, signal)]);
+      }
+
+      let routeConfirmed = false;
+      while (!routeConfirmed) {
+        throwIfAborted(signal);
+        let frameTree: { frameTree: { frame: { id: string; loaderId?: string; url: string } } };
+        try {
+          frameTree = await page.getFrameTree();
+        } catch {
+          throw new Error("CDP Page.getFrameTree failed without retained protocol metadata.");
+        }
+        if (routeMatchesExpected(frameTree.frameTree.frame.url, expectedRoute)) {
+          routeConfirmed = true;
+          break;
+        }
+        await delay(50, signal);
+      }
+    } finally {
+      for (const unsub of unsubscribers) {
+        try {
+          unsub();
+        } catch {
+          // Dispose all subscriptions cleanly
+        }
+      }
     }
   }
 

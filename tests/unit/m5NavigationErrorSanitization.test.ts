@@ -285,6 +285,14 @@ class PrewrappedUnsafeNavigation implements ConversationNavigationPort {
   public async reload(_signal?: AbortSignal): Promise<void> {
     throw new RouteNavigationFailedError(undefined, { cause: this.rawError });
   }
+
+  public async navigateAndWaitForLoadSettlement(
+    _url: string,
+    _expectedRoute: unknown,
+    _signal?: AbortSignal,
+  ): Promise<void> {
+    throw new RouteNavigationFailedError(undefined, { cause: this.rawError });
+  }
 }
 
 test("ConversationRouter strips unsafe cause graphs even from prewrapped route errors", async () => {

@@ -78,6 +78,22 @@ class RecordingNavigation implements ConversationNavigationPort {
       await gate.promise;
     }
   }
+
+  public async navigateAndWaitForLoadSettlement(
+    url: string,
+    _expectedRoute: unknown,
+  ): Promise<void> {
+    this.urls.push(url);
+    this.events.push("navigate_settled");
+    if (this.failure) {
+      throw this.failure;
+    }
+    if (this.block) {
+      const gate = this.block;
+      this.block = null;
+      await gate.promise;
+    }
+  }
 }
 
 class ControlledReadiness implements ConversationReadinessPort {
@@ -336,7 +352,7 @@ test("routeFresh never invokes existing readiness", async () => {
 
 // M4 ROUTEFRESH TESTS
 
-test("routeFresh performs navigate, reload, then fresh readiness exactly once", async () => {
+test("routeFresh performs settled navigate, reload, then fresh readiness exactly once", async () => {
   const { router, readiness, registry, navigation, events } = createHarness();
   const initialThreads = registry.knownThreads();
   const result = await router.routeFresh();
@@ -344,8 +360,27 @@ test("routeFresh performs navigate, reload, then fresh readiness exactly once", 
   assert.equal(readiness.freshCalls, 1);
   assert.equal(readiness.existingCalls, 0);
   assert.equal(navigation.reloadCalls, 1);
-  assert.deepEqual(events, ["navigate", "reload", "fresh_readiness", "fresh_ready"]);
+  assert.deepEqual(events, ["navigate_settled", "reload", "fresh_readiness", "fresh_ready"]);
   assert.deepEqual(result, { kind: "FRESH" });
+  assert.deepEqual(registry.knownThreads(), initialThreads);
+});
+
+test("routeFresh settlement failure prevents reload, readiness, and thread allocation", async () => {
+  const { router, readiness, registry, navigation, events } = createHarness();
+  const initialThreads = registry.knownThreads();
+  navigation.failure = new Error("settlement upstream secret detail");
+
+  await assert.rejects(
+    router.routeFresh(),
+    (error: unknown) =>
+      error instanceof RouteNavigationFailedError &&
+      error.code === "ROUTE_NAVIGATION_FAILED" &&
+      !error.message.includes("secret detail"),
+  );
+
+  assert.deepEqual(events, ["navigate_settled"]);
+  assert.equal(navigation.reloadCalls, 0);
+  assert.equal(readiness.freshCalls, 0);
   assert.deepEqual(registry.knownThreads(), initialThreads);
 });
 
@@ -362,7 +397,7 @@ test("routeFresh reload failure is normalized and fresh readiness is not entered
       !error.message.includes("secret detail"),
   );
 
-  assert.deepEqual(events, ["navigate", "reload"]);
+  assert.deepEqual(events, ["navigate_settled", "reload"]);
   assert.equal(readiness.freshCalls, 0);
   assert.deepEqual(registry.knownThreads(), initialThreads);
 });
@@ -377,12 +412,12 @@ test("routeFresh does not settle while fresh readiness is blocked", async () => 
 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(settled, false);
-  assert.deepEqual(events, ["navigate", "reload", "fresh_readiness"]);
+  assert.deepEqual(events, ["navigate_settled", "reload", "fresh_readiness"]);
 
   gate.resolve();
   await p;
   assert.equal(settled, true);
-  assert.deepEqual(events, ["navigate", "reload", "fresh_readiness", "fresh_ready"]);
+  assert.deepEqual(events, ["navigate_settled", "reload", "fresh_readiness", "fresh_ready"]);
 });
 
 test("routeFresh holds the ROUTE slot through reload and fresh readiness", async () => {

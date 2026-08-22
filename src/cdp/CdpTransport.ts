@@ -72,6 +72,14 @@ export interface CdpTransportSession {
   focusBackendNode(backendDOMNodeId: number): Promise<void>;
 }
 
+export interface CdpNavigationSettlementTransportSession extends CdpTransportSession {
+  navigateAndWaitForLoadSettlement(
+    url: string,
+    expectedRoute: RouteExpectation,
+    signal?: AbortSignal,
+  ): Promise<void>;
+}
+
 export interface CdpTurnTransportSession extends CdpTransportSession {
   getTurnComposerState(expectedRoute: RouteExpectation): Promise<CdpTurnComposerState>;
   armTurnObservation(options?: CdpTurnObservationOptions): CdpTurnObservationHandle;

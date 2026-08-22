@@ -25,6 +25,7 @@ import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport
 import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
 import {
   CdpFinalRenderedAssistantSnapshot,
+  CdpNavigationSettlementTransportSession,
   CdpResponseRenderBaseline,
   CdpResponseTurnTransportSession,
   CdpTransport,
@@ -37,6 +38,7 @@ import {
 } from "./CdpTransport.js";
 
 const DEFAULT_ATTACH_TIMEOUT_MS = 5000;
+const DEFAULT_NAVIGATION_SETTLEMENT_TIMEOUT_MS = 15000;
 
 export interface CdpTargetDiscoveryLike {
   findPrimaryTarget(options?: FindPrimaryTargetOptions): ReturnType<CdpTargetDiscovery["findPrimaryTarget"]>;
@@ -46,6 +48,14 @@ export interface CdpSessionManagerOptions {
   readonly discovery?: CdpTargetDiscoveryLike;
   readonly transport?: CdpTransport;
   readonly attachTimeoutMs?: number;
+  readonly navigationSettlementTimeoutMs?: number;
+}
+
+function isNavigationSettlementSession(
+  session: CdpTransportSession,
+): session is CdpNavigationSettlementTransportSession {
+  const candidate = session as Partial<CdpNavigationSettlementTransportSession>;
+  return typeof candidate.navigateAndWaitForLoadSettlement === "function";
 }
 
 function isTurnTransportSession(session: CdpTransportSession): session is CdpTurnTransportSession {
@@ -94,6 +104,7 @@ export class CdpSessionManager {
   private readonly discovery: CdpTargetDiscoveryLike;
   private readonly transport: CdpTransport;
   private readonly attachTimeoutMs: number;
+  private readonly navigationSettlementTimeoutMs: number;
 
   public constructor(
     private readonly config: ControllerConfig,
@@ -103,6 +114,8 @@ export class CdpSessionManager {
     this.discovery = options.discovery ?? new CdpTargetDiscovery(config);
     this.transport = options.transport ?? new ChromeRemoteInterfaceTransport();
     this.attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
+    this.navigationSettlementTimeoutMs =
+      options.navigationSettlementTimeoutMs ?? DEFAULT_NAVIGATION_SETTLEMENT_TIMEOUT_MS;
   }
 
   public get state(): CdpConnectionState {
@@ -240,6 +253,36 @@ export class CdpSessionManager {
     const session = this.session!;
     try {
       await session.reload();
+    } catch (error) {
+      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+        throw error;
+      }
+      throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
+    }
+  }
+
+  public async navigateAndWaitForLoadSettlement(
+    url: string,
+    expectedRoute: RouteExpectation,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.assertCurrentRuntime();
+    throwIfAborted(signal);
+    const session = this.session!;
+    if (!isNavigationSettlementSession(session)) {
+      throw new CdpNavigationFailedError(undefined, {
+        cause: new Error("CDP session does not support navigation settlement."),
+      });
+    }
+    try {
+      await withTimeout(
+        (timeoutSignal) => session.navigateAndWaitForLoadSettlement(url, expectedRoute, timeoutSignal),
+        this.navigationSettlementTimeoutMs,
+        signal
+          ? { signal, message: "Timed out waiting for CDP navigation load settlement." }
+          : { message: "Timed out waiting for CDP navigation load settlement." },
+      );
+      this.assertCurrentRuntime();
     } catch (error) {
       if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
         throw error;
