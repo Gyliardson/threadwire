@@ -67,6 +67,7 @@ export interface CdpTransportSession {
   onDisconnect(listener: () => void): () => void;
   initializeReadinessObservation(): Promise<void>;
   navigate(url: string): Promise<void>;
+  reload(): Promise<void>;
   getReadinessSnapshot(expectedRoute: RouteExpectation): Promise<ExistingReadinessSnapshot>;
   focusBackendNode(backendDOMNodeId: number): Promise<void>;
 }
