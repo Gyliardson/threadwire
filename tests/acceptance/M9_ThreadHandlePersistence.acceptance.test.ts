@@ -262,6 +262,36 @@ function validateThreadList(response: HttpResponse, expectedHandle: string): voi
   assert.equal(thread.threadHandle === expectedHandle, true);
 }
 
+function safePublicErrorCode(event: SseEvent): string | null {
+  if (event.event !== "ERROR") {
+    return null;
+  }
+  const data = asRecord(event.data);
+  const error = data === null ? null : asRecord(data.error);
+  const code = error?.code;
+  return typeof code === "string" && /^[A-Z0-9_]{1,64}$/.test(code) ? code : "UNKNOWN";
+}
+
+function assertSuccessfulTurnEventShape(events: readonly SseEvent[]): void {
+  const allowedSuccessEvents = new Set(["TEXT_DELTA", "FINAL_TEXT", "COMPLETED"]);
+  const successShape =
+    events.length >= 2 && events.every((event) => allowedSuccessEvents.has(event.event));
+  if (successShape) {
+    return;
+  }
+
+  const safeEventTypes = events.map((event) =>
+    ["TEXT_DELTA", "FINAL_TEXT", "COMPLETED", "ERROR"].includes(event.event)
+      ? event.event
+      : "OTHER",
+  );
+  const publicErrorCode =
+    events.map(safePublicErrorCode).find((code): code is string => code !== null) ?? "NONE";
+  throw new Error(
+    `M9 SSE success contract failed: eventTypes=[${safeEventTypes.join(",")}], publicErrorCode=${publicErrorCode}.`,
+  );
+}
+
 function validateTurnSse(
   response: HttpResponse,
   inputMarker: string,
@@ -274,11 +304,7 @@ function validateTurnSse(
   assert.equal(response.body.includes("https://chatgpt.com/c/"), false);
 
   const events = parseSse(response.body);
-  assert.equal(events.length >= 2, true);
-  assert.equal(
-    events.every((event) => ["TEXT_DELTA", "FINAL_TEXT", "COMPLETED"].includes(event.event)),
-    true,
-  );
+  assertSuccessfulTurnEventShape(events);
 
   const deltaEvents = events.filter((event) => event.event === "TEXT_DELTA");
   const finalEvents = events.filter((event) => event.event === "FINAL_TEXT");
