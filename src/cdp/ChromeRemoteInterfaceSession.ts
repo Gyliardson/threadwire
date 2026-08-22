@@ -129,6 +129,17 @@ export class ChromeRemoteInterfaceSession implements CdpResponseTurnTransportSes
     }
   }
 
+  public async reload(): Promise<void> {
+    if (this.closed) {
+      throw new Error("CDP session is closed.");
+    }
+    try {
+      await this.client.Page.reload({ ignoreCache: false });
+    } catch {
+      throw new Error("CDP Page.reload command failed without retained protocol metadata.");
+    }
+  }
+
   public async getReadinessSnapshot(
     expectedRoute: RouteExpectation,
   ): Promise<ExistingReadinessSnapshot> {
