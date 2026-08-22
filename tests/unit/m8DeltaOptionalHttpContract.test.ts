@@ -23,6 +23,7 @@ class DeltaFreeController implements ThreadwireApiController {
     listener: (event: ResponseStreamEvent) => void,
     _signal?: AbortSignal,
   ): Promise<TurnResult> {
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
     listener({ type: "FINAL_TEXT", text: "authoritative" });
     listener({ type: "COMPLETED" });
     return Object.freeze({
