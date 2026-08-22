@@ -47,6 +47,7 @@ class FakeResponseSession implements CdpResponseTurnTransportSession {
   }
   public async initializeReadinessObservation(): Promise<void> {}
   public async navigate(_url: string): Promise<void> {}
+  public async reload(): Promise<void> {}
   public async getReadinessSnapshot(
     _expectedRoute: RouteExpectation,
   ): Promise<ExistingReadinessSnapshot> {
