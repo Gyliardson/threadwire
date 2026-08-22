@@ -84,8 +84,8 @@ export class ThreadRegistry {
       try {
         threadHandle = createThreadHandle(record.threadHandle);
         conversationLocator = createConversationLocator(record.conversationLocator);
-      } catch (error) {
-        throw new ThreadRegistryStateInvalidError(undefined, { cause: error });
+      } catch {
+        throw new ThreadRegistryStateInvalidError();
       }
 
       if (
