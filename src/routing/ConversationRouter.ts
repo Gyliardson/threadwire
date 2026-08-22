@@ -18,6 +18,7 @@ export const CHATGPT_FRESH_ROUTE = `${CHATGPT_ORIGIN}/`;
 
 export interface ConversationNavigationPort {
   navigate(url: string, signal?: AbortSignal): Promise<void>;
+  reload(signal?: AbortSignal): Promise<void>;
 }
 
 export interface ConversationReadinessPort {
@@ -78,6 +79,7 @@ export class ConversationRouter {
       "ROUTE",
       async (operationSignal, lease) => {
         await this.navigate(CHATGPT_FRESH_ROUTE, operationSignal);
+        await this.reload(operationSignal);
         await this.readiness.waitForFreshRoute(lease, operationSignal);
         return Object.freeze({ kind: "FRESH" as const });
       },
@@ -89,15 +91,27 @@ export class ConversationRouter {
     try {
       await this.navigation.navigate(url, signal);
     } catch (error) {
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
-        throw error;
-      }
-      if (error instanceof RouteNavigationFailedError) {
-        throw new RouteNavigationFailedError();
-      }
-      throw new RouteNavigationFailedError(undefined, {
-        cause: sanitizedRouteNavigationCause(error),
-      });
+      this.rethrowNavigationFailure(error);
     }
+  }
+
+  private async reload(signal?: AbortSignal): Promise<void> {
+    try {
+      await this.navigation.reload(signal);
+    } catch (error) {
+      this.rethrowNavigationFailure(error);
+    }
+  }
+
+  private rethrowNavigationFailure(error: unknown): never {
+    if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+      throw error;
+    }
+    if (error instanceof RouteNavigationFailedError) {
+      throw new RouteNavigationFailedError();
+    }
+    throw new RouteNavigationFailedError(undefined, {
+      cause: sanitizedRouteNavigationCause(error),
+    });
   }
 }
