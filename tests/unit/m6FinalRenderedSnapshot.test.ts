@@ -26,6 +26,7 @@ class FakeFinalSnapshotCriClient {
 
   public readonly Page = {
     navigate: async (_params: { url: string }) => ({}),
+    reload: async (_params: { ignoreCache?: boolean } = {}) => undefined,
     getFrameTree: async () => ({
       frameTree: {
         frame: { id: "main", loaderId: "loader", url: this.frameUrl },

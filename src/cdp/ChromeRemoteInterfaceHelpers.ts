@@ -44,6 +44,7 @@ export function isCriClient(value: unknown): value is CriClient {
     typeof value.close === "function" &&
     typeof value.on === "function" &&
     hasFunction(value.Page, "navigate") &&
+    hasFunction(value.Page, "reload") &&
     hasFunction(value.Page, "getFrameTree") &&
     hasFunction(value.Accessibility, "getFullAXTree") &&
     hasFunction(value.DOM, "focus") &&

@@ -94,6 +94,7 @@ class EarlyRouteCriClient {
 
   public readonly Page = {
     navigate: async (_params: { url: string }) => ({}),
+    reload: async (_params?: { ignoreCache?: boolean }) => ({}),
     getFrameTree: async () => {
       this.frameTreeReads += 1;
       if (this.frameTreeReads === this.blockFrameTreeReadAt) {

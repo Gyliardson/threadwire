@@ -56,9 +56,11 @@ class FakeSession implements CdpTransportSession {
   public closeCalls = 0;
   public initializeCalls = 0;
   public readonly navigations: string[] = [];
+  public reloadCalls = 0;
   public readonly focuses: number[] = [];
   public snapshotCalls = 0;
   public navigationFailure: Error | null = null;
+  public reloadFailure: Error | null = null;
   public initializationFailure: Error | null = null;
   public readinessFailure: Error | null = null;
   public focusFailure: Error | null = null;
@@ -89,6 +91,14 @@ class FakeSession implements CdpTransportSession {
     this.events.push("navigate");
     if (this.navigationFailure) {
       throw this.navigationFailure;
+    }
+  }
+
+  public async reload(): Promise<void> {
+    this.reloadCalls += 1;
+    this.events.push("reload");
+    if (this.reloadFailure) {
+      throw this.reloadFailure;
     }
   }
 
@@ -260,7 +270,7 @@ test("attach timeout aborts the underlying transport signal", async () => {
   assert.equal(manager.state, "FAILED");
 });
 
-test("navigate refuses disconnected sessions", async () => {
+test("navigate and reload refuse disconnected sessions", async () => {
   const manager = new CdpSessionManager(config, createRuntime(), {
     discovery: new StaticDiscovery(),
     transport: new FakeTransport(),
@@ -268,9 +278,10 @@ test("navigate refuses disconnected sessions", async () => {
   });
 
   await assert.rejects(() => manager.navigate("https://chatgpt.com/"), CdpDisconnectedError);
+  await assert.rejects(() => manager.reload(), CdpDisconnectedError);
 });
 
-test("navigate revalidates runtime lease and delegates only through the typed transport primitive", async () => {
+test("navigate and reload revalidate runtime and delegate only typed transport primitives", async () => {
   const runtime = createRuntime();
   const transport = new FakeTransport();
   const manager = new CdpSessionManager(config, runtime, {
@@ -281,17 +292,21 @@ test("navigate revalidates runtime lease and delegates only through the typed tr
   await manager.connect();
 
   await manager.navigate("https://chatgpt.com/c/synthetic-route");
+  await manager.reload();
   assert.deepEqual(transport.sessions[0]!.navigations, ["https://chatgpt.com/c/synthetic-route"]);
+  assert.equal(transport.sessions[0]!.reloadCalls, 1);
 
   runtime.observe({ pid: 200, creationTime: "B" });
   await assert.rejects(
     () => manager.navigate("https://chatgpt.com/c/should-not-run"),
     RuntimeGenerationChangedError,
   );
+  await assert.rejects(() => manager.reload(), RuntimeGenerationChangedError);
   assert.deepEqual(transport.sessions[0]!.navigations, ["https://chatgpt.com/c/synthetic-route"]);
+  assert.equal(transport.sessions[0]!.reloadCalls, 1);
 });
 
-test("transport navigation failures are normalized at the CDP boundary", async () => {
+test("transport navigation and reload failures are normalized at the CDP boundary", async () => {
   const runtime = createRuntime();
   const transport = new FakeTransport();
   const manager = new CdpSessionManager(config, runtime, {
@@ -300,7 +315,7 @@ test("transport navigation failures are normalized at the CDP boundary", async (
     attachTimeoutMs: 50,
   });
   await manager.connect();
-  transport.sessions[0]!.navigationFailure = new Error("synthetic upstream details");
+  transport.sessions[0]!.navigationFailure = new Error("synthetic navigation upstream details");
 
   await assert.rejects(
     () => manager.navigate("https://chatgpt.com/c/synthetic-route"),
@@ -310,9 +325,19 @@ test("transport navigation failures are normalized at the CDP boundary", async (
       !error.message.includes("synthetic-route") &&
       !error.message.includes("upstream details"),
   );
+
+  transport.sessions[0]!.navigationFailure = null;
+  transport.sessions[0]!.reloadFailure = new Error("synthetic reload upstream details");
+  await assert.rejects(
+    () => manager.reload(),
+    (error: unknown) =>
+      error instanceof CdpNavigationFailedError &&
+      error.code === "CDP_NAVIGATION_FAILED" &&
+      !error.message.includes("reload upstream details"),
+  );
 });
 
-test("readiness Network observation initializes before later route navigation", async () => {
+test("readiness Network observation initializes before later navigation and reload", async () => {
   const runtime = createRuntime();
   const transport = new FakeTransport();
   const manager = new CdpSessionManager(config, runtime, {
@@ -323,7 +348,8 @@ test("readiness Network observation initializes before later route navigation", 
 
   await manager.connect();
   await manager.navigate(locator);
-  assert.deepEqual(transport.sessions[0]!.events, ["initialize", "navigate"]);
+  await manager.reload();
+  assert.deepEqual(transport.sessions[0]!.events, ["initialize", "navigate", "reload"]);
 });
 
 test("readiness initialization failure is normalized and closes the candidate session", async () => {

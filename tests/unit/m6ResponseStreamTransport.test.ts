@@ -61,6 +61,7 @@ class FakeM6CriClient {
 
   public readonly Page = {
     navigate: async (_params: { url: string }) => ({}),
+    reload: async (_params: { ignoreCache?: boolean } = {}) => undefined,
     getFrameTree: async () => ({ frameTree: { frame: this.frame } }),
   };
   public readonly Accessibility = {
