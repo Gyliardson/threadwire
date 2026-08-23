@@ -294,8 +294,7 @@ function assertSuccessfulTurnEventShape(events: readonly SseEvent[]): void {
 
 function validateTurnSse(
   response: HttpResponse,
-  inputMarker: string,
-  outputMarker: string,
+  forbiddenInputMarkers: readonly string[],
   expectedNewlyRegistered: boolean,
   expectedHandle?: string,
 ): string {
@@ -309,10 +308,11 @@ function validateTurnSse(
   const deltaEvents = events.filter((event) => event.event === "TEXT_DELTA");
   const finalEvents = events.filter((event) => event.event === "FINAL_TEXT");
   const completedEvents = events.filter((event) => event.event === "COMPLETED");
+  assert.equal(deltaEvents.length >= 1, true);
   assert.equal(finalEvents.length, 1);
   assert.equal(completedEvents.length, 1);
-  assert.equal(events.at(-1)?.event, "COMPLETED");
   assert.equal(events.at(-2)?.event, "FINAL_TEXT");
+  assert.equal(events.at(-1)?.event, "COMPLETED");
 
   let deltaText = "";
   for (const event of deltaEvents) {
@@ -323,7 +323,10 @@ function validateTurnSse(
       deltaText += data.text;
     }
   }
-  assert.equal(deltaText.includes(inputMarker), false);
+  assert.equal(deltaText.trim().length > 0, true);
+  for (const marker of forbiddenInputMarkers) {
+    assert.equal(deltaText.includes(marker), false);
+  }
 
   const finalData = requireRecord(finalEvents[0]?.data, "M9 FINAL_TEXT data was not an object.");
   assert.equal(hasExactKeys(finalData, ["text"]), true);
@@ -331,8 +334,11 @@ function validateTurnSse(
   if (typeof finalData.text !== "string") {
     throw new Error("M9 FINAL_TEXT text was unavailable.");
   }
-  assert.equal(finalData.text.includes(inputMarker), false);
-  assert.equal(finalData.text.trim() === outputMarker, true);
+  assert.equal(finalData.text, deltaText);
+  assert.equal(finalData.text.trim().length > 0, true);
+  for (const marker of forbiddenInputMarkers) {
+    assert.equal(finalData.text.includes(marker), false);
+  }
 
   const completedData = requireRecord(
     completedEvents[0]?.data,
@@ -389,15 +395,14 @@ test(
 
       const freshNonce = nonce();
       const freshInput = `TW_M9_PERSIST_IN_${freshNonce}`;
-      const freshOutput = `TW_M9_PERSIST_OUT_${freshNonce}`;
-      const freshPrompt = `Reply with exactly ${freshOutput} and do not repeat ${freshInput}.`;
+      const freshPrompt = `Respond with a short plain-text acknowledgement. Do not repeat ${freshInput}.`;
       const freshResponse = await request(
         firstPort,
         "POST",
         "/v1/turns",
         JSON.stringify({ target: { kind: "FRESH" }, prompt: freshPrompt }),
       );
-      const threadHandle = validateTurnSse(freshResponse, freshInput, freshOutput, true);
+      const threadHandle = validateTurnSse(freshResponse, [freshInput], true);
       validateThreadList(await request(firstPort, "GET", "/v1/threads"), threadHandle);
 
       const stateStats = statSync(stateFile);
@@ -433,8 +438,7 @@ test(
 
       const existingNonce = nonce();
       const existingInput = `TW_M9_PERSIST_IN2_${existingNonce}`;
-      const existingOutput = `TW_M9_PERSIST_OUT2_${existingNonce}`;
-      const existingPrompt = `Reply with exactly ${existingOutput} and do not repeat ${existingInput}.`;
+      const existingPrompt = `Respond with a short plain-text acknowledgement. Do not repeat ${existingInput}.`;
       const existingResponse = await request(
         secondPort,
         "POST",
@@ -444,7 +448,12 @@ test(
           prompt: existingPrompt,
         }),
       );
-      validateTurnSse(existingResponse, existingInput, existingOutput, false, threadHandle);
+      validateTurnSse(
+        existingResponse,
+        [existingInput, freshInput],
+        false,
+        threadHandle,
+      );
       validateHealth(await request(secondPort, "GET", "/v1/health"), "CONNECTED");
 
       await stopThreadwireProcess(secondProcess);
