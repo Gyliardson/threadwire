@@ -72,7 +72,11 @@ export class ConversationRouter {
     return await this.scheduler.schedule(
       "ROUTE",
       async (operationSignal, lease) => {
-        await this.navigate(locator, operationSignal);
+        await this.navigateAndWaitForLoadSettlement(
+          locator,
+          { kind: "THREAD", locator },
+          operationSignal,
+        );
         await this.readiness.waitForExistingRoute(locator, lease, operationSignal);
         return Object.freeze({ kind: "THREAD" as const, threadHandle: handle });
       },
@@ -95,14 +99,6 @@ export class ConversationRouter {
       },
       signal ? { signal } : {},
     );
-  }
-
-  private async navigate(url: string, signal?: AbortSignal): Promise<void> {
-    try {
-      await this.navigation.navigate(url, signal);
-    } catch (error) {
-      this.rethrowNavigationFailure(error);
-    }
   }
 
   private async reload(signal?: AbortSignal): Promise<void> {

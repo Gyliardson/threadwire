@@ -145,6 +145,9 @@ class NavigateFailingCriClient {
   private readonly disconnectListeners = new Set<() => void>();
 
   public readonly Page = {
+    enable: async () => ({}),
+    loadEventFired: (_listener: () => void) => () => undefined,
+    frameStoppedLoading: (_listener: (event: { frameId: string }) => void) => () => undefined,
     navigate: async ({ url }: { url: string }) => {
       this.navigateUrl = url;
       throw this.rawError;

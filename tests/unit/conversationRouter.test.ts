@@ -18,6 +18,7 @@ import {
   ConversationReadinessPort,
   ConversationRouter,
 } from "../../src/routing/ConversationRouter.js";
+import { RouteExpectation } from "../../src/readiness/types.js";
 import { OperationScheduler } from "../../src/routing/OperationScheduler.js";
 import { ThreadRegistry } from "../../src/routing/ThreadRegistry.js";
 
@@ -42,6 +43,9 @@ function createRuntime(): RuntimeGenerationTracker {
 
 class RecordingNavigation implements ConversationNavigationPort {
   public readonly urls: string[] = [];
+  public readonly expectedRoutes: RouteExpectation[] = [];
+  public navigateCalls = 0;
+  public settledNavigationCalls = 0;
   public reloadCalls = 0;
   public failure: Error | null = null;
   public reloadFailure: Error | null = null;
@@ -54,6 +58,7 @@ class RecordingNavigation implements ConversationNavigationPort {
   }
 
   public async navigate(url: string): Promise<void> {
+    this.navigateCalls += 1;
     this.urls.push(url);
     this.events.push("navigate");
     if (this.failure) {
@@ -81,9 +86,11 @@ class RecordingNavigation implements ConversationNavigationPort {
 
   public async navigateAndWaitForLoadSettlement(
     url: string,
-    _expectedRoute: unknown,
+    expectedRoute: RouteExpectation,
   ): Promise<void> {
+    this.settledNavigationCalls += 1;
     this.urls.push(url);
+    this.expectedRoutes.push(expectedRoute);
     this.events.push("navigate_settled");
     if (this.failure) {
       throw this.failure;
@@ -174,6 +181,11 @@ test("known existing thread resolves internally and outward result contains only
   const result = await router.routeToThread(handleA);
 
   assert.deepEqual(navigation.urls, ["https://chatgpt.com/c/synthetic-a"]);
+  assert.equal(navigation.settledNavigationCalls, 1);
+  assert.equal(navigation.navigateCalls, 0);
+  assert.deepEqual(navigation.expectedRoutes, [
+    { kind: "THREAD", locator: createConversationLocator("https://chatgpt.com/c/synthetic-a") },
+  ]);
   assert.equal(navigation.reloadCalls, 0);
   assert.deepEqual(result, { kind: "THREAD", threadHandle: handleA });
   assert.equal(JSON.stringify(result).includes("synthetic-a"), false);
@@ -256,7 +268,7 @@ test("stale queued route rejects before navigation", async () => {
   assert.equal(readiness.existingCalls, 0);
 });
 
-test("navigation failure is normalized without locator or upstream error leakage", async () => {
+test("settlement failure is normalized without locator or upstream error leakage and prevents readiness", async () => {
   const { router, navigation, readiness, handleA } = createHarness();
   navigation.failure = new Error("upstream synthetic-a secret detail");
 
@@ -268,11 +280,13 @@ test("navigation failure is normalized without locator or upstream error leakage
       !error.message.includes("synthetic-a") &&
       !error.message.includes("secret detail"),
   );
+  assert.equal(navigation.settledNavigationCalls, 1);
+  assert.equal(navigation.navigateCalls, 0);
   assert.equal(navigation.reloadCalls, 0);
   assert.equal(readiness.existingCalls, 0);
 });
 
-test("existing route success boundary is navigation followed by readiness completion", async () => {
+test("existing route success boundary is settled navigation followed by readiness completion", async () => {
   const { router, navigation, readiness, events, handleA } = createHarness();
   const readinessGate = deferred<void>();
   readiness.block = readinessGate;
@@ -285,13 +299,13 @@ test("existing route success boundary is navigation followed by readiness comple
 
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(navigation.urls, ["https://chatgpt.com/c/synthetic-a"]);
-  assert.deepEqual(events, ["navigate", "readiness"]);
+  assert.deepEqual(events, ["navigate_settled", "readiness"]);
   assert.equal(settled, false);
 
   readinessGate.resolve();
   assert.deepEqual(await route, { kind: "THREAD", threadHandle: handleA });
   assert.equal(settled, true);
-  assert.deepEqual(events, ["navigate", "readiness", "ready"]);
+  assert.deepEqual(events, ["navigate_settled", "readiness", "ready"]);
   assert.equal(navigation.reloadCalls, 0);
 });
 
@@ -330,6 +344,32 @@ test("synthetic TURN queued behind existing route waits for readiness", async ()
   readinessGate.resolve();
   await Promise.all([route, turn]);
   assert.deepEqual(events, ["turn"]);
+});
+
+test("existing route holds the shared scheduler through settlement and readiness before a queued TURN", async () => {
+  const { router, scheduler, navigation, readiness, events, handleA } = createHarness();
+  const settlementGate = deferred<void>();
+  const readinessGate = deferred<void>();
+  navigation.block = settlementGate;
+  readiness.block = readinessGate;
+
+  const route = router.routeToThread(handleA);
+  const turn = scheduler.schedule("TURN", async () => {
+    events.push("turn");
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["navigate_settled"]);
+  assert.equal(readiness.existingCalls, 0);
+
+  settlementGate.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["navigate_settled", "readiness"]);
+  assert.equal(readiness.existingCalls, 1);
+
+  readinessGate.resolve();
+  await Promise.all([route, turn]);
+  assert.deepEqual(events, ["navigate_settled", "readiness", "ready", "turn"]);
 });
 
 test("readiness failure releases scheduler so later work can continue", async () => {

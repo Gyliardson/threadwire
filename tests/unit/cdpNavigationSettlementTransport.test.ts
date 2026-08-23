@@ -3,6 +3,7 @@ import test from "node:test";
 import { ChromeRemoteInterfaceTransport } from "../../src/cdp/ChromeRemoteInterfaceTransport.js";
 import { CdpNavigationSettlementTransportSession } from "../../src/cdp/CdpTransport.js";
 import { CdpTargetInfo } from "../../src/cdp/types.js";
+import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
 import { RouteExpectation } from "../../src/readiness/types.js";
 import { OperationAbortedError } from "../../src/domain/errors.js";
 
@@ -18,6 +19,11 @@ const target: CdpTargetInfo = {
 const freshRoute: RouteExpectation = {
   kind: "FRESH_ROOT",
 };
+const threadUrl = "https://chatgpt.com/c/thread-route";
+const threadRoute: RouteExpectation = {
+  kind: "THREAD",
+  locator: createConversationLocator(threadUrl),
+};
 
 class FakeSettlementCriClient {
   public frame = {
@@ -27,6 +33,7 @@ class FakeSettlementCriClient {
   };
 
   public readonly operations: string[] = [];
+  public readonly navigateUrls: string[] = [];
   public loadEventListeners = new Set<() => void>();
   public frameStoppedListeners = new Set<(event: { frameId: string }) => void>();
   public unsubsCalled = 0;
@@ -65,8 +72,9 @@ class FakeSettlementCriClient {
         this.frameStoppedListeners.delete(listener);
       };
     },
-    navigate: async (_params: { url: string }) => {
+    navigate: async ({ url }: { url: string }) => {
       this.operations.push("Page.navigate");
+      this.navigateUrls.push(url);
       if (this.navigateFails) {
         throw new Error("SECRET_NAVIGATE_FAILURE_INTERNAL");
       }
@@ -219,6 +227,29 @@ test("operation does NOT settle after matching events while route is not yet exp
   assert.equal(settled, false, "Must not settle when route is not confirmed expected");
 
   client.frame.url = "https://chatgpt.com/";
+  await navPromise;
+  assert.equal(settled, true);
+});
+
+test("THREAD settlement navigates to its locator and waits for that route confirmation", async () => {
+  const client = new FakeSettlementCriClient();
+  client.frame.url = "https://chatgpt.com/c/other-route";
+  const session = await createSession(client);
+
+  let settled = false;
+  const navPromise = session.navigateAndWaitForLoadSettlement(threadUrl, threadRoute).then(() => {
+    settled = true;
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(client.navigateUrls, [threadUrl]);
+  client.emitLoadEvent();
+  client.emitFrameStopped(client.frame.id);
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(settled, false, "Must not settle when the expected THREAD route is not confirmed");
+
+  client.frame.url = threadUrl;
   await navPromise;
   assert.equal(settled, true);
 });
