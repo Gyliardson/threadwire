@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ChromeRemoteInterfaceSession } from "../../src/cdp/ChromeRemoteInterfaceSession.js";
 import { ChromeRemoteInterfaceTransport } from "../../src/cdp/ChromeRemoteInterfaceTransport.js";
-import { CdpResponseTurnTransportSession } from "../../src/cdp/CdpTransport.js";
 import { CdpTargetInfo } from "../../src/cdp/types.js";
 import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
 
@@ -79,13 +79,13 @@ class FakeFinalSnapshotCriClient {
   }
 }
 
-async function createSession(client: FakeFinalSnapshotCriClient): Promise<CdpResponseTurnTransportSession> {
+async function createSession(client: FakeFinalSnapshotCriClient): Promise<ChromeRemoteInterfaceSession> {
   const transport = new ChromeRemoteInterfaceTransport({ connect: async () => client });
   const session = (await transport.connect({
     host: "127.0.0.1",
     port: 9223,
     target,
-  })) as CdpResponseTurnTransportSession;
+  })) as ChromeRemoteInterfaceSession;
   await session.initializeReadinessObservation();
   return session;
 }

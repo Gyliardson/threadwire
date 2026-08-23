@@ -92,8 +92,8 @@ export interface CdpTurnTransportSession extends CdpTransportSession {
 }
 
 export interface CdpResponseTurnTransportSession extends CdpTurnTransportSession {
-  captureTurnResponseRenderBaseline(): Promise<CdpResponseRenderBaseline>;
-  getFinalRenderedAssistantSnapshot(
+  captureTurnResponseRenderBaseline?(): Promise<CdpResponseRenderBaseline>;
+  getFinalRenderedAssistantSnapshot?(
     baseline: CdpResponseRenderBaseline,
     expectedRoute: RouteExpectation,
   ): Promise<CdpFinalRenderedAssistantSnapshot | null>;

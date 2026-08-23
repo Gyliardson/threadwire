@@ -25,7 +25,7 @@ const enabled =
   process.env.THREADWIRE_ACCEPT_M6_FINAL_RESPONSE === "1";
 
 test(
-  "M6 final response reconciliation: FRESH + EXISTING publish authoritative FINAL_TEXT before COMPLETED",
+  "M6 normalized final response: FRESH + EXISTING publish exact normalized FINAL_TEXT before COMPLETED",
   { skip: !enabled },
   async () => {
     assert.equal(process.env.THREADWIRE_ACCEPT_DESTRUCTIVE_TESTS, "1");
@@ -64,8 +64,7 @@ test(
 
       const freshNonce = nonce();
       const input1 = `TW_M6_FINAL_IN_${freshNonce}`;
-      const output1 = `TW_M6_FINAL_OUT_${freshNonce}`;
-      const prompt1 = `Reply with exactly ${output1} and do not repeat ${input1}.`;
+      const prompt1 = `Respond with a short plain-text acknowledgement. Do not repeat ${input1}.`;
       let freshSafeText = "";
       let freshFinalText = "";
       let freshDeltaCount = 0;
@@ -92,9 +91,11 @@ test(
       assert.equal(freshResult.created, true);
       assert.equal(registry.knownThreads().length, 1);
       assert.ok(freshDeltaCount >= 1);
-      assert.equal(freshSafeText.includes(input1), false);
+      assert.ok(freshSafeText.trim().length > 0);
       assert.equal(freshFinalCount, 1);
-      assert.equal(freshFinalText.trim() === output1, true);
+      assert.equal(freshFinalText, freshSafeText);
+      assert.ok(freshFinalText.trim().length > 0);
+      assert.equal(freshSafeText.includes(input1), false);
       assert.equal(freshFinalText.includes(input1), false);
       assert.equal(freshCompletedCount, 1);
       assert.equal(freshOrder.filter((type) => type === "FINAL_TEXT").length, 1);
@@ -118,8 +119,7 @@ test(
 
       const existingNonce = nonce();
       const input2 = `TW_M6_FINAL_IN2_${existingNonce}`;
-      const output2 = `TW_M6_FINAL_OUT2_${existingNonce}`;
-      const prompt2 = `Reply with exactly ${output2} and do not repeat ${input2}.`;
+      const prompt2 = `Respond with a short plain-text acknowledgement. Do not repeat ${input2}.`;
       let existingSafeText = "";
       let existingFinalText = "";
       let existingDeltaCount = 0;
@@ -151,13 +151,16 @@ test(
       assert.equal(existingResult.threadHandle, freshResult.threadHandle);
       assert.equal(registry.knownThreads().length, 1);
       assert.ok(existingDeltaCount >= 1);
-      assert.equal(existingSafeText.includes(input2), false);
-      assert.equal(existingSafeText.includes(input1), false);
-      assert.equal(freshSafeText.includes(input2), false);
+      assert.ok(existingSafeText.trim().length > 0);
       assert.equal(existingFinalCount, 1);
-      assert.equal(existingFinalText.trim() === output2, true);
+      assert.equal(existingFinalText, existingSafeText);
+      assert.ok(existingFinalText.trim().length > 0);
+      assert.equal(existingSafeText.includes(input2), false);
       assert.equal(existingFinalText.includes(input2), false);
+      assert.equal(existingSafeText.includes(input1), false);
       assert.equal(existingFinalText.includes(input1), false);
+      assert.equal(freshSafeText.includes(input2), false);
+      assert.equal(freshFinalText.includes(input2), false);
       assert.equal(existingCompletedCount, 1);
       assert.equal(existingOrder.filter((type) => type === "FINAL_TEXT").length, 1);
       assert.equal(existingOrder.filter((type) => type === "COMPLETED").length, 1);

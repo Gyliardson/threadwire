@@ -78,8 +78,6 @@ function isResponseTurnTransportSession(
   const candidate = session as Partial<CdpResponseTurnTransportSession>;
   return (
     isTurnTransportSession(session) &&
-    typeof candidate.captureTurnResponseRenderBaseline === "function" &&
-    typeof candidate.getFinalRenderedAssistantSnapshot === "function" &&
     typeof candidate.takeTurnResponseEvents === "function" &&
     typeof candidate.discardTurnResponse === "function"
   );
@@ -349,10 +347,13 @@ export class CdpSessionManager {
     lease: RuntimeLease,
   ): Promise<CdpResponseRenderBaseline> {
     const session = this.requireResponseTurnSessionForLease(lease);
+    if (typeof session.captureTurnResponseRenderBaseline !== "function") {
+      throw new ResponseStreamUnavailableError();
+    }
     return await this.runTurnSessionOperation(
       session,
       lease,
-      () => session.captureTurnResponseRenderBaseline(),
+      () => session.captureTurnResponseRenderBaseline!(),
     );
   }
 
@@ -362,10 +363,13 @@ export class CdpSessionManager {
     lease: RuntimeLease,
   ): Promise<CdpFinalRenderedAssistantSnapshot | null> {
     const session = this.requireResponseTurnSessionForLease(lease);
+    if (typeof session.getFinalRenderedAssistantSnapshot !== "function") {
+      throw new ResponseStreamUnavailableError();
+    }
     return await this.runTurnSessionOperation(
       session,
       lease,
-      () => session.getFinalRenderedAssistantSnapshot(baseline, expectedRoute),
+      () => session.getFinalRenderedAssistantSnapshot!(baseline, expectedRoute),
     );
   }
 
