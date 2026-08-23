@@ -1,5 +1,4 @@
 import {
-  CdpResponseRenderBaseline,
   CdpResponseStreamFailureKind,
   CdpTurnObservationHandle,
   CdpTurnObservationSnapshot,
@@ -41,6 +40,7 @@ export const DEFAULT_TURN_WRITE_OBSERVATION_TIMEOUT_MS = 15_000;
 export const DEFAULT_TURN_WRITE_SETTLEMENT_TIMEOUT_MS = 120_000;
 export const DEFAULT_TURN_RESPONSE_COMPLETION_TIMEOUT_MS = 120_000;
 export const DEFAULT_TURN_FINAL_RESPONSE_SNAPSHOT_TIMEOUT_MS = 15_000;
+export const DEFAULT_MAX_ACCUMULATED_FINAL_TEXT_CHARS = 1_048_576;
 export const DEFAULT_FRESH_CONVERSATION_TIMEOUT_MS = 15_000;
 export const DEFAULT_TURN_POLL_INTERVAL_MS = 25;
 
@@ -50,6 +50,7 @@ export interface TurnExecutorOptions {
   readonly writeSettlementTimeoutMs?: number;
   readonly responseCompletionTimeoutMs?: number;
   readonly finalResponseSnapshotTimeoutMs?: number;
+  readonly maxAccumulatedTextChars?: number;
   readonly freshConversationTimeoutMs?: number;
   readonly pollIntervalMs?: number;
   readonly clock?: () => number;
@@ -58,12 +59,11 @@ export interface TurnExecutorOptions {
 
 interface ResponseDeliveryState {
   readonly listener: TurnResponseEventListener;
-  readonly renderBaseline: CdpResponseRenderBaseline;
   semanticCompleted: boolean;
   finalized: boolean;
-  finalizationStartedAt: number | null;
   terminalError: ThreadwireError | null;
   discarded: boolean;
+  accumulatedText: string;
 }
 
 function positiveFinite(value: number, name: string): number {
@@ -113,6 +113,7 @@ export class TurnExecutor {
   private readonly writeSettlementTimeoutMs: number;
   private readonly responseCompletionTimeoutMs: number;
   private readonly finalResponseSnapshotTimeoutMs: number;
+  private readonly maxAccumulatedTextChars: number;
   private readonly freshConversationTimeoutMs: number;
   private readonly pollIntervalMs: number;
   private readonly clock: () => number;
@@ -144,6 +145,10 @@ export class TurnExecutor {
     this.finalResponseSnapshotTimeoutMs = positiveFinite(
       options.finalResponseSnapshotTimeoutMs ?? DEFAULT_TURN_FINAL_RESPONSE_SNAPSHOT_TIMEOUT_MS,
       "finalResponseSnapshotTimeoutMs",
+    );
+    this.maxAccumulatedTextChars = positiveFinite(
+      options.maxAccumulatedTextChars ?? DEFAULT_MAX_ACCUMULATED_FINAL_TEXT_CHARS,
+      "maxAccumulatedTextChars",
     );
     this.freshConversationTimeoutMs = positiveFinite(
       options.freshConversationTimeoutMs ?? DEFAULT_FRESH_CONVERSATION_TIMEOUT_MS,
@@ -219,9 +224,7 @@ export class TurnExecutor {
       if (
         responseListener !== undefined &&
         (typeof this.cdp.takeTurnResponseEvents !== "function" ||
-          typeof this.cdp.discardTurnResponse !== "function" ||
-          typeof this.cdp.captureTurnResponseRenderBaseline !== "function" ||
-          typeof this.cdp.getFinalRenderedAssistantSnapshot !== "function")
+          typeof this.cdp.discardTurnResponse !== "function")
       ) {
         throw new ResponseStreamUnavailableError();
       }
@@ -256,36 +259,14 @@ export class TurnExecutor {
       throwIfAborted(signal);
 
       if (responseListener !== undefined) {
-        const captureBaseline = this.cdp.captureTurnResponseRenderBaseline!;
-        let renderBaseline: CdpResponseRenderBaseline;
-        try {
-          renderBaseline = await withTimeout(
-            async () => await captureBaseline.call(this.cdp, lease),
-            this.commandTimeoutMs,
-            signal
-              ? { signal, message: "Timed out capturing the rendered response baseline." }
-              : { message: "Timed out capturing the rendered response baseline." },
-          );
-        } catch (error) {
-          if (
-            error instanceof RuntimeGenerationChangedError ||
-            error instanceof OperationAbortedError ||
-            error instanceof CdpDisconnectedError
-          ) {
-            throw error;
-          }
-          throw new ResponseStreamUnavailableError();
-        }
-
         this.assertNoObservedPreSubmitWrite(observation, lease);
         responseState = {
           listener: responseListener,
-          renderBaseline,
           semanticCompleted: false,
           finalized: false,
-          finalizationStartedAt: null,
           terminalError: null,
           discarded: false,
+          accumulatedText: "",
         };
       }
 
@@ -422,12 +403,7 @@ export class TurnExecutor {
             await this.sleep(this.pollIntervalMs);
             continue;
           }
-          const finalized = await this.finalizeResponseDelivery(
-            responseState,
-            expectedRoute,
-            lease,
-            signal,
-          );
+          const finalized = this.finalizeResponseDelivery(responseState);
           if (responseState.terminalError !== null) {
             throw responseState.terminalError;
           }
@@ -546,12 +522,7 @@ export class TurnExecutor {
             throw responseState.terminalError;
           }
           if (responseState !== null) {
-            const finalized = await this.finalizeResponseDelivery(
-              responseState,
-              { kind: "THREAD", locator: currentFreshLocator },
-              lease,
-              signal,
-            );
+            const finalized = this.finalizeResponseDelivery(responseState);
             if (responseState.terminalError !== null) {
               throw responseState.terminalError;
             }
@@ -668,22 +639,25 @@ export class TurnExecutor {
         state.semanticCompleted = true;
         continue;
       }
-      try {
-        state.listener(event);
-      } catch {
-        state.terminalError ??= new ResponseStreamFailedError();
-        this.discardResponse(state, observation, lease, false);
-        return;
+      if (event.type === "TEXT_DELTA") {
+        if (state.accumulatedText.length + event.text.length > this.maxAccumulatedTextChars) {
+          state.terminalError ??= new ResponseStreamFailedError();
+          this.discardResponse(state, observation, lease, false);
+          return;
+        }
+        try {
+          state.listener(event);
+        } catch {
+          state.terminalError ??= new ResponseStreamFailedError();
+          this.discardResponse(state, observation, lease, false);
+          return;
+        }
+        state.accumulatedText += event.text;
       }
     }
   }
 
-  private async finalizeResponseDelivery(
-    state: ResponseDeliveryState,
-    expectedRoute: RouteExpectation,
-    lease: RuntimeLease,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
+  private finalizeResponseDelivery(state: ResponseDeliveryState): boolean {
     if (state.finalized) {
       return true;
     }
@@ -691,52 +665,19 @@ export class TurnExecutor {
       return false;
     }
 
-    throwIfAborted(signal);
-    const getFinalSnapshot = this.cdp.getFinalRenderedAssistantSnapshot;
-    if (typeof getFinalSnapshot !== "function") {
-      state.terminalError = new ResponseStreamUnavailableError();
-      return false;
-    }
-
-    state.finalizationStartedAt ??= this.clock();
-    if (this.clock() - state.finalizationStartedAt >= this.finalResponseSnapshotTimeoutMs) {
-      state.terminalError = new ResponseStreamFailedError(
-        "The final rendered assistant response did not become safely attributable before the deadline.",
-      );
-      return false;
-    }
-
-    let finalSnapshot: Awaited<ReturnType<NonNullable<TurnCdpPort["getFinalRenderedAssistantSnapshot"]>>>;
-    try {
-      finalSnapshot = await withTimeout(
-        async () => await getFinalSnapshot.call(this.cdp, state.renderBaseline, expectedRoute, lease),
-        this.commandTimeoutMs,
-        { message: "Timed out reconciling the final rendered assistant response." },
-      );
-    } catch (error) {
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
-        throw error;
-      }
-      state.terminalError = new ResponseStreamFailedError();
-      return false;
-    }
-
-    throwIfAborted(signal);
-    if (finalSnapshot === null) {
-      if (this.clock() - state.finalizationStartedAt >= this.finalResponseSnapshotTimeoutMs) {
-        state.terminalError = new ResponseStreamFailedError(
-          "The final rendered assistant response did not become safely attributable before the deadline.",
-        );
-      }
-      return false;
-    }
-    if (typeof finalSnapshot.text !== "string" || finalSnapshot.text.trim().length === 0) {
+    if (state.accumulatedText.trim().length === 0) {
       state.terminalError = new ResponseStreamFailedError();
       return false;
     }
 
     try {
-      state.listener(Object.freeze({ type: "FINAL_TEXT" as const, text: finalSnapshot.text }));
+      state.listener(Object.freeze({ type: "FINAL_TEXT" as const, text: state.accumulatedText }));
+    } catch {
+      state.terminalError = new ResponseStreamFailedError();
+      return false;
+    }
+
+    try {
       state.listener(Object.freeze({ type: "COMPLETED" as const }));
     } catch {
       state.terminalError = new ResponseStreamFailedError();

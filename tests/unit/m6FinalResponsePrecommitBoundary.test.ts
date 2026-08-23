@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CdpResponseRenderBaseline,
   CdpTurnComposerState,
   CdpTurnObservationHandle,
   CdpTurnObservationSnapshot,
@@ -45,21 +44,12 @@ class BaselineRacePort implements TurnCdpPort {
 
   public armTurnObservation(): CdpTurnObservationHandle {
     this.armed = true;
-    return handle;
-  }
-
-  public async captureTurnResponseRenderBaseline(): Promise<CdpResponseRenderBaseline> {
-    assert.equal(this.armed, true, "response observation must be armed before baseline capture");
     this.snapshot = Object.freeze({
       prepareCount: 0,
       write: Object.freeze({ lifecycle: "ACTIVE" as const }),
       response: Object.freeze({ lifecycle: "PENDING" as const, failure: null }),
     });
-    return { userCount: 1, assistantCount: 1 };
-  }
-
-  public async getFinalRenderedAssistantSnapshot() {
-    return { text: "must-not-run" };
+    return handle;
   }
 
   public getTurnObservation(): CdpTurnObservationSnapshot {
@@ -87,7 +77,7 @@ class BaselineRacePort implements TurnCdpPort {
   }
 }
 
-test("write observed during rendered baseline capture fails closed before composer input mutation", async () => {
+test("write observed before input mutation fails closed before composer insertion", async () => {
   const runtime = new RuntimeGenerationTracker();
   runtime.observe({ pid: 800, creationTime: "baseline-race" });
   const scheduler = new OperationScheduler(runtime);
