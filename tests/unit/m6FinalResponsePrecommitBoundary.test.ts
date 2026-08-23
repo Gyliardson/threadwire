@@ -90,7 +90,6 @@ test("write observed before input mutation fails closed before composer insertio
     writeObservationTimeoutMs: 100,
     writeSettlementTimeoutMs: 100,
     responseCompletionTimeoutMs: 100,
-    finalResponseSnapshotTimeoutMs: 100,
     freshConversationTimeoutMs: 100,
     pollIntervalMs: 1,
   });

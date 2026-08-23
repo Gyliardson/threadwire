@@ -144,7 +144,6 @@ async function fixture(
     writeObservationTimeoutMs: 100,
     writeSettlementTimeoutMs: 100,
     responseCompletionTimeoutMs: options.responseCompletionTimeoutMs ?? 100,
-    finalResponseSnapshotTimeoutMs: 100,
     ...(options.maxAccumulatedTextChars !== undefined
       ? { maxAccumulatedTextChars: options.maxAccumulatedTextChars }
       : {}),

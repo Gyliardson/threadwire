@@ -39,7 +39,6 @@ export const DEFAULT_TURN_COMMAND_TIMEOUT_MS = 5_000;
 export const DEFAULT_TURN_WRITE_OBSERVATION_TIMEOUT_MS = 15_000;
 export const DEFAULT_TURN_WRITE_SETTLEMENT_TIMEOUT_MS = 120_000;
 export const DEFAULT_TURN_RESPONSE_COMPLETION_TIMEOUT_MS = 120_000;
-export const DEFAULT_TURN_FINAL_RESPONSE_SNAPSHOT_TIMEOUT_MS = 15_000;
 export const DEFAULT_MAX_ACCUMULATED_FINAL_TEXT_CHARS = 1_048_576;
 export const DEFAULT_FRESH_CONVERSATION_TIMEOUT_MS = 15_000;
 export const DEFAULT_TURN_POLL_INTERVAL_MS = 25;
@@ -49,7 +48,6 @@ export interface TurnExecutorOptions {
   readonly writeObservationTimeoutMs?: number;
   readonly writeSettlementTimeoutMs?: number;
   readonly responseCompletionTimeoutMs?: number;
-  readonly finalResponseSnapshotTimeoutMs?: number;
   readonly maxAccumulatedTextChars?: number;
   readonly freshConversationTimeoutMs?: number;
   readonly pollIntervalMs?: number;
@@ -112,7 +110,6 @@ export class TurnExecutor {
   private readonly writeObservationTimeoutMs: number;
   private readonly writeSettlementTimeoutMs: number;
   private readonly responseCompletionTimeoutMs: number;
-  private readonly finalResponseSnapshotTimeoutMs: number;
   private readonly maxAccumulatedTextChars: number;
   private readonly freshConversationTimeoutMs: number;
   private readonly pollIntervalMs: number;
@@ -141,10 +138,6 @@ export class TurnExecutor {
     this.responseCompletionTimeoutMs = positiveFinite(
       options.responseCompletionTimeoutMs ?? DEFAULT_TURN_RESPONSE_COMPLETION_TIMEOUT_MS,
       "responseCompletionTimeoutMs",
-    );
-    this.finalResponseSnapshotTimeoutMs = positiveFinite(
-      options.finalResponseSnapshotTimeoutMs ?? DEFAULT_TURN_FINAL_RESPONSE_SNAPSHOT_TIMEOUT_MS,
-      "finalResponseSnapshotTimeoutMs",
     );
     this.maxAccumulatedTextChars = positiveFinite(
       options.maxAccumulatedTextChars ?? DEFAULT_MAX_ACCUMULATED_FINAL_TEXT_CHARS,
