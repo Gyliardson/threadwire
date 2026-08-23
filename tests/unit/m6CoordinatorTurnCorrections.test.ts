@@ -196,7 +196,6 @@ async function fixture(port = new FakeStreamingTurnPort(), sleep = new BlockingS
     writeObservationTimeoutMs: 100,
     writeSettlementTimeoutMs: 100,
     responseCompletionTimeoutMs: 100,
-    finalResponseSnapshotTimeoutMs: 100,
     freshConversationTimeoutMs: 100,
     pollIntervalMs: 1,
     sleep: sleep.sleep,
@@ -216,7 +215,6 @@ async function freshFixture(port = new FakeStreamingTurnPort(), sleep = new Bloc
     writeObservationTimeoutMs: 100,
     writeSettlementTimeoutMs: 100,
     responseCompletionTimeoutMs: 100,
-    finalResponseSnapshotTimeoutMs: 100,
     freshConversationTimeoutMs: 100,
     pollIntervalMs: 1,
     sleep: sleep.sleep,
@@ -308,12 +306,10 @@ test("FRESH streaming keeps final locator authority and reconciles only after th
   assert.equal(f.registry.resolve(result.threadHandle), finalLocator);
   assert.notEqual(f.registry.resolve(result.threadHandle), earlyLocator);
   assert.equal(f.registry.knownThreads().length, 1);
-  assert.equal(f.handleAllocations(), 1);
-  assert.equal(f.port.finalSnapshotCalls, 1);
-  assert.deepEqual(f.port.finalSnapshotExpectedRoute, { kind: "THREAD", locator: finalLocator });
+  assert.equal(f.port.finalSnapshotCalls, 0);
   assert.deepEqual(delivered, [
     { type: "TEXT_DELTA", text: "fresh-answer" },
-    { type: "FINAL_TEXT", text: "fresh-authoritative" },
+    { type: "FINAL_TEXT", text: "fresh-answer" },
     { type: "COMPLETED" },
   ]);
 });
