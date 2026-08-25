@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Generalize controller workflow serialization so project creation cannot interleave with turns.
 
+### Fixed
+
+- Normalize proven batched assistant append deltas without recursively extracting unrelated response metadata.
+
 ### Security
 
 - Keep ChatGPT project locators internal and serialize only opaque handles at the HTTP boundary.
