@@ -1,4 +1,5 @@
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
+import { ProjectLocator, ProjectName } from "../domain/ProjectIdentity.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { NormalizedResponseStreamEvent } from "../response/types.js";
 import { CdpTargetInfo } from "./types.js";
@@ -99,6 +100,14 @@ export interface CdpResponseTurnTransportSession extends CdpTurnTransportSession
   ): Promise<CdpFinalRenderedAssistantSnapshot | null>;
   takeTurnResponseEvents(handle: CdpTurnObservationHandle): readonly NormalizedResponseStreamEvent[];
   discardTurnResponse(handle: CdpTurnObservationHandle): void;
+}
+
+export interface CdpProjectUiTransportSession extends CdpTransportSession {
+  createProjectThroughUi(
+    name: ProjectName,
+    signal?: AbortSignal,
+    onMutationAttempted?: () => void,
+  ): Promise<ProjectLocator>;
 }
 
 export interface CdpTransport {

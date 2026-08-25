@@ -1,5 +1,4 @@
 import { OperationAbortedError } from "../domain/errors.js";
-import { TurnResult } from "../turn/types.js";
 
 export const DEFAULT_CONTROLLER_MAX_OUTSTANDING_TURNS = 8;
 
@@ -12,17 +11,17 @@ export class ControllerBusyError extends Error {
   }
 }
 
-interface PendingTurn {
-  readonly operation: () => Promise<TurnResult>;
+interface PendingTurn<T = unknown> {
+  readonly operation: () => Promise<T>;
   readonly signal?: AbortSignal;
-  readonly resolve: (result: TurnResult) => void;
+  readonly resolve: (result: T) => void;
   readonly reject: (error: unknown) => void;
   started: boolean;
   onAbort: (() => void) | null;
 }
 
 export class ControllerTurnQueue {
-  private readonly pending: PendingTurn[] = [];
+  private readonly pending: PendingTurn<unknown>[] = [];
   private active = false;
 
   public constructor(
@@ -33,7 +32,7 @@ export class ControllerTurnQueue {
     }
   }
 
-  public schedule(operation: () => Promise<TurnResult>, signal?: AbortSignal): Promise<TurnResult> {
+  public schedule<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     if (this.pending.length + (this.active ? 1 : 0) >= this.maxOutstandingTurns) {
       throw new ControllerBusyError();
     }
@@ -41,8 +40,8 @@ export class ControllerTurnQueue {
       return Promise.reject(new OperationAbortedError());
     }
 
-    return new Promise<TurnResult>((resolve, reject) => {
-      const entry: PendingTurn = {
+    return new Promise<T>((resolve, reject) => {
+      const entry: PendingTurn<T> = {
         operation,
         ...(signal ? { signal } : {}),
         resolve,
@@ -56,7 +55,7 @@ export class ControllerTurnQueue {
           if (entry.started) {
             return;
           }
-          const index = this.pending.indexOf(entry);
+          const index = this.pending.indexOf(entry as PendingTurn<unknown>);
           if (index >= 0) {
             this.pending.splice(index, 1);
           }
@@ -68,7 +67,7 @@ export class ControllerTurnQueue {
         signal.addEventListener("abort", entry.onAbort, { once: true });
       }
 
-      this.pending.push(entry);
+      this.pending.push(entry as PendingTurn<unknown>);
       this.drain();
     });
   }

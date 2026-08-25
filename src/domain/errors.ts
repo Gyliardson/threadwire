@@ -24,6 +24,9 @@ export type ThreadwireErrorCode =
   | "CONVERSATION_LOCATOR_INVALID"
   | "THREAD_NOT_FOUND"
   | "THREAD_HANDLE_COLLISION"
+  | "PROJECT_LOCATOR_INVALID"
+  | "PROJECT_HANDLE_COLLISION"
+  | "PROJECT_CREATION_FAILED"
   | "ROUTE_NAVIGATION_FAILED"
   | "EXISTING_ROUTE_READINESS_TIMEOUT"
   | "FRESH_ROUTE_READINESS_TIMEOUT"
@@ -217,6 +220,27 @@ export class ThreadHandleCollisionError extends ThreadwireError {
   constructor(message: string = "Unable to allocate a unique Threadwire thread handle.", options?: ErrorOptions) {
     super(message, "THREAD_HANDLE_COLLISION", options);
     this.name = "ThreadHandleCollisionError";
+  }
+}
+
+export class ProjectLocatorInvalidError extends ThreadwireError {
+  constructor(message: string = "Project locator is invalid for the Threadwire route contract.", options?: ErrorOptions) {
+    super(message, "PROJECT_LOCATOR_INVALID", options);
+    this.name = "ProjectLocatorInvalidError";
+  }
+}
+
+export class ProjectHandleCollisionError extends ThreadwireError {
+  constructor(message: string = "Unable to allocate a unique Threadwire project handle.", options?: ErrorOptions) {
+    super(message, "PROJECT_HANDLE_COLLISION", options);
+    this.name = "ProjectHandleCollisionError";
+  }
+}
+
+export class ProjectCreationFailedError extends ThreadwireError {
+  constructor(message: string = "ChatGPT Project creation could not be completed safely.", options?: ErrorOptions) {
+    super(message, "PROJECT_CREATION_FAILED", options);
+    this.name = "ProjectCreationFailedError";
   }
 }
 

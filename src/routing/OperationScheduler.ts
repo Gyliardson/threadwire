@@ -2,7 +2,7 @@ import { RuntimeLease, RuntimeLeaseSource, sameRuntimeLease } from "../domain/Ru
 import { OperationAbortedError, TurnStateUncertainError } from "../domain/errors.js";
 import { throwIfAborted } from "../utils/timeout.js";
 
-export type MutationOperationKind = "ROUTE" | "TURN";
+export type MutationOperationKind = "ROUTE" | "TURN" | "PROJECT";
 export type MutationOperation<T> = (
   signal: AbortSignal | undefined,
   lease: RuntimeLease,

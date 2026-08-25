@@ -1,9 +1,15 @@
 import { ConversationLocator, createConversationLocator } from "../domain/ThreadIdentity.js";
+import {
+  ProjectLocator,
+  ProjectName,
+  createProjectLocator,
+} from "../domain/ProjectIdentity.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { NormalizedResponseStreamEvent } from "../response/types.js";
 import {
   CdpFinalRenderedAssistantSnapshot,
   CdpNavigationSettlementTransportSession,
+  CdpProjectUiTransportSession,
   CdpResponseRenderBaseline,
   CdpResponseTurnTransportSession,
   CdpTurnComposerState,
@@ -36,7 +42,7 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 }
 
 export class ChromeRemoteInterfaceSession
-  implements CdpResponseTurnTransportSession, CdpNavigationSettlementTransportSession
+  implements CdpResponseTurnTransportSession, CdpNavigationSettlementTransportSession, CdpProjectUiTransportSession
 {
   private readonly activeRelevantRequestIds = new Set<string>();
   private readonly disconnectListeners = new Set<() => void>();
@@ -532,6 +538,145 @@ export class ChromeRemoteInterfaceSession
     } catch {
       return null;
     }
+  }
+
+  public async createProjectThroughUi(
+    name: ProjectName,
+    signal?: AbortSignal,
+    onMutationAttempted?: () => void,
+  ): Promise<ProjectLocator> {
+    if (this.closed || !this.readinessInitialized) {
+      throw new Error("CDP project UI operation is unavailable.");
+    }
+    throwIfAborted(signal);
+    const initialFrameTree = await this.client.Page.getFrameTree();
+    let initialLocator: ProjectLocator | null = null;
+    try {
+      initialLocator = createProjectLocator(initialFrameTree.frameTree.frame.url);
+    } catch {
+      // Project creation may begin from any supported ChatGPT route.
+    }
+    const opened = await this.evaluateProjectBoolean(`(() => {
+      const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+      const controls = Array.from(document.querySelectorAll('button, [role="button"]'));
+      const matches = controls.filter((control) => {
+        const label = (control.getAttribute('aria-label') ?? '').toLocaleLowerCase();
+        return ['new project', 'create project', 'novo projeto', 'criar projeto'].includes(label) &&
+          visible(control) && control.closest('nav, [role="navigation"]') !== null;
+      });
+      if (matches.length !== 1) return false;
+      matches[0].click();
+      return true;
+    })()`);
+    if (!opened) {
+      throw new Error("Project creation control was unavailable.");
+    }
+
+    let inputFocused = false;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      throwIfAborted(signal);
+      inputFocused = await this.evaluateProjectBoolean(`(() => {
+        const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+        const controls = Array.from(document.querySelectorAll('button, [role="button"]')).filter((control) => {
+          const signal = [control.getAttribute('aria-label'), control.getAttribute('title'), control.getAttribute('data-testid')]
+            .filter(Boolean).join(' ').toLocaleLowerCase();
+          return (signal.includes('project') || signal.includes('projeto')) &&
+            control.closest('nav, [role="navigation"]') === null && visible(control);
+        });
+        let surface = controls[0]?.parentElement ?? null;
+        while (surface !== null && !controls.every((control) => surface.contains(control))) surface = surface.parentElement;
+        if (surface === null) return false;
+        const inputs = Array.from(surface.querySelectorAll('input[type="text"]')).filter(visible);
+        if (inputs.length !== 1) return false;
+        inputs[0].focus();
+        return true;
+      })()`);
+      if (inputFocused) break;
+      await delay(100, signal);
+    }
+    if (!inputFocused) {
+      throw new Error("Project name input was unavailable.");
+    }
+
+    throwIfAborted(signal);
+    try {
+      await this.client.Input.insertText({ text: name });
+    } catch {
+      throw new Error("Project name input failed without retained protocol metadata.");
+    }
+
+    let confirmed = false;
+    onMutationAttempted?.();
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      throwIfAborted(signal);
+      confirmed = await this.evaluateProjectBoolean(`(() => {
+        const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+        const inputs = Array.from(document.querySelectorAll('input[type="text"]')).filter(visible);
+        const matchingInputs = inputs.filter((input) => input.value === ${JSON.stringify(name)});
+        if (matchingInputs.length !== 1) return false;
+        let surface = matchingInputs[0].parentElement;
+        while (surface !== null) {
+          const buttons = Array.from(surface.querySelectorAll('button, [role="button"]')).filter(visible);
+          const matches = buttons.filter((button) => {
+            const text = (button.textContent ?? '').trim().toLocaleLowerCase();
+            return (text.includes('create') || text.includes('criar')) &&
+              (text.includes('project') || text.includes('projeto'));
+          });
+          if (matches.length === 1) {
+            const button = matches[0];
+            if ((button instanceof HTMLButtonElement && button.disabled) || button.getAttribute('aria-disabled') === 'true') return false;
+            button.click();
+            return true;
+          }
+          surface = surface.parentElement;
+        }
+        return false;
+      })()`);
+      if (confirmed) break;
+      await delay(100, signal);
+    }
+    if (!confirmed) {
+      throw new Error("Project creation confirmation was unavailable.");
+    }
+
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      throwIfAborted(signal);
+      const frameTree = await this.client.Page.getFrameTree();
+      let locator: ProjectLocator;
+      try {
+        locator = createProjectLocator(frameTree.frameTree.frame.url);
+      } catch {
+        await delay(100, signal);
+        continue;
+      }
+      if (locator === initialLocator) {
+        await delay(100, signal);
+        continue;
+      }
+      const nameVisible = await this.evaluateProjectBoolean(`(() =>
+        Array.from(document.querySelectorAll('h1, h2')).some((heading) =>
+          (heading.textContent ?? '').replace(/\\s+/g, ' ').trim() === ${JSON.stringify(name)}
+        )
+      )()`);
+      if (nameVisible) {
+        return locator;
+      }
+      await delay(100, signal);
+    }
+    throw new Error("Project creation postcondition was not observed.");
+  }
+
+  private async evaluateProjectBoolean(expression: string): Promise<boolean> {
+    let result: Awaited<ReturnType<CriClient["Runtime"]["evaluate"]>>;
+    try {
+      result = await this.client.Runtime.evaluate({ expression, returnByValue: true });
+    } catch {
+      throw new Error("CDP project UI observation failed without retained protocol metadata.");
+    }
+    if (result.exceptionDetails !== undefined || typeof result.result.value !== "boolean") {
+      throw new Error("CDP project UI observation was malformed.");
+    }
+    return result.result.value;
   }
 
   private async dispatchEnter(type: "keyDown" | "keyUp"): Promise<void> {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CdpConnectionState } from "../../src/domain/RuntimeState.js";
 import { ThreadHandle } from "../../src/domain/ThreadIdentity.js";
+import { ProjectHandle } from "../../src/domain/ProjectIdentity.js";
 import { OperationAbortedError, ThreadNotFoundError } from "../../src/domain/errors.js";
 import {
   ControllerTurnRequest,
@@ -12,6 +13,7 @@ import { ControllerBusyError } from "../../src/controller/ControllerTurnQueue.js
 import { TurnResult } from "../../src/turn/types.js";
 
 const HANDLE = "tw_test_handle" as ThreadHandle;
+const PROJECT_HANDLE = "prj_test_handle" as ProjectHandle;
 const FRESH_REQUEST: ControllerTurnRequest = {
   target: { kind: "FRESH" },
   prompt: "hello",
@@ -82,6 +84,12 @@ function dependencies(overrides: Partial<ThreadwireControllerDependencies> = {})
         return result(target.kind === "FRESH");
       },
     },
+    projectCreator: {
+      async create(name) {
+        calls.push(`createProject:${name}`);
+        return { projectHandle: PROJECT_HANDLE };
+      },
+    },
   };
 
   return {
@@ -150,6 +158,58 @@ test("existing workflow validates the handle then routes the same opaque handle"
     `routeThread:${HANDLE}`,
     "execute:THREAD:follow-up",
   ]);
+});
+
+test("project workflow establishes runtime and returns an opaque handle", async () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies);
+  const created = await controller.createProject({ name: "Threadwire Acceptance" });
+  assert.deepEqual(created, { projectHandle: PROJECT_HANDLE });
+  assert.deepEqual(fixture.calls, [
+    "ensureStarted",
+    "connect",
+    "assertCurrentRuntime",
+    "createProject:Threadwire Acceptance",
+  ]);
+});
+
+test("controller queue prevents project creation from interleaving with a turn workflow", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const fixture = dependencies({
+    executor: {
+      async executeStreaming() {
+        await gate;
+        return result(true);
+      },
+    },
+  });
+  const controller = new ThreadwireController(fixture.dependencies, { maxOutstandingTurns: 2 });
+  const turn = controller.executeTurn(FRESH_REQUEST, () => undefined);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const project = controller.createProject({ name: "Serialized Project" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fixture.calls.includes("createProject:Serialized Project"), false);
+  release();
+  await Promise.all([turn, project]);
+  assert.equal(fixture.calls.includes("createProject:Serialized Project"), true);
+});
+
+test("controller queue continues after a started project workflow rejects", async () => {
+  const fixture = dependencies({
+    projectCreator: {
+      async create() {
+        throw new Error("synthetic project failure");
+      },
+    },
+  });
+  const controller = new ThreadwireController(fixture.dependencies, { maxOutstandingTurns: 2 });
+  const project = controller.createProject({ name: "Rejected Project" });
+  const turn = controller.executeTurn(FRESH_REQUEST, () => undefined);
+
+  await assert.rejects(project, /synthetic project failure/);
+  assert.equal((await turn).created, true);
+  assert.equal(fixture.calls.includes("execute:FRESH:hello"), true);
 });
 
 test("the controller queue serializes the complete route-to-turn workflow", async () => {

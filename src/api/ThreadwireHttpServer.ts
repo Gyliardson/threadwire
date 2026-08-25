@@ -8,10 +8,13 @@ import { AddressInfo } from "node:net";
 import { ControllerBusyError } from "../controller/ControllerTurnQueue.js";
 import {
   ControllerHealth,
+  ControllerCreateProjectRequest,
+  ControllerCreateProjectResult,
   ControllerTurnRequest,
   ThreadwireController,
 } from "../controller/ThreadwireController.js";
 import { ThreadHandle } from "../domain/ThreadIdentity.js";
+import { createProjectName } from "../domain/ProjectIdentity.js";
 import { ThreadwireError } from "../domain/errors.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import { TurnResult } from "../turn/types.js";
@@ -31,6 +34,10 @@ export interface ThreadwireApiController {
     listener: (event: ResponseStreamEvent) => void,
     signal?: AbortSignal,
   ): Promise<TurnResult>;
+  createProject(
+    request: ControllerCreateProjectRequest,
+    signal?: AbortSignal,
+  ): Promise<ControllerCreateProjectResult>;
   close(): Promise<void>;
 }
 
@@ -122,6 +129,18 @@ function parseTurnRequest(value: unknown, maxPromptBytes: number): ControllerTur
     });
   }
   throw new ApiRequestError("API_REQUEST_INVALID", 400);
+}
+
+function parseProjectRequest(value: unknown): ControllerCreateProjectRequest {
+  const body = asRecord(value);
+  if (body === null || !hasExactKeys(body, ["name"]) || typeof body.name !== "string") {
+    throw new ApiRequestError("API_REQUEST_INVALID", 400);
+  }
+  try {
+    return Object.freeze({ name: createProjectName(body.name) });
+  } catch {
+    throw new ApiRequestError("API_REQUEST_INVALID", 400);
+  }
 }
 
 function preStreamStatus(error: unknown): number {
@@ -264,6 +283,21 @@ export class ThreadwireHttpServer {
       return;
     }
 
+    if (url.pathname === "/v1/projects" && request.method !== "POST") {
+      response.setHeader("Allow", "POST");
+      this.writeJson(
+        response,
+        405,
+        serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 405)),
+      );
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/projects") {
+      await this.handleProject(request, response);
+      return;
+    }
+
     this.writeJson(
       response,
       404,
@@ -291,6 +325,68 @@ export class ThreadwireHttpServer {
     try {
       await this.handleAdmittedTurn(request, response);
     } finally {
+      this.inflightTurns -= 1;
+    }
+  }
+
+  private async handleProject(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (this.inflightTurns >= this.maxInflightTurns) {
+      this.writeJson(response, 429, serializePublicError(new ControllerBusyError()));
+      return;
+    }
+
+    this.inflightTurns += 1;
+    const abortController = new AbortController();
+    const onRequestAborted = (): void => abortController.abort();
+    const onResponseClose = (): void => {
+      if (!response.writableEnded) abortController.abort();
+    };
+    request.once("aborted", onRequestAborted);
+    response.once("close", onResponseClose);
+    try {
+      const contentType = request.headers["content-type"];
+      const contentEncoding = request.headers["content-encoding"];
+      if (
+        typeof contentType !== "string" ||
+        contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" ||
+        (contentEncoding !== undefined && contentEncoding !== "identity")
+      ) {
+        this.writeJson(
+          response,
+          415,
+          serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 415)),
+        );
+        return;
+      }
+
+      let body: ControllerCreateProjectRequest;
+      try {
+        body = parseProjectRequest(JSON.parse(await this.readBody(request)) as unknown);
+      } catch (error) {
+        if (abortController.signal.aborted || response.destroyed) {
+          return;
+        }
+        const apiError = error instanceof ApiRequestError
+          ? error
+          : new ApiRequestError("API_REQUEST_INVALID", 400);
+        this.writeJson(response, apiError.statusCode, serializePublicError(apiError));
+        return;
+      }
+
+      if (abortController.signal.aborted || request.aborted || response.destroyed) {
+        return;
+      }
+      try {
+        const result = await this.controller.createProject(body, abortController.signal);
+        this.writeJson(response, 201, { projectHandle: result.projectHandle });
+      } catch (error) {
+        if (!response.destroyed) {
+          this.writeJson(response, preStreamStatus(error), serializePublicError(error));
+        }
+      }
+    } finally {
+      request.removeListener("aborted", onRequestAborted);
+      response.removeListener("close", onResponseClose);
       this.inflightTurns -= 1;
     }
   }
