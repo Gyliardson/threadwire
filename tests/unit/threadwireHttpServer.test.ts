@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 import { ThreadHandle } from "../../src/domain/ThreadIdentity.js";
-import { ThreadNotFoundError, TurnWriteFailedError } from "../../src/domain/errors.js";
+import { ProjectHandle } from "../../src/domain/ProjectIdentity.js";
+import { ProjectCreationFailedError, ThreadNotFoundError, TurnWriteFailedError } from "../../src/domain/errors.js";
 import { ControllerBusyError } from "../../src/controller/ControllerTurnQueue.js";
 import { ControllerTurnRequest } from "../../src/controller/ThreadwireController.js";
 import {
@@ -13,6 +14,7 @@ import { ResponseStreamEvent } from "../../src/response/types.js";
 import { TurnResult } from "../../src/turn/types.js";
 
 const HANDLE = "tw_http_test" as ThreadHandle;
+const PROJECT_HANDLE = "prj_http_test" as ProjectHandle;
 
 type HttpResult = Readonly<{
   statusCode: number;
@@ -34,6 +36,8 @@ class FakeController implements ThreadwireApiController {
     listener: (event: ResponseStreamEvent) => void,
     signal?: AbortSignal,
   ) => Promise<TurnResult> = async () => turnResult(true);
+  public createProjectImpl: (request: { readonly name: string }, signal?: AbortSignal) => Promise<{ projectHandle: ProjectHandle }> =
+    async () => ({ projectHandle: PROJECT_HANDLE });
 
   public async health() {
     return { classic: "RUNNING" as const, cdp: "CONNECTED" as const };
@@ -49,6 +53,13 @@ class FakeController implements ThreadwireApiController {
     signal?: AbortSignal,
   ): Promise<TurnResult> {
     return this.executeImpl(request, listener, signal);
+  }
+
+  public createProject(
+    request: { readonly name: string },
+    signal?: AbortSignal,
+  ): Promise<{ projectHandle: ProjectHandle }> {
+    return this.createProjectImpl(request, signal);
   }
 
   public async close(): Promise<void> {
@@ -187,6 +198,59 @@ test("request body storage is bounded independently from prompt validation", asy
 
   assert.equal(oversized.statusCode, 413);
   assert.equal(JSON.parse(oversized.body).error.code, "API_REQUEST_TOO_LARGE");
+});
+
+test("project creation requires strict JSON and returns only an opaque handle", async (t) => {
+  const controller = new FakeController();
+  let observed: { readonly name: string } | null = null;
+  controller.createProjectImpl = async (requestBody) => {
+    observed = requestBody;
+    return {
+      projectHandle: PROJECT_HANDLE,
+      locator: "https://chatgpt.com/g/g-p-private/project",
+    } as { projectHandle: ProjectHandle };
+  };
+  const fixture = await startServer(t, controller);
+
+  const invalid = await request(fixture.port, {
+    method: "POST",
+    path: "/v1/projects",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ name: "Project", extra: true }),
+  });
+  assert.equal(invalid.statusCode, 400);
+
+  const response = await request(fixture.port, {
+    method: "POST",
+    path: "/v1/projects",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ name: "Threadwire Acceptance" }),
+  });
+  assert.equal(response.statusCode, 201);
+  assert.deepEqual(observed, { name: "Threadwire Acceptance" });
+  assert.deepEqual(JSON.parse(response.body), { projectHandle: PROJECT_HANDLE });
+  assert.equal(response.body.includes("chatgpt.com"), false);
+  assert.equal(response.body.includes("g-p-"), false);
+});
+
+test("project failures expose only stable sanitized errors", async (t) => {
+  const controller = new FakeController();
+  controller.createProjectImpl = async () => {
+    throw new ProjectCreationFailedError("PROJECT_LOCATOR_CANARY", {
+      cause: { secret: "PROJECT_CAUSE_CANARY" },
+    });
+  };
+  const fixture = await startServer(t, controller);
+  const response = await request(fixture.port, {
+    method: "POST",
+    path: "/v1/projects",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ name: "Threadwire Acceptance" }),
+  });
+  assert.equal(response.statusCode, 503);
+  assert.equal(JSON.parse(response.body).error.code, "PROJECT_CREATION_FAILED");
+  assert.equal(response.body.includes("PROJECT_LOCATOR_CANARY"), false);
+  assert.equal(response.body.includes("PROJECT_CAUSE_CANARY"), false);
 });
 
 test("accepted turn streams safe events and keeps COMPLETED terminal", async (t) => {

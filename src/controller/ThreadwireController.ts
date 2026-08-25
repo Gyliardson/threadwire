@@ -2,6 +2,9 @@ import { CdpSessionManager } from "../cdp/CdpSessionManager.js";
 import { ControllerConfig } from "../config/ControllerConfig.js";
 import { CdpConnectionState } from "../domain/RuntimeState.js";
 import { ThreadHandle } from "../domain/ThreadIdentity.js";
+import { ProjectHandle } from "../domain/ProjectIdentity.js";
+import { ProjectCreator } from "../project/ProjectCreator.js";
+import { ProjectRegistry } from "../project/ProjectRegistry.js";
 import { ReadinessController } from "../readiness/ReadinessController.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import { ConversationRouter } from "../routing/ConversationRouter.js";
@@ -23,6 +26,12 @@ export interface ControllerTurnRequest {
   readonly target: ControllerTurnTarget;
   readonly prompt: string;
 }
+
+export interface ControllerCreateProjectRequest {
+  readonly name: string;
+}
+
+export type ControllerCreateProjectResult = Readonly<{ projectHandle: ProjectHandle }>;
 
 export interface ControllerHealth {
   readonly classic: "RUNNING" | "STOPPED";
@@ -60,12 +69,17 @@ export interface TurnExecutorControllerPort {
   ): Promise<TurnResult>;
 }
 
+export interface ProjectCreatorControllerPort {
+  create(name: string, signal?: AbortSignal): Promise<ControllerCreateProjectResult>;
+}
+
 export interface ThreadwireControllerDependencies {
   readonly runtime: RuntimeControllerPort;
   readonly cdp: CdpControllerPort;
   readonly registry: ThreadRegistryControllerPort;
   readonly router: ConversationRouterControllerPort;
   readonly executor: TurnExecutorControllerPort;
+  readonly projectCreator: ProjectCreatorControllerPort;
 }
 
 export interface ThreadwireControllerOptions {
@@ -131,6 +145,21 @@ export class ThreadwireController {
     );
   }
 
+  public createProject(
+    request: ControllerCreateProjectRequest,
+    signal?: AbortSignal,
+  ): Promise<ControllerCreateProjectResult> {
+    return this.turnQueue.schedule(
+      async () => {
+        await this.dependencies.runtime.ensureStarted(signal);
+        await this.dependencies.cdp.connect(signal);
+        this.dependencies.cdp.assertCurrentRuntime();
+        return await this.dependencies.projectCreator.create(request.name, signal);
+      },
+      signal,
+    );
+  }
+
   public async close(): Promise<void> {
     await this.dependencies.cdp.disconnect();
   }
@@ -147,9 +176,10 @@ export function createThreadwireController(
   const readiness = new ReadinessController(cdp);
   const router = new ConversationRouter(registry, scheduler, cdp, readiness);
   const executor = new TurnExecutor(registry, scheduler, readiness, cdp);
+  const projectCreator = new ProjectCreator(new ProjectRegistry(), scheduler, cdp);
 
   return new ThreadwireController(
-    { runtime: supervisor, cdp, registry, router, executor },
+    { runtime: supervisor, cdp, registry, router, executor, projectCreator },
     options,
   );
 }

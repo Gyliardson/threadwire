@@ -7,6 +7,7 @@ import {
   sameRuntimeLease,
 } from "../domain/RuntimeGeneration.js";
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
+import { ProjectLocator, ProjectName } from "../domain/ProjectIdentity.js";
 import { CdpConnectionState } from "../domain/RuntimeState.js";
 import {
   CdpAttachFailedError,
@@ -26,6 +27,7 @@ import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscove
 import {
   CdpFinalRenderedAssistantSnapshot,
   CdpNavigationSettlementTransportSession,
+  CdpProjectUiTransportSession,
   CdpResponseRenderBaseline,
   CdpResponseTurnTransportSession,
   CdpTransport,
@@ -81,6 +83,13 @@ function isResponseTurnTransportSession(
     typeof candidate.takeTurnResponseEvents === "function" &&
     typeof candidate.discardTurnResponse === "function"
   );
+}
+
+function isProjectUiTransportSession(
+  session: CdpTransportSession,
+): session is CdpProjectUiTransportSession {
+  const candidate = session as Partial<CdpProjectUiTransportSession>;
+  return typeof candidate.createProjectThroughUi === "function";
 }
 
 function sanitizedNavigationCause(error: unknown): Error {
@@ -440,6 +449,24 @@ export class CdpSessionManager {
       session,
       lease,
       () => session.getCurrentConversationLocator(),
+    );
+  }
+
+  public async createProjectThroughUi(
+    name: ProjectName,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+    onMutationAttempted?: () => void,
+  ): Promise<ProjectLocator> {
+    const session = this.requireSessionForLease(lease);
+    if (!isProjectUiTransportSession(session)) {
+      throw new CdpDisconnectedError("The connected CDP session does not support project creation.");
+    }
+    return await this.runReadinessSessionOperation(
+      session,
+      lease,
+      () => session.createProjectThroughUi(name, signal, onMutationAttempted),
+      signal,
     );
   }
 
