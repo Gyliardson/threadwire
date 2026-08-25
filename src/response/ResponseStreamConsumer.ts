@@ -6,6 +6,8 @@ const DEFAULT_MAX_QUEUED_EVENTS = 1024;
 const DEFAULT_MAX_QUEUED_TEXT_CHARS = 1_048_576;
 const DEFAULT_MAX_PENDING_TEXT_CHARS = 1_048_576;
 const DEFAULT_MAX_PENDING_DATA_LINES = 4096;
+const ASSISTANT_TEXT_PATCH_PATH = "/message/content/parts/0";
+const ASSISTANT_TEXT_PATCH_OPERATION = "append";
 
 export type ResponseStreamConsumerFailureKind = "PARSE_FAILED" | "BUFFER_OVERFLOW";
 
@@ -264,11 +266,23 @@ export class ResponseStreamConsumer {
     if (!isObject(parsed) || Object.prototype.hasOwnProperty.call(parsed, "role")) {
       return;
     }
-    if (typeof parsed.v !== "string") {
+    if (typeof parsed.v === "string") {
+      this.emit(Object.freeze({ type: "TEXT_DELTA" as const, text: parsed.v }));
       return;
     }
-
-    this.emit(Object.freeze({ type: "TEXT_DELTA" as const, text: parsed.v }));
+    if (!Array.isArray(parsed.v)) {
+      return;
+    }
+    for (const patch of parsed.v) {
+      if (
+        isObject(patch) &&
+        patch.p === ASSISTANT_TEXT_PATCH_PATH &&
+        patch.o === ASSISTANT_TEXT_PATCH_OPERATION &&
+        typeof patch.v === "string"
+      ) {
+        this.emit(Object.freeze({ type: "TEXT_DELTA" as const, text: patch.v }));
+      }
+    }
   }
 
   private emit(event: NormalizedResponseStreamEvent): void {
