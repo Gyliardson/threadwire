@@ -186,7 +186,7 @@ test("known existing thread resolves internally and outward result contains only
   assert.deepEqual(navigation.expectedRoutes, [
     { kind: "THREAD", locator: createConversationLocator("https://chatgpt.com/c/synthetic-a") },
   ]);
-  assert.equal(navigation.reloadCalls, 0);
+  assert.equal(navigation.reloadCalls, 1);
   assert.deepEqual(result, { kind: "THREAD", threadHandle: handleA });
   assert.equal(JSON.stringify(result).includes("synthetic-a"), false);
 });
@@ -236,7 +236,7 @@ test("concurrent route requests are serialized through the shared scheduler", as
     "https://chatgpt.com/c/synthetic-a",
     "https://chatgpt.com/c/synthetic-b",
   ]);
-  assert.equal(navigation.reloadCalls, 0);
+  assert.equal(navigation.reloadCalls, 2);
 });
 
 test("route waits behind an active synthetic TURN and then navigates when generation remains current", async () => {
@@ -250,7 +250,7 @@ test("route waits behind an active synthetic TURN and then navigates when genera
   turnGate.resolve();
   await Promise.all([turn, route]);
   assert.deepEqual(navigation.urls, ["https://chatgpt.com/c/synthetic-a"]);
-  assert.equal(navigation.reloadCalls, 0);
+  assert.equal(navigation.reloadCalls, 1);
 });
 
 test("stale queued route rejects before navigation", async () => {
@@ -286,7 +286,7 @@ test("settlement failure is normalized without locator or upstream error leakage
   assert.equal(readiness.existingCalls, 0);
 });
 
-test("existing route success boundary is settled navigation followed by readiness completion", async () => {
+test("existing route success boundary is settled navigation, reload, then readiness completion", async () => {
   const { router, navigation, readiness, events, handleA } = createHarness();
   const readinessGate = deferred<void>();
   readiness.block = readinessGate;
@@ -299,14 +299,14 @@ test("existing route success boundary is settled navigation followed by readines
 
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(navigation.urls, ["https://chatgpt.com/c/synthetic-a"]);
-  assert.deepEqual(events, ["navigate_settled", "readiness"]);
+  assert.deepEqual(events, ["navigate_settled", "reload", "readiness"]);
   assert.equal(settled, false);
 
   readinessGate.resolve();
   assert.deepEqual(await route, { kind: "THREAD", threadHandle: handleA });
   assert.equal(settled, true);
-  assert.deepEqual(events, ["navigate_settled", "readiness", "ready"]);
-  assert.equal(navigation.reloadCalls, 0);
+  assert.deepEqual(events, ["navigate_settled", "reload", "readiness", "ready"]);
+  assert.equal(navigation.reloadCalls, 1);
 });
 
 test("concurrent second route waits until first route readiness releases the ROUTE slot", async () => {
@@ -325,7 +325,7 @@ test("concurrent second route waits until first route readiness releases the ROU
     "https://chatgpt.com/c/synthetic-a",
     "https://chatgpt.com/c/synthetic-b",
   ]);
-  assert.equal(navigation.reloadCalls, 0);
+  assert.equal(navigation.reloadCalls, 2);
 });
 
 test("synthetic TURN queued behind existing route waits for readiness", async () => {
@@ -346,7 +346,7 @@ test("synthetic TURN queued behind existing route waits for readiness", async ()
   assert.deepEqual(events, ["turn"]);
 });
 
-test("existing route holds the shared scheduler through settlement and readiness before a queued TURN", async () => {
+test("existing route holds the shared scheduler through settlement, reload, and readiness before a queued TURN", async () => {
   const { router, scheduler, navigation, readiness, events, handleA } = createHarness();
   const settlementGate = deferred<void>();
   const readinessGate = deferred<void>();
@@ -364,12 +364,28 @@ test("existing route holds the shared scheduler through settlement and readiness
 
   settlementGate.resolve();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(events, ["navigate_settled", "readiness"]);
+  assert.deepEqual(events, ["navigate_settled", "reload", "readiness"]);
   assert.equal(readiness.existingCalls, 1);
 
   readinessGate.resolve();
   await Promise.all([route, turn]);
-  assert.deepEqual(events, ["navigate_settled", "readiness", "ready", "turn"]);
+  assert.deepEqual(events, ["navigate_settled", "reload", "readiness", "ready", "turn"]);
+});
+
+test("existing route reload failure is normalized and prevents readiness", async () => {
+  const { router, navigation, readiness, handleA } = createHarness();
+  navigation.reloadFailure = new Error("reload upstream secret detail");
+
+  await assert.rejects(
+    router.routeToThread(handleA),
+    (error: unknown) =>
+      error instanceof RouteNavigationFailedError &&
+      error.code === "ROUTE_NAVIGATION_FAILED" &&
+      !error.message.includes("secret detail"),
+  );
+  assert.equal(navigation.settledNavigationCalls, 1);
+  assert.equal(navigation.reloadCalls, 1);
+  assert.equal(readiness.existingCalls, 0);
 });
 
 test("readiness failure releases scheduler so later work can continue", async () => {
