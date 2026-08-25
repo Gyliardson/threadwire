@@ -77,6 +77,7 @@ export class ConversationRouter {
           { kind: "THREAD", locator },
           operationSignal,
         );
+        await this.reload(operationSignal);
         await this.readiness.waitForExistingRoute(locator, lease, operationSignal);
         return Object.freeze({ kind: "THREAD" as const, threadHandle: handle });
       },
