@@ -376,7 +376,10 @@ test("Project input preserves multiline text through CDP insertText before exact
   const postInputCall = client.callFunctionCalls[2]!;
   const clickCall = client.callFunctionCalls[3]!;
   assert.equal(String(preflightCall.functionDeclaration).includes(projectPrompt), false);
-  assert.equal(JSON.stringify(preflightCall.arguments).includes(projectPrompt), true);
+  assert.equal(
+    (preflightCall.arguments as Array<{ value?: unknown }>)[1]?.value,
+    projectPrompt,
+  );
   assert.equal(
     String(preflightCall.functionDeclaration).includes('button[data-testid="send-button"]'),
     false,
