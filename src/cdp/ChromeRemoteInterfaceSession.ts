@@ -753,28 +753,7 @@ export class ChromeRemoteInterfaceSession
             ? this.value
             : this.textContent;
           if (content !== null && content.length !== 0) return null;
-          this.focus();
-          if (this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement) {
-            const prototype = this instanceof HTMLTextAreaElement
-              ? HTMLTextAreaElement.prototype
-              : HTMLInputElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-            if (setter === undefined) return null;
-            setter.call(this, text);
-          } else if (this.isContentEditable) {
-            this.textContent = text;
-          } else {
-            return null;
-          }
-          this.dispatchEvent(new InputEvent('input', {
-            bubbles: true,
-            data: text,
-            inputType: 'insertText',
-          }));
-          const inserted = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
-            ? this.value
-            : this.textContent;
-          return inserted === text ? form : null;
+          return form;
         }`,
         arguments: [{ value: projectLocator }, { value: text }],
         returnByValue: false,
@@ -791,7 +770,65 @@ export class ChromeRemoteInterfaceSession
         throwIfAborted(signal);
         const candidate = described.node.backendNodeId;
         if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate > 0) {
-          formBackendDOMNodeId = candidate;
+          const revalidated = await runtime.callFunctionOn({
+            objectId: composerObjectId,
+            functionDeclaration: `function(expectedHref, expectedForm) {
+              const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+              const expected = new URL(expectedHref);
+              const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+              if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+                  location.search !== '' || location.hash !== '' || this !== document.activeElement ||
+                  !(this instanceof HTMLElement) || !visible(this) ||
+                  !(expectedForm instanceof HTMLFormElement) || this.closest('form') !== expectedForm ||
+                  !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox')) {
+                return false;
+              }
+              const content = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
+                ? this.value
+                : this.textContent;
+              return content === null || content.length === 0;
+            }`,
+            arguments: [{ value: projectLocator }, { objectId: formObjectId }],
+            returnByValue: true,
+          });
+          throwIfAborted(signal);
+          if (revalidated.exceptionDetails === undefined && revalidated.result.value === true) {
+            try {
+              await this.client.Input.insertText({ text });
+            } catch {
+              throw new Error("CDP Project composer input failed without retained protocol metadata.");
+            }
+            throwIfAborted(signal);
+            const verified = await runtime.callFunctionOn({
+              objectId: composerObjectId,
+              functionDeclaration: `function(expectedHref, expectedForm, text) {
+                const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+                const expected = new URL(expectedHref);
+                const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+                if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+                    location.search !== '' || location.hash !== '' || this !== document.activeElement ||
+                    !(this instanceof HTMLElement) || !visible(this) ||
+                    !(expectedForm instanceof HTMLFormElement) || this.closest('form') !== expectedForm ||
+                    !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox')) {
+                  return false;
+                }
+                const inserted = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
+                  ? this.value
+                  : this.textContent;
+                return typeof text === 'string' && text.length > 0 && inserted === text;
+              }`,
+              arguments: [
+                { value: projectLocator },
+                { objectId: formObjectId },
+                { value: text },
+              ],
+              returnByValue: true,
+            });
+            throwIfAborted(signal);
+            if (verified.exceptionDetails === undefined && verified.result.value === true) {
+              formBackendDOMNodeId = candidate;
+            }
+          }
         }
       }
     } catch {
