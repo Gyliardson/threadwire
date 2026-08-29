@@ -5,7 +5,7 @@ import { InvalidConfigurationError } from "../domain/errors.js";
 export interface ControllerConfig {
   readonly cdpHost: "127.0.0.1";
   readonly cdpPort: number;
-  readonly statePath: string;
+  readonly statePath?: string;
 }
 
 export function defaultThreadwireStatePath(): string {
