@@ -1,11 +1,8 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import {
-  ThreadStoreInvalidError,
-  ThreadStoreUnavailableError,
-} from "../domain/errors.js";
 import { ConversationLocator, ThreadHandle } from "../domain/ThreadIdentity.js";
+import { ThreadStoreInvalidError, ThreadStoreUnavailableError } from "./errors.js";
 
 export const THREAD_STORE_SCHEMA_VERSION = 1;
 export const DEFAULT_THREAD_STORE_BUSY_TIMEOUT_MS = 5_000;
