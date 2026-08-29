@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -98,12 +98,13 @@ test("persisted identities are revalidated before entering the registry", (t) =>
 
 test("corrupt database bytes never degrade silently to an empty registry", (t) => {
   const path = databasePath(t);
-  writeFileSync(path, Buffer.from("not a sqlite database", "utf8"));
+  const corruptBytes = Buffer.from("not a sqlite database", "utf8");
+  writeFileSync(path, corruptBytes);
 
   assert.throws(
     () => new SqliteThreadStore(path),
     (error: unknown) =>
       error instanceof ThreadStoreInvalidError || error instanceof ThreadStoreUnavailableError,
   );
-  assert.notEqual(Buffer.from("not a sqlite database", "utf8").length, 0);
+  assert.deepEqual(readFileSync(path), corruptBytes);
 });
