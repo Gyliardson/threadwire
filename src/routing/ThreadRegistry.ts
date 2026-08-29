@@ -8,7 +8,10 @@ import {
 } from "../domain/ThreadIdentity.js";
 import { ThreadHandleCollisionError, ThreadNotFoundError } from "../domain/errors.js";
 import { ThreadPersistencePort } from "../persistence/ThreadStore.js";
-import { ThreadStoreInvalidError } from "../persistence/errors.js";
+import {
+  ThreadStoreInvalidError,
+  ThreadStoreUnavailableError,
+} from "../persistence/errors.js";
 
 export const DEFAULT_THREAD_HANDLE_COLLISION_ATTEMPTS = 8;
 export type ThreadHandleFactory = () => string;
@@ -40,9 +43,12 @@ export class ThreadRegistry {
         try {
           this.persistence.close();
         } catch {
-          // Persisted-state validation failure remains authoritative.
+          // The original load/validation failure remains authoritative.
         }
-        if (error instanceof ThreadStoreInvalidError) {
+        if (
+          error instanceof ThreadStoreInvalidError ||
+          error instanceof ThreadStoreUnavailableError
+        ) {
           throw error;
         }
         throw new ThreadStoreInvalidError();
