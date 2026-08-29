@@ -41,6 +41,15 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function projectComposerAxValueForText(text: string): string {
+  let projected = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!;
+    projected += character === "\n" ? "\n\n" : character;
+  }
+  return projected;
+}
+
 export class ChromeRemoteInterfaceSession
   implements CdpResponseTurnTransportSession, CdpNavigationSettlementTransportSession, CdpProjectUiTransportSession
 {
@@ -717,6 +726,31 @@ export class ChromeRemoteInterfaceSession
     return result.result.value;
   }
 
+  private async projectComposerAxTextMatches(
+    backendDOMNodeId: number,
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    throwIfAborted(signal);
+    const frameTree = await this.client.Page.getFrameTree();
+    throwIfAborted(signal);
+    const axTree = await this.client.Accessibility.getFullAXTree({
+      frameId: frameTree.frameTree.frame.id,
+    });
+    throwIfAborted(signal);
+    const matches = axTree.nodes.filter(
+      (node) =>
+        node.backendDOMNodeId === backendDOMNodeId &&
+        !node.ignored &&
+        node.role?.value === "textbox",
+    );
+    if (matches.length !== 1) {
+      return false;
+    }
+    const value = matches[0]!.value?.value;
+    return typeof value === "string" && value === projectComposerAxValueForText(text);
+  }
+
   private async insertProjectComposerText(
     projectLocator: ProjectLocator,
     backendDOMNodeId: number,
@@ -753,28 +787,7 @@ export class ChromeRemoteInterfaceSession
             ? this.value
             : this.textContent;
           if (content !== null && content.length !== 0) return null;
-          this.focus();
-          if (this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement) {
-            const prototype = this instanceof HTMLTextAreaElement
-              ? HTMLTextAreaElement.prototype
-              : HTMLInputElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-            if (setter === undefined) return null;
-            setter.call(this, text);
-          } else if (this.isContentEditable) {
-            this.textContent = text;
-          } else {
-            return null;
-          }
-          this.dispatchEvent(new InputEvent('input', {
-            bubbles: true,
-            data: text,
-            inputType: 'insertText',
-          }));
-          const inserted = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
-            ? this.value
-            : this.textContent;
-          return inserted === text ? form : null;
+          return form;
         }`,
         arguments: [{ value: projectLocator }, { value: text }],
         returnByValue: false,
@@ -791,7 +804,77 @@ export class ChromeRemoteInterfaceSession
         throwIfAborted(signal);
         const candidate = described.node.backendNodeId;
         if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate > 0) {
-          formBackendDOMNodeId = candidate;
+          const revalidated = await runtime.callFunctionOn({
+            objectId: composerObjectId,
+            functionDeclaration: `function(expectedHref, expectedForm) {
+              const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+              const expected = new URL(expectedHref);
+              const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+              if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+                  location.search !== '' || location.hash !== '' || this !== document.activeElement ||
+                  !(this instanceof HTMLElement) || !visible(this) ||
+                  !(expectedForm instanceof HTMLFormElement) || this.closest('form') !== expectedForm ||
+                  !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox')) {
+                return false;
+              }
+              const content = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
+                ? this.value
+                : this.textContent;
+              return content === null || content.length === 0;
+            }`,
+            arguments: [{ value: projectLocator }, { objectId: formObjectId }],
+            returnByValue: true,
+          });
+          throwIfAborted(signal);
+          if (revalidated.exceptionDetails === undefined && revalidated.result.value === true) {
+            try {
+              await this.client.Input.insertText({ text });
+            } catch {
+              throw new Error("CDP Project composer input failed without retained protocol metadata.");
+            }
+            throwIfAborted(signal);
+            const verified = await runtime.callFunctionOn({
+              objectId: composerObjectId,
+              functionDeclaration: `function(expectedHref, expectedForm, text) {
+                const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+                const expected = new URL(expectedHref);
+                const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+                if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+                    location.search !== '' || location.hash !== '' || this !== document.activeElement ||
+                    !(this instanceof HTMLElement) || !visible(this) ||
+                    !(expectedForm instanceof HTMLFormElement) || this.closest('form') !== expectedForm ||
+                    !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox') ||
+                    typeof text !== 'string' || text.length === 0) {
+                  return null;
+                }
+                if (this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement) {
+                  return this.value === text ? 'TEXT_CONTROL_EXACT' : null;
+                }
+                return 'AX_REQUIRED';
+              }`,
+              arguments: [
+                { value: projectLocator },
+                { objectId: formObjectId },
+                { value: text },
+              ],
+              returnByValue: true,
+            });
+            throwIfAborted(signal);
+            if (verified.exceptionDetails === undefined) {
+              const verificationMode = verified.result.value;
+              let textVerified = verificationMode === "TEXT_CONTROL_EXACT";
+              if (verificationMode === "AX_REQUIRED") {
+                textVerified = await this.projectComposerAxTextMatches(
+                  backendDOMNodeId,
+                  text,
+                  signal,
+                );
+              }
+              if (textVerified) {
+                formBackendDOMNodeId = candidate;
+              }
+            }
+          }
         }
       }
     } catch {
@@ -834,7 +917,7 @@ export class ChromeRemoteInterfaceSession
       }
       objectIds.push(formObjectId);
       throwIfAborted(signal);
-      const result = await runtime.callFunctionOn({
+      const validation = await runtime.callFunctionOn({
         objectId: composerObjectId,
         functionDeclaration: `function(expectedHref, expectedForm, text) {
           const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
@@ -844,20 +927,14 @@ export class ChromeRemoteInterfaceSession
               location.search !== '' || location.hash !== '' || this !== document.activeElement ||
               !(this instanceof HTMLElement) || !visible(this) ||
               !(expectedForm instanceof HTMLFormElement) || this.closest('form') !== expectedForm ||
-              !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox')) {
-            return false;
+              !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox') ||
+              typeof text !== 'string' || text.length === 0) {
+            return null;
           }
-          const inserted = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
-            ? this.value
-            : this.textContent;
-          if (typeof text !== 'string' || text.length === 0 || inserted !== text) return false;
-          const matches = Array.from(expectedForm.querySelectorAll('button[data-testid="send-button"]'))
-            .filter((button) => visible(button) && button instanceof HTMLButtonElement &&
-              button.form === expectedForm && !button.disabled &&
-              button.getAttribute('aria-disabled') !== 'true');
-          if (matches.length !== 1) return false;
-          matches[0].click();
-          return true;
+          if (this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement) {
+            return this.value === text ? { kind: 'TEXT_CONTROL_EXACT' } : null;
+          }
+          return { kind: 'AX_REQUIRED', html: this.innerHTML };
         }`,
         arguments: [
           { value: projectLocator },
@@ -867,10 +944,84 @@ export class ChromeRemoteInterfaceSession
         returnByValue: true,
       });
       throwIfAborted(signal);
-      if (result.exceptionDetails !== undefined || typeof result.result.value !== "boolean") {
+      if (validation.exceptionDetails !== undefined) {
         throw new Error("Project composer identity observation was malformed.");
       }
-      clicked = result.result.value;
+
+      const validationValue = validation.result.value as unknown;
+      if (validationValue !== null && validationValue !== undefined) {
+        if (!isObject(validationValue) || typeof validationValue.kind !== "string") {
+          throw new Error("Project composer identity observation was malformed.");
+        }
+        const kind = validationValue.kind;
+        let expectedHtml: string | null = null;
+        let textVerified = kind === "TEXT_CONTROL_EXACT";
+        if (kind === "AX_REQUIRED") {
+          if (typeof validationValue.html !== "string") {
+            throw new Error("Project composer identity observation was malformed.");
+          }
+          expectedHtml = validationValue.html;
+          textVerified = await this.projectComposerAxTextMatches(
+            backendDOMNodeId,
+            text,
+            signal,
+          );
+        } else if (kind !== "TEXT_CONTROL_EXACT") {
+          throw new Error("Project composer identity observation was malformed.");
+        }
+
+        if (textVerified) {
+          throwIfAborted(signal);
+          const result = await runtime.callFunctionOn({
+            objectId: composerObjectId,
+            functionDeclaration: `function(expectedHref, expectedForm, text, kind, expectedHtml) {
+              const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+              const expected = new URL(expectedHref);
+              const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+              if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+                  location.search !== '' || location.hash !== '' || this !== document.activeElement ||
+                  !(this instanceof HTMLElement) || !visible(this) ||
+                  !(expectedForm instanceof HTMLFormElement) || this.closest('form') !== expectedForm ||
+                  !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox') ||
+                  typeof text !== 'string' || text.length === 0) {
+                return false;
+              }
+              if (kind === 'TEXT_CONTROL_EXACT') {
+                if (!(this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement) || this.value !== text) {
+                  return false;
+                }
+              } else if (kind === 'AX_REQUIRED') {
+                if (this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement ||
+                    typeof expectedHtml !== 'string' || this.innerHTML !== expectedHtml) {
+                  return false;
+                }
+              } else {
+                return false;
+              }
+              const matches = Array.from(expectedForm.querySelectorAll('button[data-testid="send-button"]'))
+                .filter((button) => visible(button) && button instanceof HTMLButtonElement &&
+                  button.form === expectedForm && !button.disabled &&
+                  button.getAttribute('aria-disabled') !== 'true');
+              if (matches.length !== 1) return false;
+              matches[0].click();
+              return true;
+            }`,
+            arguments: [
+              { value: projectLocator },
+              { objectId: formObjectId },
+              { value: text },
+              { value: kind },
+              { value: expectedHtml },
+            ],
+            returnByValue: true,
+          });
+          throwIfAborted(signal);
+          if (result.exceptionDetails !== undefined || typeof result.result.value !== "boolean") {
+            throw new Error("Project composer identity observation was malformed.");
+          }
+          clicked = result.result.value;
+        }
+      }
     } catch {
       operationFailed = true;
     }
