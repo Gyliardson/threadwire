@@ -54,7 +54,15 @@ export class SqliteThreadStore implements ThreadPersistencePort {
     }
 
     try {
-      database.exec("PRAGMA journal_mode = WAL;");
+      const journalMode = database.prepare("PRAGMA journal_mode = WAL").get();
+      if (
+        typeof journalMode !== "object" ||
+        journalMode === null ||
+        Array.isArray(journalMode) ||
+        (journalMode as Record<string, unknown>).journal_mode !== "wal"
+      ) {
+        throw new Error("WAL mode was not enabled.");
+      }
       database.exec("PRAGMA synchronous = FULL;");
       database.exec("PRAGMA foreign_keys = ON;");
       database.exec("PRAGMA trusted_schema = OFF;");
