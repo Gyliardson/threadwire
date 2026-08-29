@@ -4,14 +4,21 @@ import {
   ThreadHandle,
   createConversationLocator,
   createOpaqueThreadHandle,
+  createThreadHandle,
 } from "../domain/ThreadIdentity.js";
 import { ThreadHandleCollisionError, ThreadNotFoundError } from "../domain/errors.js";
+import { ThreadPersistencePort } from "../persistence/ThreadStore.js";
+import {
+  ThreadStoreInvalidError,
+  ThreadStoreUnavailableError,
+} from "../persistence/errors.js";
 
 export const DEFAULT_THREAD_HANDLE_COLLISION_ATTEMPTS = 8;
 export type ThreadHandleFactory = () => string;
 
 export interface ThreadRegistryOptions {
   readonly handleFactory?: ThreadHandleFactory;
+  readonly persistence?: ThreadPersistencePort;
 }
 
 export type ThreadRegistrationResult = Readonly<{
@@ -23,9 +30,30 @@ export class ThreadRegistry {
   private readonly handleToLocator = new Map<ThreadHandle, ConversationLocator>();
   private readonly locatorToHandle = new Map<ConversationLocator, ThreadHandle>();
   private readonly handleFactory: ThreadHandleFactory;
+  private readonly persistence: ThreadPersistencePort | undefined;
 
   public constructor(options: ThreadRegistryOptions = {}) {
     this.handleFactory = options.handleFactory ?? randomUUID;
+    this.persistence = options.persistence;
+
+    if (this.persistence !== undefined) {
+      try {
+        this.hydrate(this.persistence.load());
+      } catch (error) {
+        try {
+          this.persistence.close();
+        } catch {
+          // The original load/validation failure remains authoritative.
+        }
+        if (
+          error instanceof ThreadStoreInvalidError ||
+          error instanceof ThreadStoreUnavailableError
+        ) {
+          throw error;
+        }
+        throw new ThreadStoreInvalidError();
+      }
+    }
   }
 
   public register(locator: ConversationLocator): ThreadHandle {
@@ -44,6 +72,8 @@ export class ThreadRegistry {
       if (this.handleToLocator.has(handle)) {
         continue;
       }
+
+      this.persistence?.insert(handle, normalized);
       this.handleToLocator.set(handle, normalized);
       this.locatorToHandle.set(normalized, handle);
       return Object.freeze({ threadHandle: handle, created: true });
@@ -62,5 +92,28 @@ export class ThreadRegistry {
 
   public knownThreads(): readonly ThreadHandle[] {
     return Object.freeze([...this.handleToLocator.keys()]);
+  }
+
+  public close(): void {
+    this.persistence?.close();
+  }
+
+  private hydrate(records: ReturnType<ThreadPersistencePort["load"]>): void {
+    for (const record of records) {
+      let handle: ThreadHandle;
+      let locator: ConversationLocator;
+      try {
+        handle = createThreadHandle(record.threadHandle);
+        locator = createConversationLocator(record.conversationLocator);
+      } catch {
+        throw new ThreadStoreInvalidError();
+      }
+
+      if (this.handleToLocator.has(handle) || this.locatorToHandle.has(locator)) {
+        throw new ThreadStoreInvalidError();
+      }
+      this.handleToLocator.set(handle, locator);
+      this.locatorToHandle.set(locator, handle);
+    }
   }
 }

@@ -1,7 +1,11 @@
 import { CdpSessionManager } from "../cdp/CdpSessionManager.js";
-import { ControllerConfig } from "../config/ControllerConfig.js";
+import {
+  ControllerConfig,
+  defaultThreadwireStatePath,
+} from "../config/ControllerConfig.js";
 import { CdpConnectionState } from "../domain/RuntimeState.js";
 import { ThreadHandle } from "../domain/ThreadIdentity.js";
+import { SqliteThreadStore } from "../persistence/ThreadStore.js";
 import { ReadinessController } from "../readiness/ReadinessController.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import { ConversationRouter } from "../routing/ConversationRouter.js";
@@ -44,6 +48,7 @@ export interface CdpControllerPort {
 export interface ThreadRegistryControllerPort {
   resolve(handle: ThreadHandle): unknown;
   knownThreads(): readonly ThreadHandle[];
+  close?(): void;
 }
 
 export interface ConversationRouterControllerPort {
@@ -132,7 +137,26 @@ export class ThreadwireController {
   }
 
   public async close(): Promise<void> {
-    await this.dependencies.cdp.disconnect();
+    let disconnectError: unknown;
+    try {
+      await this.dependencies.cdp.disconnect();
+    } catch (error) {
+      disconnectError = error;
+    }
+
+    let registryError: unknown;
+    try {
+      this.dependencies.registry.close?.();
+    } catch (error) {
+      registryError = error;
+    }
+
+    if (disconnectError !== undefined) {
+      throw disconnectError;
+    }
+    if (registryError !== undefined) {
+      throw registryError;
+    }
   }
 }
 
@@ -141,7 +165,8 @@ export function createThreadwireController(
   options: ThreadwireControllerOptions = {},
 ): ThreadwireController {
   const supervisor = new ClassicSupervisor(config);
-  const registry = new ThreadRegistry();
+  const persistence = new SqliteThreadStore(config.statePath ?? defaultThreadwireStatePath());
+  const registry = new ThreadRegistry({ persistence });
   const scheduler = new OperationScheduler(supervisor);
   const cdp = new CdpSessionManager(config, supervisor);
   const readiness = new ReadinessController(cdp);

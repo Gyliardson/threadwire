@@ -2,7 +2,7 @@
 
 Threadwire is an experimental local controller for ChatGPT Classic on Windows. It drives the legitimate ChatGPT Classic process and its WebContents through localhost Chrome DevTools Protocol (CDP) rather than implementing a standalone or reverse-engineered ChatGPT HTTP client.
 
-> **Project status:** active MVP development. The repository currently implements runtime supervision, CDP recovery/session management, conversation routing/scheduling, existing/fresh-route readiness, turn execution, conservative response streaming with authoritative final rendered reconciliation, and a localhost HTTP/SSE API. ThreadHandle persistence and the later observability/integration milestones are not yet complete.
+> **Project status:** active MVP development. The repository currently implements runtime supervision, CDP recovery/session management, conversation routing/scheduling, existing/fresh-route readiness, turn execution, conservative response streaming with authoritative final rendered reconciliation, a localhost HTTP/SSE API, and durable opaque ThreadHandle persistence. Later observability/recovery and integration milestones are not yet complete.
 
 Threadwire is an independent, unofficial project and is not affiliated with or endorsed by OpenAI.
 
@@ -32,6 +32,7 @@ The current MVP implementation includes:
 - **M6:** conservative normalized response streaming plus authoritative `FINAL_TEXT` reconciliation from the rendered assistant response.
 - **M7:** bounded true cold-start/CDP recovery acceptance and hardening.
 - **M8:** localhost-only HTTP/SSE API over the existing routing, scheduling, turn, and response pipeline.
+- **M9:** versioned local SQLite persistence for opaque `ThreadHandle` mappings, with validated restart recovery and fail-closed incompatible/corrupt state handling.
 
 The 500 ms fresh-route guard is an engineering default, not a proven frontend minimum or a claim about a specific frontend mechanism.
 
@@ -46,6 +47,7 @@ Threadwire is designed around strict boundaries:
 - The controller must not extract or persist Authorization values, cookies, session/access tokens, protected headers, proof artifacts, CAPTCHA/Turnstile material, or equivalent protection internals.
 - Threadwire does not implement, replay, fabricate, or bypass Sentinel, proof, Turnstile, Conduit, Cloudflare, MFA, rate limits, or equivalent protections.
 - Conversation locators are treated as account-linked metadata and are not part of the public HTTP API; callers use opaque `ThreadHandle` values.
+- M9 persists only the minimum opaque-handle-to-normalized-locator mapping needed for routing. Prompts, rendered responses, authentication/protection state, runtime/CDP identifiers, and raw network data are not part of that store.
 - Mutating WebContents operations are serialized in the MVP.
 - Navigation, thread switching, and reload are forbidden while a conversational request is active.
 - Runtime leases become stale after full Classic process replacement and must fail closed.
@@ -83,6 +85,20 @@ THREADWIRE_API_PORT=9224
 
 `THREADWIRE_API_HOST` must be exactly `127.0.0.1`. The API port must differ from the CDP port.
 
+M9 durable thread identity uses a local SQLite state file. The default is outside the repository working tree at:
+
+```text
+~/.threadwire/state.sqlite3
+```
+
+An operator or test may override it with an absolute filesystem path:
+
+```text
+THREADWIRE_STATE_PATH=C:\path\to\threadwire-state.sqlite3
+```
+
+The state file contains account-linked conversation locators paired with opaque `ThreadHandle` values. Treat it as private local metadata. Threadwire never returns those locators through the public HTTP API and fails closed rather than silently resetting an incompatible/corrupt state file.
+
 ## Local HTTP/SSE API
 
 Build and start the controller API:
@@ -109,7 +125,7 @@ Returns only safe controller state:
 
 ### `GET /v1/threads`
 
-Returns currently known in-memory opaque thread handles:
+Returns currently known persisted opaque thread handles:
 
 ```json
 {
@@ -119,7 +135,7 @@ Returns currently known in-memory opaque thread handles:
 }
 ```
 
-ThreadHandle persistence is planned for M9; this endpoint does not imply persistence across controller restarts.
+M9 reloads validated handle mappings from the local state store during controller composition. This endpoint still exposes handles only; conversation locators remain private persisted routing metadata.
 
 ### `POST /v1/turns`
 
@@ -185,9 +201,8 @@ Destructive/real-runtime acceptance tests are individually guarded and should re
 
 ## Roadmap
 
-Remaining MVP sequence after M8:
+Remaining MVP sequence after M9:
 
-- **M9:** `ThreadHandle` persistence
 - **M10:** observability/recovery hardening
 - **M11:** integration/acceptance suite
 
@@ -195,7 +210,7 @@ Repository tests and mocks validate only the code paths they exercise; they do n
 
 ## Sensitive material
 
-Do not commit or upload real secrets, HAR files, authenticated browser profiles, raw network dumps, cookies, tokens, response bodies, or sensitive research artifacts. Treat every commit as potentially public.
+Do not commit or upload real secrets, HAR files, authenticated browser profiles, raw network dumps, cookies, tokens, response bodies, persisted Threadwire state databases, or sensitive research artifacts. Treat every commit as potentially public.
 
 Before changing repository visibility, perform a final local scan of tracked, untracked, generated files, and Git history for sensitive material, and decide whether historical author metadata containing a personal email address should be rewritten.
 
