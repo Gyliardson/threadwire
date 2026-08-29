@@ -10,10 +10,11 @@ import { ProjectLocatorInvalidError } from "../../src/domain/errors.js";
 test("project names accept bounded normalized visible text", () => {
   assert.equal(createProjectName("Threadwire Acceptance"), "Threadwire Acceptance");
   assert.equal(createProjectName("設計計画"), "設計計画");
+  assert.equal(createProjectName("x".repeat(50)), "x".repeat(50));
 });
 
 test("project names reject empty, padded, non-normalized, controlled, and oversized values", () => {
-  for (const value of ["", " padded", "padded ", "line\nbreak", "e\u0301", "x".repeat(101)]) {
+  for (const value of ["", " padded", "padded ", "line\nbreak", "e\u0301", "x".repeat(51)]) {
     assert.throws(() => createProjectName(value));
   }
 });
