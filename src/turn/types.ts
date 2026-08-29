@@ -8,12 +8,14 @@ import {
 } from "../cdp/CdpTransport.js";
 import { RuntimeLease } from "../domain/RuntimeGeneration.js";
 import { ConversationLocator, ThreadHandle } from "../domain/ThreadIdentity.js";
+import { ProjectLocator } from "../domain/ProjectIdentity.js";
 import { RouteExpectation } from "../readiness/types.js";
 import { NormalizedResponseStreamEvent, ResponseStreamEvent } from "../response/types.js";
 
 export type TurnTarget =
   | Readonly<{ kind: "THREAD"; threadHandle: ThreadHandle }>
-  | Readonly<{ kind: "FRESH" }>;
+  | Readonly<{ kind: "FRESH" }>
+  | Readonly<{ kind: "PROJECT"; projectLocator: ProjectLocator }>;
 
 export type ExistingTurnResult = Readonly<{
   kind: "THREAD";
@@ -67,7 +69,22 @@ export interface TurnCdpPort {
   discardTurnResponse?(handle: CdpTurnObservationHandle, lease: RuntimeLease): void;
   releaseTurnObservation(handle: CdpTurnObservationHandle): void;
   insertText(text: string, lease: RuntimeLease): Promise<void>;
+  insertTextIntoProjectComposer?(
+    text: string,
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<number>;
   dispatchEnterKeyDown(lease: RuntimeLease): Promise<void>;
   dispatchEnterKeyUp(lease: RuntimeLease): Promise<void>;
+  clickTurnSendButton?(
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    formBackendDOMNodeId: number,
+    expectedText: string,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void>;
   getCurrentConversationLocator(lease: RuntimeLease): Promise<ConversationLocator | null>;
 }

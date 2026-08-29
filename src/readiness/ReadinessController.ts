@@ -1,4 +1,5 @@
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
+import { ProjectLocator } from "../domain/ProjectIdentity.js";
 import { RuntimeLease, sameRuntimeLease } from "../domain/RuntimeGeneration.js";
 import {
   CdpReadinessFailedError,
@@ -40,6 +41,7 @@ interface DeadlineSignal {
 
 interface FreshReadinessProof {
   readonly lease: RuntimeLease;
+  readonly expectedRoute: RouteExpectation;
   readonly frameId: string;
   readonly loaderId: string;
   readonly backendDOMNodeId: number;
@@ -155,6 +157,43 @@ export class ReadinessController {
       }
       this.freshReadinessProof = Object.freeze({
         lease,
+        expectedRoute: Object.freeze({ kind: "FRESH_ROOT" as const }),
+        frameId: snapshot.mainFrame.frameId,
+        loaderId: snapshot.mainFrame.loaderId,
+        backendDOMNodeId: composer.backendDOMNodeId,
+      });
+    } catch (error) {
+      if (error instanceof OperationTimeoutError) {
+        throw new FreshRouteReadinessTimeoutError(undefined, { cause: error });
+      }
+      throw error;
+    }
+  }
+
+  public async waitForProjectRoute(
+    projectLocator: ProjectLocator,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.freshReadinessProof = null;
+    const expectedRoute = Object.freeze({
+      kind: "PROJECT_ROOT" as const,
+      locator: projectLocator,
+    });
+    try {
+      const snapshot = await this.waitForRoute(
+        this.freshPolicy.createGate(),
+        expectedRoute,
+        lease,
+        signal,
+      );
+      const composer = snapshot.eligibleEditables[0];
+      if (composer === undefined) {
+        throw new CdpReadinessFailedError();
+      }
+      this.freshReadinessProof = Object.freeze({
+        lease,
+        expectedRoute,
         frameId: snapshot.mainFrame.frameId,
         loaderId: snapshot.mainFrame.loaderId,
         backendDOMNodeId: composer.backendDOMNodeId,
@@ -191,6 +230,7 @@ export class ReadinessController {
       proof !== null &&
       composer !== undefined &&
       sameRuntimeLease(proof.lease, lease) &&
+      this.sameRouteExpectation(proof.expectedRoute, expectedRoute) &&
       proof.frameId === snapshot.mainFrame.frameId &&
       proof.loaderId === snapshot.mainFrame.loaderId &&
       proof.backendDOMNodeId === composer.backendDOMNodeId
@@ -200,10 +240,20 @@ export class ReadinessController {
 
     await this.waitForRoute(
       this.freshPolicy.createGate(),
-      { kind: "FRESH_ROOT" },
+      expectedRoute,
       lease,
       signal,
     );
+  }
+
+  private sameRouteExpectation(left: RouteExpectation, right: RouteExpectation): boolean {
+    if (left.kind !== right.kind) {
+      return false;
+    }
+    if (left.kind === "FRESH_ROOT" || right.kind === "FRESH_ROOT") {
+      return true;
+    }
+    return left.locator === right.locator;
   }
 
   private async waitForRoute(

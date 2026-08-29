@@ -5,6 +5,7 @@ import {
   RuntimeLease,
 } from "../../src/domain/RuntimeGeneration.js";
 import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { createProjectLocator } from "../../src/domain/ProjectIdentity.js";
 import { ExistingReadinessPolicy } from "../../src/readiness/ExistingReadinessPolicy.js";
 import {
   DEFAULT_FRESH_GUARD_DURATION_MS,
@@ -167,4 +168,37 @@ test("fresh proof from an old runtime generation is never reused by the replacem
   const newLease = runtime.getCurrentRuntimeLease();
   await controller.waitForTurnComposer({ kind: "FRESH_ROOT" }, newLease);
   assert.equal(freshClockCalls, 2);
+});
+
+test("Project readiness proof is one-shot and bound to the exact Project locator", async () => {
+  const { lease } = runtimeFixture();
+  const observation = new RecordingObservation();
+  let freshClockCalls = 0;
+  const controller = new ReadinessController(
+    observation,
+    new ExistingReadinessPolicy({ frameStableObservations: 1, focusStableObservations: 1 }),
+    new FreshReadinessPolicy({
+      frameStableObservations: 1,
+      focusStableObservations: 1,
+      guardDurationMs: 0,
+      clock: () => ++freshClockCalls,
+    }),
+    { timeoutMs: 100, pollIntervalMs: 0, sleep: async () => undefined },
+  );
+  const projectA = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000005/project");
+  const projectB = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000006/project");
+
+  await controller.waitForProjectRoute(projectA, lease);
+  assert.deepEqual(observation.expectations.at(-1), {
+    kind: "PROJECT_ROOT",
+    locator: projectA,
+  });
+  assert.equal(freshClockCalls, 1);
+
+  await controller.waitForTurnComposer({ kind: "PROJECT_ROOT", locator: projectA }, lease);
+  assert.equal(freshClockCalls, 1);
+
+  await controller.waitForProjectRoute(projectA, lease);
+  await controller.waitForTurnComposer({ kind: "PROJECT_ROOT", locator: projectB }, lease);
+  assert.equal(freshClockCalls, 3, "a proof for Project A must not authorize Project B");
 });

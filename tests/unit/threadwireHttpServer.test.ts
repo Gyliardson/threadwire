@@ -3,7 +3,12 @@ import http from "node:http";
 import test from "node:test";
 import { ThreadHandle } from "../../src/domain/ThreadIdentity.js";
 import { ProjectHandle } from "../../src/domain/ProjectIdentity.js";
-import { ProjectCreationFailedError, ThreadNotFoundError, TurnWriteFailedError } from "../../src/domain/errors.js";
+import {
+  ProjectCreationFailedError,
+  ProjectNotFoundError,
+  ThreadNotFoundError,
+  TurnWriteFailedError,
+} from "../../src/domain/errors.js";
 import { ControllerBusyError } from "../../src/controller/ControllerTurnQueue.js";
 import { ControllerTurnRequest } from "../../src/controller/ThreadwireController.js";
 import {
@@ -31,6 +36,8 @@ function turnResult(created: boolean): TurnResult {
 
 class FakeController implements ThreadwireApiController {
   public closed = false;
+  public readonly confirmedTurns: TurnResult[] = [];
+  public readonly rolledBackTurns: TurnResult[] = [];
   public executeImpl: (
     request: ControllerTurnRequest,
     listener: (event: ResponseStreamEvent) => void,
@@ -60,6 +67,14 @@ class FakeController implements ThreadwireApiController {
     signal?: AbortSignal,
   ): Promise<{ projectHandle: ProjectHandle }> {
     return this.createProjectImpl(request, signal);
+  }
+
+  public confirmTurnCompletion(result: TurnResult): void {
+    this.confirmedTurns.push(result);
+  }
+
+  public rollbackTurnCompletion(result: TurnResult): void {
+    this.rolledBackTurns.push(result);
   }
 
   public async close(): Promise<void> {
@@ -207,7 +222,7 @@ test("project creation requires strict JSON and returns only an opaque handle", 
     observed = requestBody;
     return {
       projectHandle: PROJECT_HANDLE,
-      locator: "https://chatgpt.com/g/g-p-private/project",
+      locator: "https://chatgpt.com/g/g-p-00000000000000000000000000000050/project",
     } as { projectHandle: ProjectHandle };
   };
   const fixture = await startServer(t, controller);
@@ -281,6 +296,29 @@ test("accepted turn streams safe events and keeps COMPLETED terminal", async (t)
   );
   assert.equal((response.body.match(/event: COMPLETED/g) ?? []).length, 1);
   assert.ok(response.body.lastIndexOf("event: COMPLETED") > response.body.lastIndexOf("event: FINAL_TEXT"));
+  assert.equal(controller.confirmedTurns.length, 1);
+  assert.equal(controller.rolledBackTurns.length, 0);
+});
+
+test("failed public completion delivery rolls back a newly registered turn", async (t) => {
+  const controller = new FakeController();
+  controller.executeImpl = async (_request, listener) => {
+    listener({ type: "FINAL_TEXT", text: "authoritative" });
+    listener({ type: "COMPLETED" });
+    return turnResult(true);
+  };
+  const fixture = await startServer(t, controller, { maxSseBufferBytes: 64 });
+
+  const response = await request(fixture.port, {
+    method: "POST",
+    path: "/v1/turns",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE }, prompt: "question" }),
+  });
+
+  assert.equal(response.body.includes("event: COMPLETED"), false);
+  assert.equal(controller.confirmedTurns.length, 0);
+  assert.equal(controller.rolledBackTurns.length, 1);
 });
 
 test("existing target preserves the opaque handle at the controller boundary", async (t) => {
@@ -311,6 +349,97 @@ test("existing target preserves the opaque handle at the controller boundary", a
     prompt: "follow-up",
   });
   assert.match(response.body, /"newlyRegistered":false/);
+});
+
+test("project target preserves the opaque Project handle and rejects extra target fields", async (t) => {
+  const controller = new FakeController();
+  let observed: ControllerTurnRequest | null = null;
+  controller.executeImpl = async (requestBody, listener) => {
+    observed = requestBody;
+    listener({ type: "FINAL_TEXT", text: "done" });
+    listener({ type: "COMPLETED" });
+    return turnResult(true);
+  };
+  const fixture = await startServer(t, controller);
+
+  const invalid = await request(fixture.port, {
+    method: "POST",
+    path: "/v1/turns",
+    headers: jsonHeaders(),
+    body: JSON.stringify({
+      target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE, locator: "private" },
+      prompt: "x",
+    }),
+  });
+  assert.equal(invalid.statusCode, 400);
+
+  const response = await request(fixture.port, {
+    method: "POST",
+    path: "/v1/turns",
+    headers: jsonHeaders(),
+    body: JSON.stringify({
+      target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE },
+      prompt: "project prompt",
+    }),
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(observed, {
+    target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE },
+    prompt: "project prompt",
+  });
+  assert.equal(response.body.includes("chatgpt.com"), false);
+});
+
+test("project target rejects malformed opaque handles before controller execution", async (t) => {
+  const controller = new FakeController();
+  let executions = 0;
+  controller.executeImpl = async () => {
+    executions += 1;
+    return turnResult(true);
+  };
+  const fixture = await startServer(t, controller);
+
+  for (const projectHandle of [
+    undefined,
+    7,
+    "tw_wrong-prefix",
+    "prj_invalid.value",
+    `prj_${"x".repeat(129)}`,
+  ]) {
+    const response = await request(fixture.port, {
+      method: "POST",
+      path: "/v1/turns",
+      headers: jsonHeaders(),
+      body: JSON.stringify({
+        target: { kind: "PROJECT", projectHandle },
+        prompt: "x",
+      }),
+    });
+    assert.equal(response.statusCode, 400);
+  }
+  assert.equal(executions, 0);
+});
+
+test("unknown Project handles stay pre-stream HTTP errors", async (t) => {
+  const controller = new FakeController();
+  controller.executeImpl = () => {
+    throw new ProjectNotFoundError("PROJECT_LOCATOR_CANARY");
+  };
+  const fixture = await startServer(t, controller);
+  const response = await request(fixture.port, {
+    method: "POST",
+    path: "/v1/turns",
+    headers: jsonHeaders(),
+    body: JSON.stringify({
+      target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE },
+      prompt: "x",
+    }),
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.equal(JSON.parse(response.body).error.code, "PROJECT_NOT_FOUND");
+  assert.equal(response.body.includes("PROJECT_LOCATOR_CANARY"), false);
 });
 
 test("capacity and unknown-handle failures stay pre-stream HTTP errors", async (t) => {

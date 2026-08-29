@@ -48,7 +48,7 @@ export function createProjectLocator(value: string): ProjectLocator {
     url.port !== "" ||
     url.search !== "" ||
     url.hash !== "" ||
-    !/^\/g\/g-p-[A-Za-z0-9_-]+\/project\/?$/.test(url.pathname)
+    !/^\/g\/g-p-[0-9a-f]{32}\/project\/?$/.test(url.pathname)
   ) {
     throw new ProjectLocatorInvalidError();
   }

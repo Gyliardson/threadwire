@@ -5,7 +5,7 @@ import {
   createOpaqueProjectHandle,
   createProjectLocator,
 } from "../domain/ProjectIdentity.js";
-import { ProjectHandleCollisionError } from "../domain/errors.js";
+import { ProjectHandleCollisionError, ProjectNotFoundError } from "../domain/errors.js";
 
 const MAX_PROJECT_HANDLE_COLLISION_ATTEMPTS = 8;
 
@@ -39,5 +39,13 @@ export class ProjectRegistry {
       return handle;
     }
     throw new ProjectHandleCollisionError();
+  }
+
+  public resolve(handle: ProjectHandle): ProjectLocator {
+    const locator = this.projects.get(handle);
+    if (locator === undefined) {
+      throw new ProjectNotFoundError();
+    }
+    return locator;
   }
 }

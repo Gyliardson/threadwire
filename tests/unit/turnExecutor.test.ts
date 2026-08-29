@@ -22,6 +22,7 @@ import {
   ConversationLocator,
   createConversationLocator,
 } from "../../src/domain/ThreadIdentity.js";
+import { createProjectLocator } from "../../src/domain/ProjectIdentity.js";
 import { RouteExpectation } from "../../src/readiness/types.js";
 import { OperationScheduler } from "../../src/routing/OperationScheduler.js";
 import { ThreadRegistry } from "../../src/routing/ThreadRegistry.js";
@@ -90,14 +91,21 @@ class FakeCdp implements TurnCdpPort {
     eligible: true,
     focused: true,
     empty: true,
+    backendDOMNodeId: 501,
   });
   public locator: ConversationLocator | null = null;
+  public locators: ConversationLocator[] = [];
   public snapshots: readonly CdpTurnObservationSnapshot[] = [observation("FINISHED")];
   public snapshotCalls = 0;
   public insertCalls = 0;
+  public projectInsertCalls = 0;
   public onArm: (() => void) | null = null;
   public onInsert: (() => void) | null = null;
   public onKeyDown: (() => void) | null = null;
+  public onSendButton: (() => void) | null = null;
+  public projectInsertError: Error | null = null;
+  public sendButtonError: Error | null = null;
+  public writeOnProjectInsert = false;
   public observationError: Error | null = null;
   private submitted = false;
 
@@ -148,6 +156,23 @@ class FakeCdp implements TurnCdpPort {
     this.onInsert?.();
   }
 
+  public async insertTextIntoProjectComposer(
+    _text: string,
+    projectLocator: import("../../src/domain/ProjectIdentity.js").ProjectLocator,
+    backendDOMNodeId: number,
+    lease: RuntimeLease,
+  ): Promise<number> {
+    this.runtime.assertRuntimeLeaseCurrent(lease);
+    this.projectInsertCalls += 1;
+    this.events.push("insert-project-text");
+    this.clickedProjectLocator = projectLocator;
+    this.clickedBackendDOMNodeId = backendDOMNodeId;
+    this.onInsert?.();
+    if (this.writeOnProjectInsert) this.submitted = true;
+    if (this.projectInsertError !== null) throw this.projectInsertError;
+    return 601;
+  }
+
   public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     this.events.push("enter-down");
@@ -161,12 +186,34 @@ class FakeCdp implements TurnCdpPort {
     this.events.push("enter-up");
   }
 
+  public clickedProjectLocator: string | null = null;
+  public clickedBackendDOMNodeId: number | null = null;
+  public clickedExpectedText: string | null = null;
+
+  public async clickTurnSendButton(
+    projectLocator: import("../../src/domain/ProjectIdentity.js").ProjectLocator,
+    backendDOMNodeId: number,
+    _formBackendDOMNodeId: number,
+    expectedText: string,
+    lease: RuntimeLease,
+  ): Promise<void> {
+    this.runtime.assertRuntimeLeaseCurrent(lease);
+    this.events.push("send-button");
+    this.clickedProjectLocator = projectLocator;
+    this.clickedBackendDOMNodeId = backendDOMNodeId;
+    this.clickedExpectedText = expectedText;
+    if (this.sendButtonError !== null) throw this.sendButtonError;
+    this.submitted = true;
+    this.onSendButton?.();
+    this.runtime.assertRuntimeLeaseCurrent(lease);
+  }
+
   public async getCurrentConversationLocator(
     lease: RuntimeLease,
   ): Promise<ConversationLocator | null> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     this.events.push("route-observation");
-    return this.locator;
+    return this.locators.shift() ?? this.locator;
   }
 }
 
@@ -330,6 +377,145 @@ test("fresh write without a resulting supported route never reports creation suc
   assert.equal(routeRan, true, "write was settled, so the route queue is safe to release");
 });
 
+test("project turn uses the send button and registers only a conversation owned by that Project", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000040/project");
+  const conversationLocator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000040/c/project-conversation",
+  );
+  const f = fixture({
+    snapshots: [observation("ACTIVE", 1), observation("FINISHED", 1)],
+    locator: conversationLocator,
+  });
+
+  const result = await f.executor.execute(
+    { kind: "PROJECT", projectLocator },
+    "synthetic project prompt",
+  );
+
+  assert.equal(result.created, true);
+  assert.equal(f.registry.resolve(result.threadHandle), conversationLocator);
+  assert.equal(f.preflight.lastExpectation?.kind, "PROJECT_ROOT");
+  assert.equal(f.cdp.events.includes("send-button"), true);
+  assert.equal(f.cdp.projectInsertCalls, 1);
+  assert.equal(f.cdp.insertCalls, 0);
+  assert.equal(f.cdp.clickedProjectLocator, projectLocator);
+  assert.equal(f.cdp.clickedBackendDOMNodeId, 501);
+  assert.equal(f.cdp.clickedExpectedText, "synthetic project prompt");
+  assert.equal(f.cdp.events.includes("enter-down"), false);
+  assert.equal(JSON.stringify(result).includes("g-p-00000000000000000000000000000040"), false);
+});
+
+test("project turn fails closed when the resulting conversation was already registered", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000041/project");
+  const conversationLocator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000041/c/project-conversation",
+  );
+  const f = fixture({ snapshots: [observation("FINISHED", 1)], locator: conversationLocator });
+  f.registry.register(conversationLocator);
+
+  await assert.rejects(
+    () => f.executor.execute({ kind: "PROJECT", projectLocator }, "synthetic prompt"),
+    TurnStateUncertainError,
+  );
+  assert.equal(f.registry.knownThreads().length, 2);
+  await assert.rejects(
+    f.scheduler.schedule("ROUTE", async () => "must-not-run"),
+    TurnStateUncertainError,
+  );
+});
+
+test("Project send-control refusal fails closed without accepting a later write", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000042/project");
+  const f = fixture();
+  f.cdp.sendButtonError = new Error("send control unavailable");
+
+  await assert.rejects(
+    () => f.executor.execute({ kind: "PROJECT", projectLocator }, "synthetic prompt"),
+    TurnStateUncertainError,
+  );
+  assert.equal(f.cdp.events.filter((event) => event === "send-button").length, 1);
+  assert.equal(f.cdp.events.filter((event) => event === "observe").length, 1);
+  await assert.rejects(
+    f.scheduler.schedule("ROUTE", async () => "must-not-run"),
+    TurnStateUncertainError,
+  );
+});
+
+test("terminal Project write before the intended send boundary fails closed", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000043/project");
+  const f = fixture({ snapshots: [observation("FINISHED")] });
+  f.cdp.writeOnProjectInsert = true;
+
+  await assert.rejects(
+    () => f.executor.execute({ kind: "PROJECT", projectLocator }, "synthetic prompt"),
+    TurnStateUncertainError,
+  );
+  assert.equal(f.cdp.events.includes("send-button"), false);
+  await assert.rejects(
+    f.scheduler.schedule("ROUTE", async () => "must-not-run"),
+    TurnStateUncertainError,
+  );
+});
+
+test("failed Project write after send latches uncertainty", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000044/project");
+  const f = fixture({ snapshots: [observation("FAILED")] });
+
+  await assert.rejects(
+    () => f.executor.execute({ kind: "PROJECT", projectLocator }, "synthetic prompt"),
+    TurnStateUncertainError,
+  );
+  await assert.rejects(
+    f.scheduler.schedule("ROUTE", async () => "must-not-run"),
+    TurnStateUncertainError,
+  );
+});
+
+test("fresh turn rejects a Project-qualified resulting route", async () => {
+  const projectConversation = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000045/c/project-conversation",
+  );
+  const f = fixture({ snapshots: [observation("FINISHED", 1)], locator: projectConversation });
+
+  await assert.rejects(
+    () => f.executor.execute({ kind: "FRESH" }, "synthetic prompt"),
+    FreshConversationNotCreatedError,
+  );
+  assert.equal(f.registry.knownThreads().length, 1);
+});
+
+test("project turn rejects same-Project conversation drift before registration", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000040/project");
+  const first = createConversationLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000040/c/conversation-a");
+  const second = createConversationLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000040/c/conversation-b");
+  const f = fixture({ snapshots: [observation("FINISHED", 1)] });
+  f.cdp.locators.push(first, second);
+
+  await assert.rejects(
+    () => f.executor.execute({ kind: "PROJECT", projectLocator }, "synthetic prompt"),
+    TurnStateUncertainError,
+  );
+  assert.equal(f.registry.knownThreads().length, 1);
+  await assert.rejects(
+    f.scheduler.schedule("ROUTE", async () => "must-not-run"),
+    TurnStateUncertainError,
+  );
+});
+
+test("project turn rejects a resulting conversation owned by another Project", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000040/project");
+  const foreignLocator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000049/c/project-conversation",
+  );
+  const f = fixture({ snapshots: [observation("FINISHED", 1)], locator: foreignLocator });
+
+  await assert.rejects(
+    () => f.executor.execute({ kind: "PROJECT", projectLocator }, "synthetic project prompt"),
+    TurnStateUncertainError,
+  );
+  assert.equal(f.registry.knownThreads().length, 1);
+});
+
 test("pre-aborted and post-arm pre-commit aborts never issue input", async () => {
   const preAborted = fixture();
   const firstAbort = new AbortController();
@@ -434,6 +620,79 @@ test("runtime replacement during a committed old-runtime turn rejects stale work
     newGenerationRan = true;
   });
   assert.equal(newGenerationRan, true);
+});
+
+test("runtime replacement during Project submission cannot register a conversation", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000046/project");
+  const conversationLocator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000046/c/conversation",
+  );
+  const f = fixture({ snapshots: [observation("FINISHED")], locator: conversationLocator });
+  f.cdp.onSendButton = () => {
+    f.runtime.observe({ pid: 200, creationTime: "runtime-b" });
+  };
+
+  await assert.rejects(
+    () => f.executor.execute({ kind: "PROJECT", projectLocator }, "synthetic prompt"),
+    RuntimeGenerationChangedError,
+  );
+  assert.equal(f.registry.knownThreads().length, 1);
+});
+
+test("Project cancellation after exact-node insertion but before send latches uncertainty", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000047/project");
+  const f = fixture();
+  const abort = new AbortController();
+  f.cdp.onInsert = () => abort.abort(new Error("cancel after Project insertion"));
+  f.cdp.projectInsertError = new Error("ambiguous Project insertion failure");
+
+  await assert.rejects(
+    () => f.executor.execute(
+      { kind: "PROJECT", projectLocator },
+      "synthetic prompt",
+      abort.signal,
+    ),
+    TurnStateUncertainError,
+  );
+  assert.equal(f.cdp.projectInsertCalls, 1);
+  assert.equal(f.cdp.events.includes("send-button"), false);
+  await assert.rejects(
+    f.scheduler.schedule("ROUTE", async () => "must-not-run"),
+    TurnStateUncertainError,
+  );
+});
+
+test("post-click Project cancellation latches uncertainty after safe write settlement", async () => {
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000048/project");
+  const conversationLocator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000048/c/conversation",
+  );
+  const now = { value: 0 };
+  const f = fixture({
+    snapshots: [observation("ACTIVE"), observation("FINISHED")],
+    locator: conversationLocator,
+    now,
+    sleep: async (ms) => {
+      now.value += Math.max(ms, 1);
+      abort.abort(new Error("cancel after Project click"));
+    },
+  });
+  const abort = new AbortController();
+
+  await assert.rejects(
+    () => f.executor.execute(
+      { kind: "PROJECT", projectLocator },
+      "synthetic prompt",
+      abort.signal,
+    ),
+    TurnStateUncertainError,
+  );
+  assert.equal(f.cdp.events.filter((event) => event === "send-button").length, 1);
+  assert.equal(f.registry.knownThreads().length, 1);
+  await assert.rejects(
+    f.scheduler.schedule("ROUTE", async () => "must-not-run"),
+    TurnStateUncertainError,
+  );
 });
 
 test("stale queued TURN is rejected before preflight or input mutation", async () => {

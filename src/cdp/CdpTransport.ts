@@ -21,6 +21,7 @@ export interface CdpTurnComposerState {
   readonly eligible: boolean;
   readonly focused: boolean;
   readonly empty: boolean;
+  readonly backendDOMNodeId?: number;
 }
 
 export interface CdpResponseRenderBaseline {
@@ -87,8 +88,21 @@ export interface CdpTurnTransportSession extends CdpTransportSession {
   getTurnObservation(handle: CdpTurnObservationHandle): CdpTurnObservationSnapshot;
   releaseTurnObservation(handle: CdpTurnObservationHandle): void;
   insertText(text: string): Promise<void>;
+  insertTextIntoProjectComposer?(
+    text: string,
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    signal?: AbortSignal,
+  ): Promise<number>;
   dispatchEnterKeyDown(): Promise<void>;
   dispatchEnterKeyUp(): Promise<void>;
+  clickTurnSendButton?(
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    formBackendDOMNodeId: number,
+    expectedText: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
   getCurrentConversationLocator(): Promise<ConversationLocator | null>;
 }
 

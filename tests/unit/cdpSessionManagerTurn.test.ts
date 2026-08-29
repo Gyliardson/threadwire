@@ -14,6 +14,7 @@ import {
   RuntimeGenerationChangedError,
 } from "../../src/domain/errors.js";
 import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { createProjectLocator } from "../../src/domain/ProjectIdentity.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../../src/readiness/types.js";
 
 const config = { cdpHost: "127.0.0.1" as const, cdpPort: 9223 };
@@ -97,12 +98,32 @@ class FakeTurnSession implements CdpTurnTransportSession {
     this.events.push("insert");
   }
 
+  public async insertTextIntoProjectComposer(
+    _text: string,
+    projectLocator: import("../../src/domain/ProjectIdentity.js").ProjectLocator,
+    backendDOMNodeId: number,
+  ): Promise<number> {
+    this.events.push(`project-insert:${projectLocator.endsWith("g-p-00000000000000000000000000000001/project")}:${backendDOMNodeId}`);
+    return 601;
+  }
+
   public async dispatchEnterKeyDown(): Promise<void> {
     this.events.push("down");
   }
 
   public async dispatchEnterKeyUp(): Promise<void> {
     this.events.push("up");
+  }
+
+  public async clickTurnSendButton(
+    projectLocator: import("../../src/domain/ProjectIdentity.js").ProjectLocator,
+    backendDOMNodeId: number,
+    _formBackendDOMNodeId: number,
+    expectedText: string,
+  ): Promise<void> {
+    this.events.push(
+      `click:${projectLocator.endsWith("g-p-00000000000000000000000000000001/project")}:${backendDOMNodeId}:${expectedText === "PROJECT_PROMPT_SECRET"}`,
+    );
   }
 
   public async getCurrentConversationLocator() {
@@ -151,8 +172,16 @@ test("manager delegates typed M5 primitives only for the scheduler-provided curr
   });
   const handle = manager.armTurnObservation(lease);
   await manager.insertText("PROMPT_TEXT_SECRET", lease);
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000001/project");
+  await manager.insertTextIntoProjectComposer(
+    "PROJECT_PROMPT_SECRET",
+    projectLocator,
+    101,
+    lease,
+  );
   await manager.dispatchEnterKeyDown(lease);
   await manager.dispatchEnterKeyUp(lease);
+  await manager.clickTurnSendButton(projectLocator, 101, 601, "PROJECT_PROMPT_SECRET", lease);
   assert.equal(manager.getTurnObservation(handle, lease).write?.lifecycle, "ACTIVE");
   assert.equal(await manager.getCurrentConversationLocator(lease), locator);
   manager.releaseTurnObservation(handle);
@@ -162,12 +191,39 @@ test("manager delegates typed M5 primitives only for the scheduler-provided curr
     "composer",
     "arm",
     "insert",
+    "project-insert:true:101",
     "down",
     "up",
+    "click:true:101:true",
     "observe",
     "locator",
     "release",
   ]);
+});
+
+test("stale runtime prevents Project send-button delegation", async () => {
+  const runtime = createRuntime();
+  const transport = new Transport();
+  const manager = new CdpSessionManager(config, runtime, {
+    discovery: new Discovery(),
+    transport,
+    attachTimeoutMs: 100,
+  });
+  await manager.connect();
+  const oldLease = runtime.getCurrentRuntimeLease();
+  runtime.observe({ pid: 200, creationTime: "runtime-b" });
+
+  await assert.rejects(
+    () => manager.clickTurnSendButton(
+      createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000001/project"),
+      101,
+      601,
+      "PROJECT_PROMPT_SECRET",
+      oldLease,
+    ),
+    RuntimeGenerationChangedError,
+  );
+  assert.equal(transport.session.events.some((event) => event.startsWith("click:")), false);
 });
 
 test("runtime replacement before input rejects without invoking the old session mutation", async () => {

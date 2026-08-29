@@ -10,6 +10,7 @@ import {
   FreshConversationNotCreatedError,
   OperationAbortedError,
   OperationTimeoutError,
+  ProjectConversationNotCreatedError,
   RuntimeGenerationChangedError,
   ResponseParseFailedError,
   ResponseStreamFailedError,
@@ -19,11 +20,20 @@ import {
   TurnStateUncertainError,
   TurnWriteFailedError,
 } from "../domain/errors.js";
-import { ConversationLocator } from "../domain/ThreadIdentity.js";
+import {
+  ConversationLocator,
+  conversationBelongsToProject,
+  isUnscopedConversationLocator,
+} from "../domain/ThreadIdentity.js";
 import { RouteExpectation } from "../readiness/types.js";
 import { NormalizedResponseStreamEvent } from "../response/types.js";
 import { OperationScheduler } from "../routing/OperationScheduler.js";
-import { ThreadRegistry } from "../routing/ThreadRegistry.js";
+import {
+  ProvisionalThreadRegistrationResult,
+  ProvisionalThreadRegistrationToken,
+  ThreadRegistrationResult,
+  ThreadRegistry,
+} from "../routing/ThreadRegistry.js";
 import { delay, throwIfAborted, withTimeout } from "../utils/timeout.js";
 import {
   ExistingTurnResult,
@@ -57,11 +67,17 @@ export interface TurnExecutorOptions {
 
 interface ResponseDeliveryState {
   readonly listener: TurnResponseEventListener;
+  deliveryDeferred: boolean;
   semanticCompleted: boolean;
   finalized: boolean;
   terminalError: ThreadwireError | null;
   discarded: boolean;
   accumulatedText: string;
+}
+
+interface PendingProjectCompletion {
+  readonly lease: RuntimeLease;
+  readonly transaction: ProvisionalThreadRegistrationToken;
 }
 
 function positiveFinite(value: number, name: string): number {
@@ -106,6 +122,7 @@ function responseErrorForFailure(failure: CdpResponseStreamFailureKind | null): 
 }
 
 export class TurnExecutor {
+  private readonly pendingProjectCompletions = new WeakMap<TurnResult, PendingProjectCompletion>();
   private readonly commandTimeoutMs: number;
   private readonly writeObservationTimeoutMs: number;
   private readonly writeSettlementTimeoutMs: number;
@@ -175,6 +192,24 @@ export class TurnExecutor {
     return await this.executeInternal(target, text, onResponseEvent, signal);
   }
 
+  public confirmCompletedTurn(result: TurnResult): void {
+    const pending = this.pendingProjectCompletions.get(result);
+    if (pending === undefined) return;
+    this.pendingProjectCompletions.delete(result);
+    this.registry.commitProvisional(pending.transaction);
+  }
+
+  public rollbackCompletedTurn(result: TurnResult): void {
+    const pending = this.pendingProjectCompletions.get(result);
+    if (pending === undefined) {
+      return;
+    }
+    this.pendingProjectCompletions.delete(result);
+    if (this.registry.rollbackProvisional(pending.transaction)) {
+      this.scheduler.markRuntimeMutationStateUncertain(pending.lease);
+    }
+  }
+
   private async executeInternal(
     target: TurnTarget,
     text: string,
@@ -201,6 +236,7 @@ export class TurnExecutor {
     responseListener: TurnResponseEventListener | undefined,
   ): Promise<TurnResult> {
     const expectedRoute = this.resolveExpectedRoute(target);
+    let projectComposerBackendDOMNodeId: number | null = null;
 
     try {
       await this.preflight.waitForTurnComposer(expectedRoute, lease, signal);
@@ -220,6 +256,19 @@ export class TurnExecutor {
           typeof this.cdp.discardTurnResponse !== "function")
       ) {
         throw new ResponseStreamUnavailableError();
+      }
+      if (target.kind === "PROJECT") {
+        if (
+          typeof this.cdp.insertTextIntoProjectComposer !== "function" ||
+          typeof this.cdp.clickTurnSendButton !== "function"
+        ) {
+          throw new TurnInputFailedError();
+        }
+        const backendDOMNodeId = composer.backendDOMNodeId;
+        if (!Number.isSafeInteger(backendDOMNodeId) || backendDOMNodeId === undefined || backendDOMNodeId <= 0) {
+          throw new TurnInputFailedError();
+        }
+        projectComposerBackendDOMNodeId = backendDOMNodeId;
       }
     } catch (error) {
       if (error instanceof ResponseStreamUnavailableError) {
@@ -241,6 +290,7 @@ export class TurnExecutor {
     let responseState: ResponseDeliveryState | null = null;
     let committed = false;
     let callerCancelled = false;
+    let projectComposerFormBackendDOMNodeId: number | null = null;
     const onAbort = (): void => {
       if (committed) {
         callerCancelled = true;
@@ -255,6 +305,7 @@ export class TurnExecutor {
         this.assertNoObservedPreSubmitWrite(observation, lease);
         responseState = {
           listener: responseListener,
+          deliveryDeferred: target.kind === "PROJECT",
           semanticCompleted: false,
           finalized: false,
           terminalError: null,
@@ -266,14 +317,32 @@ export class TurnExecutor {
       throwIfAborted(signal);
 
       try {
-        await withTimeout(
-          async () => await this.cdp.insertText(text, lease),
-          this.commandTimeoutMs,
-          { message: "Timed out waiting for the CDP input command." },
-        );
+        if (target.kind === "PROJECT") {
+          projectComposerFormBackendDOMNodeId = await withTimeout(
+            async (commandSignal) => await this.cdp.insertTextIntoProjectComposer!.call(
+              this.cdp,
+              text,
+                target.projectLocator,
+                projectComposerBackendDOMNodeId!,
+                lease,
+              commandSignal,
+            ),
+            this.commandTimeoutMs,
+            { message: "Timed out waiting for the Project input command." },
+          );
+        } else {
+          await withTimeout(
+            async () => await this.cdp.insertText(text, lease),
+            this.commandTimeoutMs,
+            { message: "Timed out waiting for the CDP input command." },
+          );
+        }
       } catch (error) {
         if (error instanceof RuntimeGenerationChangedError) {
           throw error;
+        }
+        if (target.kind === "PROJECT") {
+          this.failClosed(lease, error);
         }
         if (error instanceof CdpDisconnectedError || error instanceof OperationTimeoutError) {
           this.failClosed(lease, error);
@@ -282,33 +351,60 @@ export class TurnExecutor {
         throw new TurnInputFailedError();
       }
 
-      this.assertNoObservedPreSubmitWrite(observation, lease);
+      this.assertNoObservedPreSubmitWrite(observation, lease, target.kind === "PROJECT");
+      if (target.kind === "PROJECT" && signal?.aborted) {
+        this.failClosed(lease, operationAborted(signal));
+      }
       throwIfAborted(signal);
 
       committed = true;
       callerCancelled = signal?.aborted ?? false;
 
-      let keyDownAccepted = false;
-      try {
-        await withTimeout(
-          async () => await this.cdp.dispatchEnterKeyDown(lease),
-          this.commandTimeoutMs,
-          { message: "Timed out waiting for Enter keyDown." },
-        );
-        keyDownAccepted = true;
-      } catch (error) {
-        this.rethrowPostCommitCommand(error, lease);
-      }
-
-      if (keyDownAccepted) {
+      if (target.kind === "PROJECT") {
         try {
           await withTimeout(
-            async () => await this.cdp.dispatchEnterKeyUp(lease),
+            async (commandSignal) =>
+              await this.cdp.clickTurnSendButton!.call(
+                this.cdp,
+                target.projectLocator,
+                projectComposerBackendDOMNodeId!,
+                projectComposerFormBackendDOMNodeId!,
+                text,
+                lease,
+                commandSignal,
+              ),
             this.commandTimeoutMs,
-            { message: "Timed out waiting for Enter keyUp." },
+            { message: "Timed out waiting for the Project turn send control." },
           );
         } catch (error) {
+          if (error instanceof RuntimeGenerationChangedError) {
+            throw error;
+          }
+          this.failClosed(lease, error);
+        }
+      } else {
+        let keyDownAccepted = false;
+        try {
+          await withTimeout(
+            async () => await this.cdp.dispatchEnterKeyDown(lease),
+            this.commandTimeoutMs,
+            { message: "Timed out waiting for Enter keyDown." },
+          );
+          keyDownAccepted = true;
+        } catch (error) {
           this.rethrowPostCommitCommand(error, lease);
+        }
+
+        if (keyDownAccepted) {
+          try {
+            await withTimeout(
+              async () => await this.cdp.dispatchEnterKeyUp(lease),
+              this.commandTimeoutMs,
+              { message: "Timed out waiting for Enter keyUp." },
+            );
+          } catch (error) {
+            this.rethrowPostCommitCommand(error, lease);
+          }
         }
       }
 
@@ -383,7 +479,7 @@ export class TurnExecutor {
           );
         }
       } else if (write.lifecycle === "FAILED") {
-        throw new TurnWriteFailedError();
+        this.throwWriteFailed(target, lease);
       } else if (target.kind === "THREAD") {
         if (callerCancelled || signal?.aborted) {
           throw operationAborted(signal);
@@ -412,13 +508,27 @@ export class TurnExecutor {
         }) satisfies ExistingTurnResult;
       }
 
-      if (target.kind === "FRESH" && freshLocator === null) {
+      if (target.kind !== "THREAD" && freshLocator === null) {
         try {
           freshLocator = await withTimeout(
             async () => await this.cdp.getCurrentConversationLocator(lease),
             this.commandTimeoutMs,
             { message: "Timed out observing the resulting conversation route." },
           );
+          if (
+            freshLocator !== null &&
+            target.kind === "PROJECT" &&
+            !conversationBelongsToProject(freshLocator, target.projectLocator)
+          ) {
+            freshLocator = null;
+          }
+          if (
+            freshLocator !== null &&
+            target.kind === "FRESH" &&
+            !isUnscopedConversationLocator(freshLocator)
+          ) {
+            freshLocator = null;
+          }
         } catch (error) {
           if (error instanceof RuntimeGenerationChangedError) {
             throw error;
@@ -442,7 +552,7 @@ export class TurnExecutor {
           this.failClosed(lease, new Error("The committed turn observation became inconsistent."));
         }
         if (afterRoute.lifecycle === "FAILED") {
-          throw new TurnWriteFailedError();
+          this.throwWriteFailed(target, lease);
         }
         if (afterRoute.lifecycle === "ACTIVE") {
           if (previousLifecycle !== "ACTIVE") {
@@ -454,13 +564,16 @@ export class TurnExecutor {
         }
       }
 
-      if (target.kind === "FRESH" && freshLocator !== null && write.lifecycle === "ACTIVE") {
+      if (target.kind !== "THREAD" && freshLocator !== null && write.lifecycle === "ACTIVE") {
         await this.sleep(this.pollIntervalMs);
         continue;
       }
 
       callerCancelled ||= signal?.aborted ?? false;
       if (callerCancelled) {
+        if (target.kind === "PROJECT") {
+          this.failClosed(lease, operationAborted(signal));
+        }
         throw operationAborted(signal);
       }
 
@@ -472,6 +585,21 @@ export class TurnExecutor {
             this.commandTimeoutMs,
             { message: "Timed out revalidating the resulting conversation route." },
           );
+          if (
+            currentFreshLocator !== null &&
+            target.kind === "PROJECT" &&
+            (!conversationBelongsToProject(currentFreshLocator, target.projectLocator) ||
+              currentFreshLocator !== freshLocator)
+          ) {
+            currentFreshLocator = null;
+          }
+          if (
+            currentFreshLocator !== null &&
+            target.kind === "FRESH" &&
+            !isUnscopedConversationLocator(currentFreshLocator)
+          ) {
+            currentFreshLocator = null;
+          }
         } catch (error) {
           if (error instanceof RuntimeGenerationChangedError) {
             throw error;
@@ -492,11 +620,14 @@ export class TurnExecutor {
           this.failClosed(lease, new Error("The fresh turn write was not terminal at finalization."));
         }
         if (finalWrite.lifecycle === "FAILED") {
-          throw new TurnWriteFailedError();
+          this.throwWriteFailed(target, lease);
         }
 
         callerCancelled ||= signal?.aborted ?? false;
         if (callerCancelled) {
+          if (target.kind === "PROJECT") {
+            this.failClosed(lease, operationAborted(signal));
+          }
           throw operationAborted(signal);
         }
 
@@ -510,20 +641,65 @@ export class TurnExecutor {
             continue;
           }
 
-          const registration = this.registry.registerWithStatus(currentFreshLocator);
+          const freshRegistration = target.kind === "PROJECT"
+            ? null
+            : this.registry.registerWithStatus(currentFreshLocator);
+          if (target.kind === "PROJECT" && this.registry.hasLocator(currentFreshLocator)) {
+            this.failClosed(lease, new ProjectConversationNotCreatedError());
+          }
           if (responseState?.terminalError !== null && responseState?.terminalError !== undefined) {
+            if (target.kind === "PROJECT") {
+              this.failClosed(lease, responseState.terminalError);
+            }
             throw responseState.terminalError;
           }
           if (responseState !== null) {
-            const finalized = this.finalizeResponseDelivery(responseState);
+            const projectRegistration: { value: ProvisionalThreadRegistrationResult | null } = {
+              value: null,
+            };
+            const finalized = this.finalizeResponseDelivery(
+              responseState,
+              target.kind === "PROJECT"
+                ? () => {
+                    if (signal?.aborted) {
+                      this.failClosed(lease, operationAborted(signal));
+                    }
+                    projectRegistration.value = this.reserveProjectConversation(
+                      currentFreshLocator,
+                      lease,
+                    );
+                  }
+                : undefined,
+            );
             if (responseState.terminalError !== null) {
+              if (projectRegistration.value?.created) {
+                this.registry.rollbackProvisional(projectRegistration.value.transaction);
+              }
+              if (target.kind === "PROJECT") {
+                this.failClosed(lease, responseState.terminalError);
+              }
               throw responseState.terminalError;
             }
             if (!finalized) {
               await this.sleep(this.pollIntervalMs);
               continue;
             }
+            if (projectRegistration.value !== null) {
+              if (!projectRegistration.value.created) {
+                this.failClosed(lease, new ProjectConversationNotCreatedError());
+              }
+              return this.createPendingProjectResult(projectRegistration.value, lease);
+            }
           }
+
+          if (target.kind === "PROJECT" && responseState === null && signal?.aborted) {
+            this.failClosed(lease, operationAborted(signal));
+          }
+
+          const registration = freshRegistration ?? this.registerProjectConversation(
+            currentFreshLocator,
+            lease,
+          );
 
           if (registration.created) {
             return Object.freeze({
@@ -540,10 +716,7 @@ export class TurnExecutor {
         }
 
         if (this.clock() - writeObservedAt >= this.freshConversationTimeoutMs) {
-          throw new FreshConversationNotCreatedError(
-            undefined,
-            lastFreshRouteError === null ? undefined : { cause: lastFreshRouteError },
-          );
+          this.throwConversationNotCreated(target, lastFreshRouteError, lease);
         }
 
         await this.sleep(this.pollIntervalMs);
@@ -551,10 +724,7 @@ export class TurnExecutor {
       }
 
       if (write.lifecycle === "FINISHED" && now - writeObservedAt >= this.freshConversationTimeoutMs) {
-        throw new FreshConversationNotCreatedError(
-          undefined,
-          lastFreshRouteError === null ? undefined : { cause: lastFreshRouteError },
-        );
+        this.throwConversationNotCreated(target, lastFreshRouteError, lease);
       }
 
       await this.sleep(this.pollIntervalMs);
@@ -638,19 +808,24 @@ export class TurnExecutor {
           this.discardResponse(state, observation, lease, false);
           return;
         }
-        try {
-          state.listener(event);
-        } catch {
-          state.terminalError ??= new ResponseStreamFailedError();
-          this.discardResponse(state, observation, lease, false);
-          return;
+        if (!state.deliveryDeferred) {
+          try {
+            state.listener(event);
+          } catch {
+            state.terminalError ??= new ResponseStreamFailedError();
+            this.discardResponse(state, observation, lease, false);
+            return;
+          }
         }
         state.accumulatedText += event.text;
       }
     }
   }
 
-  private finalizeResponseDelivery(state: ResponseDeliveryState): boolean {
+  private finalizeResponseDelivery(
+    state: ResponseDeliveryState,
+    beforeCompleted?: () => void,
+  ): boolean {
     if (state.finalized) {
       return true;
     }
@@ -663,12 +838,27 @@ export class TurnExecutor {
       return false;
     }
 
+    if (state.deliveryDeferred) {
+      try {
+        state.listener(Object.freeze({
+          type: "TEXT_DELTA" as const,
+          text: state.accumulatedText,
+        }));
+      } catch {
+        state.terminalError = new ResponseStreamFailedError();
+        return false;
+      }
+      state.deliveryDeferred = false;
+    }
+
     try {
       state.listener(Object.freeze({ type: "FINAL_TEXT" as const, text: state.accumulatedText }));
     } catch {
       state.terminalError = new ResponseStreamFailedError();
       return false;
     }
+
+    beforeCompleted?.();
 
     try {
       state.listener(Object.freeze({ type: "COMPLETED" as const }));
@@ -737,12 +927,13 @@ export class TurnExecutor {
   private assertNoObservedPreSubmitWrite(
     observation: CdpTurnObservationHandle,
     lease: RuntimeLease,
+    failClosedOnAnyWrite = false,
   ): void {
     const snapshot = this.readTurnObservation(observation, lease);
     if (snapshot.write === null) {
       return;
     }
-    if (snapshot.write.lifecycle === "ACTIVE") {
+    if (failClosedOnAnyWrite || snapshot.write.lifecycle === "ACTIVE") {
       this.failClosed(
         lease,
         new Error("A conversation write was observed before the intended submission boundary."),
@@ -772,7 +963,78 @@ export class TurnExecutor {
     if (target.kind === "FRESH") {
       return { kind: "FRESH_ROOT" };
     }
+    if (target.kind === "PROJECT") {
+      return { kind: "PROJECT_ROOT", locator: target.projectLocator };
+    }
     throw new TurnInputFailedError();
+  }
+
+  private throwConversationNotCreated(
+    target: TurnTarget,
+    cause: Error | null,
+    lease: RuntimeLease,
+  ): never {
+    const options = cause === null ? undefined : { cause };
+    if (target.kind === "PROJECT") {
+      this.failClosed(lease, new ProjectConversationNotCreatedError(undefined, options));
+    }
+    throw new FreshConversationNotCreatedError(undefined, options);
+  }
+
+  private throwWriteFailed(target: TurnTarget, lease: RuntimeLease): never {
+    const error = new TurnWriteFailedError();
+    if (target.kind === "PROJECT") {
+      this.failClosed(lease, error);
+    }
+    throw error;
+  }
+
+  private registerProjectConversation(
+    locator: ConversationLocator,
+    lease: RuntimeLease,
+  ): ThreadRegistrationResult {
+    let registration: ThreadRegistrationResult;
+    try {
+      registration = this.registry.registerWithStatus(locator);
+    } catch (error) {
+      this.failClosed(lease, error);
+    }
+    if (!registration.created) {
+      this.failClosed(lease, new ProjectConversationNotCreatedError());
+    }
+    return registration;
+  }
+
+  private reserveProjectConversation(
+    locator: ConversationLocator,
+    lease: RuntimeLease,
+  ): ProvisionalThreadRegistrationResult {
+    let registration: ProvisionalThreadRegistrationResult;
+    try {
+      registration = this.registry.reserveProvisionalWithStatus(locator);
+    } catch (error) {
+      this.failClosed(lease, error);
+    }
+    if (!registration.created) {
+      this.failClosed(lease, new ProjectConversationNotCreatedError());
+    }
+    return registration;
+  }
+
+  private createPendingProjectResult(
+    registration: Extract<ProvisionalThreadRegistrationResult, { created: true }>,
+    lease: RuntimeLease,
+  ): FreshTurnResult {
+    const result = Object.freeze({
+      kind: "THREAD" as const,
+      threadHandle: registration.threadHandle,
+      created: true as const,
+    }) satisfies FreshTurnResult;
+    this.pendingProjectCompletions.set(result, Object.freeze({
+      lease,
+      transaction: registration.transaction,
+    }));
+    return result;
   }
 
   private rethrowPreCommit(error: unknown): never {

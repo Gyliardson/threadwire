@@ -11,6 +11,9 @@ import { TurnResult } from "../../src/turn/types.js";
 const HANDLE = "tw_delta_optional" as ThreadHandle;
 
 class DeltaFreeController implements ThreadwireApiController {
+  public confirmTurnCompletion(_result: TurnResult): void {}
+
+  public rollbackTurnCompletion(_result: TurnResult): void {}
   public async health() {
     return { classic: "RUNNING" as const, cdp: "CONNECTED" as const };
   }

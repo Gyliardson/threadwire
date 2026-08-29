@@ -137,6 +137,12 @@ class NoopReadiness implements ConversationReadinessPort {
     _lease: RuntimeLease,
     _signal?: AbortSignal,
   ): Promise<void> {}
+
+  public async waitForProjectRoute(
+    _locator: import("../../src/domain/ProjectIdentity.js").ProjectLocator,
+    _lease: RuntimeLease,
+    _signal?: AbortSignal,
+  ): Promise<void> {}
 }
 
 class NavigateFailingCriClient {

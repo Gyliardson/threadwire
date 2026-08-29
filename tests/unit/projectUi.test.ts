@@ -16,7 +16,7 @@ const target: CdpTargetInfo = {
 };
 
 class FakeProjectCriClient {
-  public frameUrl = "https://chatgpt.com/g/g-p-synthetic/project";
+  public frameUrl = "https://chatgpt.com/g/g-p-00000000000000000000000000000008/project";
   public readonly frameUrls: string[] = [];
   public readonly evaluateCalls: string[] = [];
   public readonly evaluateResults: unknown[] = [];
@@ -94,15 +94,15 @@ async function session(client: FakeProjectCriClient): Promise<ChromeRemoteInterf
 test("project UI uses bounded semantic frontend steps and returns only a validated locator", async () => {
   const client = new FakeProjectCriClient();
   client.frameUrls.push(
-    "https://chatgpt.com/g/g-p-existing/project",
-    "https://chatgpt.com/g/g-p-existing/project",
-    "https://chatgpt.com/g/g-p-synthetic/project",
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000009/project",
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000009/project",
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000008/project",
   );
   client.evaluateResults.push(evaluated(true), evaluated(true), evaluated(true), evaluated(true));
   const connected = await session(client);
   const name = createProjectName("Threadwire Acceptance");
   const locator = await connected.createProjectThroughUi(name);
-  assert.equal(locator, "https://chatgpt.com/g/g-p-synthetic/project");
+  assert.equal(locator, "https://chatgpt.com/g/g-p-00000000000000000000000000000008/project");
   assert.deepEqual(client.insertedText, [name]);
   assert.equal(client.evaluateCalls.length, 4);
   const source = client.evaluateCalls.join("\n");

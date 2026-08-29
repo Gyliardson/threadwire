@@ -3,10 +3,11 @@ import test from "node:test";
 import { RuntimeGenerationTracker } from "../../src/domain/RuntimeGeneration.js";
 import {
   ProjectCreationFailedError,
+  ProjectNotFoundError,
   RuntimeGenerationChangedError,
   TurnStateUncertainError,
 } from "../../src/domain/errors.js";
-import { ProjectLocator, createProjectLocator } from "../../src/domain/ProjectIdentity.js";
+import { ProjectHandle, ProjectLocator, createProjectLocator } from "../../src/domain/ProjectIdentity.js";
 import { ProjectCreator } from "../../src/project/ProjectCreator.js";
 import { ProjectRegistry } from "../../src/project/ProjectRegistry.js";
 import { OperationScheduler } from "../../src/routing/OperationScheduler.js";
@@ -27,14 +28,14 @@ test("project creator schedules UI mutation and returns only an opaque handle", 
       async createProjectThroughUi(name, lease) {
         assert.equal(name, "Threadwire Acceptance");
         tracker.assertRuntimeLeaseCurrent(lease);
-        return createProjectLocator("https://chatgpt.com/g/g-p-synthetic/project");
+        return createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000010/project");
       },
     },
   );
 
   const result = await creator.create("Threadwire Acceptance");
   assert.deepEqual(result, { projectHandle: "prj_project-test" });
-  assert.equal(JSON.stringify(result).includes("g-p-synthetic"), false);
+  assert.equal(JSON.stringify(result).includes("g-p-00000000000000000000000000000010"), false);
 });
 
 test("project mutation waits behind TURN on the shared scheduler", async () => {
@@ -52,7 +53,7 @@ test("project mutation waits behind TURN on the shared scheduler", async () => {
   const creator = new ProjectCreator(registry, scheduler, {
     async createProjectThroughUi() {
       events.push("project");
-      return createProjectLocator("https://chatgpt.com/g/g-p-serialized/project");
+      return createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000011/project");
     },
   });
   const project = creator.create("Serialized Project");
@@ -74,7 +75,7 @@ test("queued project rejects stale runtime before UI mutation", async () => {
   const creator = new ProjectCreator(registry, scheduler, {
     async createProjectThroughUi() {
       uiCalls += 1;
-      return createProjectLocator("https://chatgpt.com/g/g-p-stale/project");
+      return createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000012/project");
     },
   });
   const project = creator.create("Stale Project");
@@ -88,8 +89,8 @@ test("queued project rejects stale runtime before UI mutation", async () => {
 test("project registry retries collisions and never enumerates locators", async () => {
   const values = ["same", "same", "different"];
   const registry = new ProjectRegistry({ handleFactory: () => values.shift() ?? "fallback" });
-  const first = registry.register(createProjectLocator("https://chatgpt.com/g/g-p-one/project"));
-  const second = registry.register(createProjectLocator("https://chatgpt.com/g/g-p-two/project"));
+  const first = registry.register(createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000013/project"));
+  const second = registry.register(createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000014/project"));
   assert.equal(first, "prj_same");
   assert.equal(second, "prj_different");
   assert.equal("knownProjects" in registry, false);
@@ -100,14 +101,31 @@ test("project registry returns a stable handle for a repeated validated locator"
   const registry = new ProjectRegistry({
     handleFactory: () => `stable-${++allocations}`,
   });
-  const locator = createProjectLocator("https://chatgpt.com/g/g-p-stable/project");
+  const locator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000015/project");
 
   assert.equal(registry.register(locator), "prj_stable-1");
   assert.equal(registry.register(locator), "prj_stable-1");
   assert.equal(allocations, 1);
   assert.throws(
-    () => registry.register("https://example.invalid/g/g-p-stable/project" as ProjectLocator),
+    () => registry.register(
+      "https://example.invalid/g/g-p-00000000000000000000000000000015/project" as ProjectLocator,
+    ),
     /Project locator is invalid/,
+  );
+});
+
+test("project registry resolves only known opaque handles without exposing other locators", () => {
+  const registry = new ProjectRegistry({ handleFactory: () => "known-project" });
+  const locator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000016/project");
+  const handle = registry.register(locator);
+
+  assert.equal(registry.resolve(handle), locator);
+  assert.throws(
+    () => registry.resolve("prj_unknown" as ProjectHandle),
+    (error: unknown) =>
+      error instanceof ProjectNotFoundError &&
+      error.code === "PROJECT_NOT_FOUND" &&
+      !error.message.includes("g-p-00000000000000000000000000000016"),
   );
 });
 
@@ -120,7 +138,7 @@ test("invalid project timeout configuration fails before UI mutation", () => {
       {
         async createProjectThroughUi() {
           uiCalls += 1;
-          return createProjectLocator("https://chatgpt.com/g/g-p-never/project");
+          return createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000017/project");
         },
       },
       { timeoutMs: Number.NaN },

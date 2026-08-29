@@ -19,14 +19,21 @@ test("project names reject empty, padded, non-normalized, controlled, and oversi
 });
 
 test("project locator accepts only the observed exact ChatGPT project route", () => {
-  const locator = createProjectLocator("https://chatgpt.com/g/g-p-synthetic_123/project");
-  assert.equal(locator, "https://chatgpt.com/g/g-p-synthetic_123/project");
+  const locator = createProjectLocator(
+    "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project",
+  );
+  assert.equal(
+    locator,
+    "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project",
+  );
   for (const value of [
-    "http://chatgpt.com/g/g-p-synthetic/project",
-    "https://example.com/g/g-p-synthetic/project",
-    "https://chatgpt.com/g/g-p-synthetic/project?secret=1",
-    "https://chatgpt.com/g/g-p-synthetic/project#fragment",
-    "https://chatgpt.com/g/g-p-synthetic/files",
+    "http://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project",
+    "https://example.com/g/g-p-0123456789abcdef0123456789abcdef/project",
+    "https://chatgpt.com/g/g-p-synthetic/project",
+    "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef-suffix/project",
+    "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project?secret=1",
+    "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project#fragment",
+    "https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/files",
   ]) {
     assert.throws(() => createProjectLocator(value), ProjectLocatorInvalidError);
   }

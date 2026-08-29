@@ -14,7 +14,7 @@ import {
   ThreadwireController,
 } from "../controller/ThreadwireController.js";
 import { ThreadHandle } from "../domain/ThreadIdentity.js";
-import { createProjectName } from "../domain/ProjectIdentity.js";
+import { ProjectHandle, createProjectName } from "../domain/ProjectIdentity.js";
 import { ThreadwireError } from "../domain/errors.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import { TurnResult } from "../turn/types.js";
@@ -34,6 +34,8 @@ export interface ThreadwireApiController {
     listener: (event: ResponseStreamEvent) => void,
     signal?: AbortSignal,
   ): Promise<TurnResult>;
+  confirmTurnCompletion(result: TurnResult): void;
+  rollbackTurnCompletion(result: TurnResult): void;
   createProject(
     request: ControllerCreateProjectRequest,
     signal?: AbortSignal,
@@ -91,6 +93,13 @@ function parseThreadHandle(value: unknown): ThreadHandle {
   return value as ThreadHandle;
 }
 
+function parseProjectHandle(value: unknown): ProjectHandle {
+  if (typeof value !== "string" || !/^prj_[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new ApiRequestError("API_REQUEST_INVALID", 400);
+  }
+  return value as ProjectHandle;
+}
+
 function parseTurnRequest(value: unknown, maxPromptBytes: number): ControllerTurnRequest {
   const body = asRecord(value);
   if (body === null || !hasExactKeys(body, ["target", "prompt"])) {
@@ -128,6 +137,18 @@ function parseTurnRequest(value: unknown, maxPromptBytes: number): ControllerTur
       prompt: body.prompt,
     });
   }
+  if (target.kind === "PROJECT") {
+    if (!hasExactKeys(target, ["kind", "projectHandle"])) {
+      throw new ApiRequestError("API_REQUEST_INVALID", 400);
+    }
+    return Object.freeze({
+      target: Object.freeze({
+        kind: "PROJECT" as const,
+        projectHandle: parseProjectHandle(target.projectHandle),
+      }),
+      prompt: body.prompt,
+    });
+  }
   throw new ApiRequestError("API_REQUEST_INVALID", 400);
 }
 
@@ -147,7 +168,10 @@ function preStreamStatus(error: unknown): number {
   if (error instanceof ControllerBusyError) {
     return 429;
   }
-  if (error instanceof ThreadwireError && error.code === "THREAD_NOT_FOUND") {
+  if (
+    error instanceof ThreadwireError &&
+    (error.code === "THREAD_NOT_FOUND" || error.code === "PROJECT_NOT_FOUND")
+  ) {
     return 404;
   }
   if (error instanceof ThreadwireError) {
@@ -417,18 +441,6 @@ export class ThreadwireHttpServer {
       return;
     }
 
-    let body: ControllerTurnRequest;
-    try {
-      body = parseTurnRequest(JSON.parse(await this.readBody(request)) as unknown, this.maxPromptBytes);
-    } catch (error) {
-      const apiError =
-        error instanceof ApiRequestError
-          ? error
-          : new ApiRequestError("API_REQUEST_INVALID", 400);
-      this.writeJson(response, apiError.statusCode, serializePublicError(apiError));
-      return;
-    }
-
     const abortController = new AbortController();
     const onRequestAborted = (): void => abortController.abort();
     const onResponseClose = (): void => {
@@ -439,8 +451,38 @@ export class ThreadwireHttpServer {
     request.once("aborted", onRequestAborted);
     response.once("close", onResponseClose);
 
+    let body: ControllerTurnRequest;
+    try {
+      body = parseTurnRequest(JSON.parse(await this.readBody(request)) as unknown, this.maxPromptBytes);
+    } catch (error) {
+      request.removeListener("aborted", onRequestAborted);
+      response.removeListener("close", onResponseClose);
+      const apiError =
+        error instanceof ApiRequestError
+          ? error
+          : new ApiRequestError("API_REQUEST_INVALID", 400);
+      if (!response.destroyed && !response.writableEnded) {
+        this.writeJson(response, apiError.statusCode, serializePublicError(apiError));
+      }
+      return;
+    }
+    if (abortController.signal.aborted || response.destroyed || response.writableEnded) {
+      request.removeListener("aborted", onRequestAborted);
+      response.removeListener("close", onResponseClose);
+      return;
+    }
+
     let domainCompleted = false;
     let transportOpen = true;
+    let streamOpened = false;
+    let pendingEventBytes = 0;
+    const pendingEvents: Array<Exclude<ResponseStreamEvent, { readonly type: "COMPLETED" }>> = [];
+    const deliverEvent = (event: Exclude<ResponseStreamEvent, { readonly type: "COMPLETED" }>): void => {
+      if (!this.writeSseEvent(response, event.type, { text: event.text })) {
+        transportOpen = false;
+        abortController.abort();
+      }
+    };
     const listener = (event: ResponseStreamEvent): void => {
       if (!transportOpen || response.destroyed || response.writableEnded) {
         return;
@@ -449,10 +491,18 @@ export class ThreadwireHttpServer {
         domainCompleted = true;
         return;
       }
-      if (!this.writeSseEvent(response, event.type, { text: event.text })) {
-        transportOpen = false;
-        abortController.abort();
+      if (!streamOpened) {
+        const eventBytes = this.sseEventByteLength(event.type, { text: event.text });
+        if (pendingEventBytes + eventBytes > this.maxSseBufferBytes) {
+          transportOpen = false;
+          abortController.abort();
+          return;
+        }
+        pendingEventBytes += eventBytes;
+        pendingEvents.push(event);
+        return;
       }
+      deliverEvent(event);
     };
 
     let turnPromise: Promise<TurnResult>;
@@ -461,13 +511,32 @@ export class ThreadwireHttpServer {
     } catch (error) {
       request.removeListener("aborted", onRequestAborted);
       response.removeListener("close", onResponseClose);
-      this.writeJson(response, preStreamStatus(error), serializePublicError(error));
+      if (!response.destroyed && !response.writableEnded) {
+        this.writeJson(response, preStreamStatus(error), serializePublicError(error));
+      }
       return;
     }
 
     this.openSse(response);
+    streamOpened = true;
+    for (const event of pendingEvents) {
+      if (!transportOpen) {
+        break;
+      }
+      deliverEvent(event);
+    }
+    pendingEvents.length = 0;
+    let result: TurnResult | null = null;
+    let completionSettled = false;
+    const rollbackCompletion = (): void => {
+      if (result === null || completionSettled) {
+        return;
+      }
+      completionSettled = true;
+      this.controller.rollbackTurnCompletion(result);
+    };
     try {
-      const result = await turnPromise;
+      result = await turnPromise;
       if (!domainCompleted) {
         throw new Error("Turn completed without the public completion boundary.");
       }
@@ -477,11 +546,22 @@ export class ThreadwireHttpServer {
           newlyRegistered: result.created,
         });
       }
+      if (transportOpen && !response.destroyed && !response.writableEnded) {
+        transportOpen = await this.finishSseResponse(response);
+      }
+      if (transportOpen) {
+        this.controller.confirmTurnCompletion(result);
+        completionSettled = true;
+      } else {
+        rollbackCompletion();
+      }
     } catch (error) {
+      rollbackCompletion();
       if (transportOpen && !response.destroyed && !response.writableEnded) {
         this.writeSseEvent(response, "ERROR", serializePublicError(error));
       }
     } finally {
+      rollbackCompletion();
       request.removeListener("aborted", onRequestAborted);
       response.removeListener("close", onResponseClose);
       if (!response.destroyed && !response.writableEnded) {
@@ -525,12 +605,44 @@ export class ThreadwireHttpServer {
 
   private writeSseEvent(response: ServerResponse, event: string, data: unknown): boolean {
     const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    const bytes = Buffer.byteLength(frame, "utf8");
+    const bytes = this.sseEventByteLength(event, data);
     if (response.writableLength + bytes > this.maxSseBufferBytes) {
       return false;
     }
     response.write(frame, "utf8");
     return true;
+  }
+
+  private async finishSseResponse(response: ServerResponse): Promise<boolean> {
+    if (response.destroyed || response.writableEnded) {
+      return false;
+    }
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (delivered: boolean): void => {
+        if (settled) return;
+        settled = true;
+        response.removeListener("finish", onFinish);
+        response.removeListener("close", onClose);
+        response.removeListener("error", onError);
+        resolve(delivered);
+      };
+      const onFinish = (): void => settle(true);
+      const onClose = (): void => settle(false);
+      const onError = (): void => settle(false);
+      response.once("finish", onFinish);
+      response.once("close", onClose);
+      response.once("error", onError);
+      try {
+        response.end();
+      } catch {
+        settle(false);
+      }
+    });
+  }
+
+  private sseEventByteLength(event: string, data: unknown): number {
+    return Buffer.byteLength(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`, "utf8");
   }
 
   private writeJson(response: ServerResponse, statusCode: number, body: unknown): void {
