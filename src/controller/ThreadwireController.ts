@@ -101,9 +101,16 @@ export interface ThreadwireControllerOptions {
 
 export const DEFAULT_PROVISIONAL_THREAD_WAIT_TIMEOUT_MS = 15_000;
 
+interface PendingCompletionBarrier {
+  readonly promise: Promise<boolean>;
+  readonly settle: (committed: boolean) => void;
+}
+
 export class ThreadwireController {
   private readonly turnQueue: ControllerTurnQueue;
   private readonly provisionalThreadWaitTimeoutMs: number;
+  private pendingCompletionBarrier: PendingCompletionBarrier | null = null;
+  private readonly pendingCompletionResults = new WeakSet<TurnResult>();
 
   public constructor(
     private readonly dependencies: ThreadwireControllerDependencies,
@@ -161,6 +168,7 @@ export class ThreadwireController {
             },
           );
         }
+        await this.awaitPendingCompletion(signal);
         await this.dependencies.runtime.ensureStarted(signal);
         await this.dependencies.cdp.connect(signal);
         this.dependencies.cdp.assertCurrentRuntime();
@@ -177,12 +185,18 @@ export class ThreadwireController {
           target = { kind: "PROJECT", projectLocator: projectLocator! };
         }
 
-        return await this.dependencies.executor.executeStreaming(
+        const turnResult = await this.dependencies.executor.executeStreaming(
           target,
           request.prompt,
           listener,
           signal,
         );
+
+        if (request.target.kind === "PROJECT" && turnResult.created) {
+          this.installCompletionBarrier(turnResult);
+        }
+
+        return turnResult;
       },
       signal,
     );
@@ -190,10 +204,12 @@ export class ThreadwireController {
 
   public confirmTurnCompletion(result: TurnResult): void {
     this.dependencies.executor.confirmCompletedTurn?.(result);
+    this.settleCompletionBarrier(result, true);
   }
 
   public rollbackTurnCompletion(result: TurnResult): void {
     this.dependencies.executor.rollbackCompletedTurn?.(result);
+    this.settleCompletionBarrier(result, false);
   }
 
   public createProject(
@@ -202,6 +218,7 @@ export class ThreadwireController {
   ): Promise<ControllerCreateProjectResult> {
     return this.turnQueue.schedule(
       async () => {
+        await this.awaitPendingCompletion(signal);
         await this.dependencies.runtime.ensureStarted(signal);
         await this.dependencies.cdp.connect(signal);
         this.dependencies.cdp.assertCurrentRuntime();
@@ -213,6 +230,59 @@ export class ThreadwireController {
 
   public async close(): Promise<void> {
     await this.dependencies.cdp.disconnect();
+  }
+
+  private installCompletionBarrier(result: TurnResult): void {
+    let settle!: (committed: boolean) => void;
+    const promise = new Promise<boolean>((resolve) => {
+      settle = resolve;
+    });
+    this.pendingCompletionBarrier = { promise, settle };
+    this.pendingCompletionResults.add(result);
+  }
+
+  private settleCompletionBarrier(result: TurnResult, committed: boolean): void {
+    if (!this.pendingCompletionResults.has(result)) {
+      return;
+    }
+    this.pendingCompletionResults.delete(result);
+    const barrier = this.pendingCompletionBarrier;
+    if (barrier === null) {
+      return;
+    }
+    this.pendingCompletionBarrier = null;
+    barrier.settle(committed);
+  }
+
+  private async awaitPendingCompletion(signal?: AbortSignal): Promise<void> {
+    const barrier = this.pendingCompletionBarrier;
+    if (barrier === null) {
+      return;
+    }
+    const committed = await withTimeout(
+      async (waitSignal) => {
+        const onAbort = (): void => {
+          // Allow the barrier to settle naturally; the timeout/abort will race.
+        };
+        waitSignal.addEventListener("abort", onAbort, { once: true });
+        try {
+          return await barrier.promise;
+        } finally {
+          waitSignal.removeEventListener("abort", onAbort);
+        }
+      },
+      this.provisionalThreadWaitTimeoutMs,
+      {
+        message: "Timed out waiting for Project public-completion settlement.",
+        ...(signal ? { signal } : {}),
+      },
+    );
+    if (!committed) {
+      const { TurnStateUncertainError } = await import("../domain/errors.js");
+      throw new TurnStateUncertainError(
+        "A prior Project public-completion transaction was rolled back.",
+      );
+    }
   }
 }
 
