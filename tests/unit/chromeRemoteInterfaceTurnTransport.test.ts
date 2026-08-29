@@ -341,7 +341,7 @@ test("typed Input primitives preserve insertText then Enter keyDown/keyUp orderi
   assert.equal("streamResourceContent" in session, false);
 });
 
-test("Project root matching and submission use only the unique enabled send-button control", async () => {
+test("Project input defers unique enabled send-button validation until post-insert submission", async () => {
   const { client, session } = await createSession();
   const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
   client.frame.url = projectLocator;
@@ -375,9 +375,13 @@ test("Project root matching and submission use only the unique enabled send-butt
   assert.equal(String(insertCall.functionDeclaration).includes("PROJECT_PROMPT_SECRET"), false);
   assert.equal(JSON.stringify(insertCall.arguments).includes("PROJECT_PROMPT_SECRET"), true);
   assert.equal(clickCall.objectId, "composer-501");
+  assert.equal(
+    String(insertCall.functionDeclaration).includes('button[data-testid="send-button"]'),
+    false,
+  );
+  assert.equal(String(insertCall.functionDeclaration).includes("button.form === form"), false);
   assert.equal(String(insertCall.functionDeclaration).includes("button.disabled"), false);
   assert.equal(String(insertCall.functionDeclaration).includes("aria-disabled"), false);
-  assert.match(String(insertCall.functionDeclaration), /button\.form === form/);
   assert.match(String(clickCall.functionDeclaration), /this !== document\.activeElement/);
   assert.match(String(clickCall.functionDeclaration), /button\[data-testid="send-button"\]/);
   assert.match(String(clickCall.functionDeclaration), /matches\.length !== 1/);
@@ -409,9 +413,41 @@ test("Project pre-insert rejection occurs before any prompt mutation expression"
   );
   const declaration = String(client.callFunctionCalls[0]!.functionDeclaration);
   assert.ok(declaration.indexOf("location.origin") < declaration.indexOf("setter.call"));
-  assert.ok(declaration.indexOf("matches.length !== 1") < declaration.indexOf("setter.call"));
-  assert.ok(declaration.indexOf("button.form === form") >= 0);
-  assert.ok(declaration.indexOf("button.form === form") < declaration.indexOf("setter.call"));
+  assert.ok(
+    declaration.indexOf("const form = this.closest('form')") < declaration.indexOf("setter.call"),
+  );
+  assert.ok(declaration.indexOf("typeof text !== 'string'") < declaration.indexOf("setter.call"));
+  assert.equal(declaration.includes('button[data-testid="send-button"]'), false);
+});
+
+test("Project input may materialize Send after text while post-insert validation remains fail-closed", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  client.frame.url = projectLocator;
+  client.callFunctionResults.push({ objectId: "form-601" }, false);
+
+  const formBackendDOMNodeId = await session.insertTextIntoProjectComposer!(
+    "PROJECT_PROMPT_SECRET",
+    projectLocator,
+    501,
+  );
+  assert.equal(formBackendDOMNodeId, 601);
+  await assert.rejects(
+    () =>
+      session.clickTurnSendButton!(
+        projectLocator,
+        501,
+        formBackendDOMNodeId,
+        "PROJECT_PROMPT_SECRET",
+      ),
+    /unique enabled turn send control was unavailable/,
+  );
+
+  const insertDeclaration = String(client.callFunctionCalls[0]!.functionDeclaration);
+  const sendDeclaration = String(client.callFunctionCalls[1]!.functionDeclaration);
+  assert.equal(insertDeclaration.includes('button[data-testid="send-button"]'), false);
+  assert.equal(sendDeclaration.includes('button[data-testid="send-button"]'), true);
+  assert.match(sendDeclaration, /matches\.length !== 1/);
 });
 
 test("Project send control refuses route or composer mismatch without reporting success", async () => {

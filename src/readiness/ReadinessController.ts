@@ -170,6 +170,34 @@ export class ReadinessController {
     }
   }
 
+  public async isProjectRouteCurrent(
+    projectLocator: ProjectLocator,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    this.freshReadinessProof = null;
+    throwIfAborted(signal);
+    try {
+      const snapshot = await this.observation.getReadinessSnapshot(
+        { kind: "PROJECT_ROOT", locator: projectLocator },
+        lease,
+        signal,
+      );
+      throwIfAborted(signal);
+      return snapshot.mainFrame.expectedRoute;
+    } catch (error) {
+      if (
+        error instanceof OperationAbortedError ||
+        error instanceof OperationTimeoutError ||
+        error instanceof RuntimeGenerationChangedError ||
+        error instanceof CdpReadinessFailedError
+      ) {
+        throw error;
+      }
+      throw new CdpReadinessFailedError(undefined, { cause: error });
+    }
+  }
+
   public async waitForProjectRoute(
     projectLocator: ProjectLocator,
     lease: RuntimeLease,

@@ -251,7 +251,7 @@ test(
         "/v1/turns",
         JSON.stringify({
           target: { kind: "PROJECT", projectHandle },
-          prompt: `Reply with exactly ${firstOutput}.`,
+          prompt: `Reply with exactly the token on the next line. Do not add punctuation or any other text.\n${firstOutput}`,
         }),
       );
       const threadHandle = validateTurn(first, firstOutput, true, undefined, true);
@@ -265,7 +265,7 @@ test(
         "/v1/turns",
         JSON.stringify({
           target: { kind: "THREAD", threadHandle },
-          prompt: `Reply with exactly ${followUpOutput}.`,
+          prompt: `Reply with exactly the token on the next line. Do not add punctuation or any other text.\n${followUpOutput}`,
         }),
       );
       validateTurn(followUp, followUpOutput, false, threadHandle);

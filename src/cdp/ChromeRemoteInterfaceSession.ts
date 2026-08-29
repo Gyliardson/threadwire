@@ -748,11 +748,7 @@ export class ChromeRemoteInterfaceSession
             return null;
           }
           const form = this.closest('form');
-          if (form === null) return null;
-          const matches = Array.from(form.querySelectorAll('button[data-testid="send-button"]'))
-            .filter((button) => visible(button) && button instanceof HTMLButtonElement &&
-              button.form === form);
-          if (matches.length !== 1 || typeof text !== 'string' || text.length === 0) return null;
+          if (form === null || typeof text !== 'string' || text.length === 0) return null;
           const content = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
             ? this.value
             : this.textContent;

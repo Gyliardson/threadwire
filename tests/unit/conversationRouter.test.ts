@@ -101,6 +101,9 @@ class ControlledReadiness implements ConversationReadinessPort {
   public existingCalls = 0;
   public freshCalls = 0;
   public projectCalls = 0;
+  public projectRouteCurrentCalls = 0;
+  public projectRouteCurrent = false;
+  public projectRouteObservationFailure: Error | null = null;
   public block: Deferred<void> | null = null;
   public failure: Error | null = null;
 
@@ -131,6 +134,17 @@ class ControlledReadiness implements ConversationReadinessPort {
       await withTimeout(() => this.block!.promise, 5000, signal ? { signal } : {});
     }
     this.events.push("fresh_ready");
+  }
+
+  public async isProjectRouteCurrent(
+    _locator: ProjectLocator,
+    _lease: RuntimeLease,
+    _signal?: AbortSignal,
+  ): Promise<boolean> {
+    this.projectRouteCurrentCalls += 1;
+    this.events.push("project_route_observation");
+    if (this.projectRouteObservationFailure) throw this.projectRouteObservationFailure;
+    return this.projectRouteCurrent;
   }
 
   public async waitForProjectRoute(
@@ -231,10 +245,30 @@ test("known Project locator routes through the shared scheduler without exposing
   const result = await router.routeToProject(locator);
 
   assert.deepEqual(navigation.urls, [locator]);
-  assert.deepEqual(events, ["navigate_settled", "project_readiness", "project_ready"]);
+  assert.deepEqual(events, [
+    "project_route_observation",
+    "navigate_settled",
+    "project_readiness",
+    "project_ready",
+  ]);
+  assert.equal(readiness.projectRouteCurrentCalls, 1);
   assert.equal(readiness.projectCalls, 1);
   assert.deepEqual(result, { kind: "PROJECT" });
   assert.equal(JSON.stringify(result).includes("g-p-00000000000000000000000000000002"), false);
+});
+
+test("already-current Project route skips redundant navigation and still proves readiness", async () => {
+  const { router, navigation, readiness, events } = createHarness();
+  const locator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000012/project");
+  readiness.projectRouteCurrent = true;
+
+  const result = await router.routeToProject(locator);
+
+  assert.deepEqual(navigation.urls, []);
+  assert.deepEqual(events, ["project_route_observation", "project_readiness", "project_ready"]);
+  assert.equal(readiness.projectRouteCurrentCalls, 1);
+  assert.equal(readiness.projectCalls, 1);
+  assert.deepEqual(result, { kind: "PROJECT" });
 });
 
 test("Project route settlement failure prevents readiness", async () => {
@@ -250,7 +284,8 @@ test("Project route settlement failure prevents readiness", async () => {
       !error.message.includes("secret detail"),
   );
 
-  assert.deepEqual(events, ["navigate_settled"]);
+  assert.deepEqual(events, ["project_route_observation", "navigate_settled"]);
+  assert.equal(readiness.projectRouteCurrentCalls, 1);
   assert.equal(readiness.projectCalls, 0);
 });
 

@@ -38,6 +38,11 @@ export interface ConversationReadinessPort {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void>;
+  isProjectRouteCurrent(
+    expectedLocator: ProjectLocator,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   waitForProjectRoute(
     expectedLocator: ProjectLocator,
     lease: RuntimeLease,
@@ -114,11 +119,18 @@ export class ConversationRouter {
     return await this.scheduler.schedule(
       "ROUTE",
       async (operationSignal, lease) => {
-        await this.navigateAndWaitForLoadSettlement(
+        const alreadyAtProject = await this.readiness.isProjectRouteCurrent(
           locator,
-          { kind: "PROJECT_ROOT", locator },
+          lease,
           operationSignal,
         );
+        if (!alreadyAtProject) {
+          await this.navigateAndWaitForLoadSettlement(
+            locator,
+            { kind: "PROJECT_ROOT", locator },
+            operationSignal,
+          );
+        }
         await this.readiness.waitForProjectRoute(locator, lease, operationSignal);
         return Object.freeze({ kind: "PROJECT" as const });
       },
