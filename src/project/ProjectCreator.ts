@@ -11,10 +11,12 @@ import {
   ProjectCreationFailedError,
 } from "../domain/errors.js";
 import { OperationScheduler } from "../routing/OperationScheduler.js";
-import { withTimeout } from "../utils/timeout.js";
+import { delay, withTimeout } from "../utils/timeout.js";
 import { ProjectRegistry } from "./ProjectRegistry.js";
 
 export const DEFAULT_PROJECT_CREATION_TIMEOUT_MS = 30_000;
+const PROJECT_CREATION_CONTROL_RETRY_MS = 100;
+const PROJECT_CREATION_CONTROL_UNAVAILABLE_MESSAGE = "Project creation control was unavailable.";
 
 export interface ProjectUiPort {
   createProjectThroughUi(
@@ -54,13 +56,27 @@ export class ProjectCreator {
         let mutationAttempted = false;
         try {
           const locator = await withTimeout(
-            async (deadlineSignal) =>
-              await this.ui.createProjectThroughUi(
-                validatedName,
-                lease,
-                deadlineSignal,
-                () => { mutationAttempted = true; },
-              ),
+            async (deadlineSignal) => {
+              while (true) {
+                try {
+                  return await this.ui.createProjectThroughUi(
+                    validatedName,
+                    lease,
+                    deadlineSignal,
+                    () => { mutationAttempted = true; },
+                  );
+                } catch (error) {
+                  if (
+                    mutationAttempted ||
+                    !(error instanceof Error) ||
+                    error.message !== PROJECT_CREATION_CONTROL_UNAVAILABLE_MESSAGE
+                  ) {
+                    throw error;
+                  }
+                  await delay(PROJECT_CREATION_CONTROL_RETRY_MS, deadlineSignal);
+                }
+              }
+            },
             this.timeoutMs,
             operationSignal
               ? { signal: operationSignal, message: "Project creation timed out." }

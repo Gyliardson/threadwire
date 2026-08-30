@@ -13,7 +13,7 @@ export interface PublicApiError {
   readonly error: Readonly<{
     code: ApiBoundaryErrorCode;
     message: string;
-    retryable: false;
+    retryable: boolean;
   }>;
 }
 
@@ -61,7 +61,7 @@ export function serializePublicError(error: unknown): PublicApiError {
     error: Object.freeze({
       code,
       message: apiMessage(code),
-      retryable: false as const,
+      retryable: code === "CONTROLLER_BUSY",
     }),
   });
 }
