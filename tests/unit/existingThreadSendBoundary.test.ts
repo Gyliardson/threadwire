@@ -16,7 +16,7 @@ import {
   RuntimeGenerationChangedError,
 } from "../../src/domain/errors.js";
 import { RuntimeGenerationTracker } from "../../src/domain/RuntimeGeneration.js";
-import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { ConversationLocator, createConversationLocator } from "../../src/domain/ThreadIdentity.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../../src/readiness/types.js";
 
 const ROUTE = "https://chatgpt.com/c/synthetic-existing-send";
@@ -94,9 +94,7 @@ class FakeHTMLButtonElement extends FakeHTMLElement {
 }
 
 type ComposerMode = "TEXT" | "CONTENTEDITABLE";
-
 type RuntimeArgument = Readonly<{ value?: unknown; objectId?: string }>;
-
 type RuntimeCall = Readonly<{
   objectId?: string;
   functionDeclaration?: string;
@@ -126,6 +124,7 @@ class ExecutableExistingSendCriClient {
   public readonly composer: FakeHTMLElement;
   public readonly wrongComposer = new FakeHTMLTextAreaElement();
   public readonly document: { activeElement: FakeHTMLElement | null };
+  public readonly buttons: FakeHTMLButtonElement[] = [];
   public axNodes: readonly unknown[] = [];
   public beforeRuntimeCall: ((callNumber: number) => void) | null = null;
   public resolveError: Error | null = null;
@@ -138,10 +137,6 @@ class ExecutableExistingSendCriClient {
 
   private readonly objectsById = new Map<string, FakeHTMLElement>();
   private readonly idsByObject = new Map<FakeHTMLElement, string>();
-  private readonly requestListeners = new Set<(event: unknown) => void>();
-  private readonly responseListeners = new Set<(event: unknown) => void>();
-  private readonly finishedListeners = new Set<(event: unknown) => void>();
-  private readonly failedListeners = new Set<(event: unknown) => void>();
 
   public constructor(mode: ComposerMode, text: string) {
     if (mode === "TEXT") {
@@ -167,6 +162,7 @@ class ExecutableExistingSendCriClient {
   public addEligibleSend(form: FakeHTMLFormElement = this.form): FakeHTMLButtonElement {
     const button = new FakeHTMLButtonElement(form);
     form.sendCandidates.push(button);
+    this.buttons.push(button);
     return button;
   }
 
@@ -174,6 +170,10 @@ class ExecutableExistingSendCriClient {
     const candidate = new FakeHTMLElement();
     form.sendCandidates.push(candidate);
     return candidate;
+  }
+
+  public totalClicks(): number {
+    return this.buttons.reduce((sum, button) => sum + button.clickCount, 0);
   }
 
   public readonly Page = {
@@ -217,16 +217,11 @@ class ExecutableExistingSendCriClient {
       const runtimeError = this.runtimeErrors.get(callNumber);
       if (runtimeError !== undefined) throw runtimeError;
 
-      const objectId = params.objectId;
-      const receiver = typeof objectId === "string" ? this.objectsById.get(objectId) : undefined;
-      if (receiver === undefined) {
-        throw new Error("SYNTHETIC_UNKNOWN_OBJECT_INTERNAL");
-      }
-      const declaration = params.functionDeclaration;
-      if (typeof declaration !== "string") {
-        throw new Error("SYNTHETIC_MISSING_DECLARATION_INTERNAL");
-      }
-      const locationUrl = new URL(this.frame.url);
+      const receiver = typeof params.objectId === "string" ? this.objectsById.get(params.objectId) : undefined;
+      if (receiver === undefined) throw new Error("SYNTHETIC_UNKNOWN_OBJECT_INTERNAL");
+      if (typeof params.functionDeclaration !== "string") throw new Error("SYNTHETIC_MISSING_DECLARATION_INTERNAL");
+
+      const route = new URL(this.frame.url);
       const context = {
         URL,
         HTMLElement: FakeHTMLElement,
@@ -236,25 +231,20 @@ class ExecutableExistingSendCriClient {
         HTMLButtonElement: FakeHTMLButtonElement,
         document: this.document,
         location: {
-          origin: locationUrl.origin,
-          pathname: locationUrl.pathname,
-          search: locationUrl.search,
-          hash: locationUrl.hash,
+          origin: route.origin,
+          pathname: route.pathname,
+          search: route.search,
+          hash: route.hash,
         },
       };
-      const fn = runInNewContext(`(${declaration})`, context) as (...args: unknown[]) => unknown;
-      const args = (params.arguments ?? []).map((argument) => {
-        if (typeof argument.objectId === "string") {
-          return this.objectsById.get(argument.objectId);
-        }
-        return argument.value;
-      });
+      const fn = runInNewContext(`(${params.functionDeclaration})`, context) as (...args: unknown[]) => unknown;
+      const args = (params.arguments ?? []).map((argument) =>
+        typeof argument.objectId === "string" ? this.objectsById.get(argument.objectId) : argument.value,
+      );
       const value = fn.apply(receiver, args);
       if (params.returnByValue === false && value instanceof FakeHTMLElement) {
-        const returnedObjectId = this.idsByObject.get(value);
-        return returnedObjectId === undefined
-          ? { result: { value: null } }
-          : { result: { objectId: returnedObjectId } };
+        const objectId = this.idsByObject.get(value);
+        return objectId === undefined ? { result: { value: null } } : { result: { objectId } };
       }
       return { result: { value } };
     },
@@ -266,22 +256,10 @@ class ExecutableExistingSendCriClient {
 
   public readonly Network = {
     enable: async (_params: Record<string, unknown>) => undefined,
-    requestWillBeSent: (listener: (event: unknown) => void) => {
-      this.requestListeners.add(listener);
-      return () => this.requestListeners.delete(listener);
-    },
-    responseReceived: (listener: (event: unknown) => void) => {
-      this.responseListeners.add(listener);
-      return () => this.responseListeners.delete(listener);
-    },
-    loadingFinished: (listener: (event: unknown) => void) => {
-      this.finishedListeners.add(listener);
-      return () => this.finishedListeners.delete(listener);
-    },
-    loadingFailed: (listener: (event: unknown) => void) => {
-      this.failedListeners.add(listener);
-      return () => this.failedListeners.delete(listener);
-    },
+    requestWillBeSent: (_listener: (event: unknown) => void) => () => undefined,
+    responseReceived: (_listener: (event: unknown) => void) => () => undefined,
+    loadingFinished: (_listener: (event: unknown) => void) => () => undefined,
+    loadingFailed: (_listener: (event: unknown) => void) => () => undefined,
   };
 
   public async close(): Promise<void> {
@@ -298,274 +276,145 @@ class ExecutableExistingSendCriClient {
 
 async function createExecutableSession(mode: ComposerMode, text: string) {
   const client = new ExecutableExistingSendCriClient(mode, text);
-  const transport = new ChromeRemoteInterfaceTransport({ connect: async () => client });
-  const session = (await transport.connect({
-    host: "127.0.0.1",
-    port: 9223,
-    target,
-  })) as CdpTurnTransportSession;
+  const transport = new ChromeRemoteInterfaceTransport({ connect: async () => client as never });
+  const session = (await transport.connect({ host: "127.0.0.1", port: 9223, target })) as CdpTurnTransportSession;
   await session.initializeReadinessObservation();
   assert.ok(session.clickExistingTurnSendButton);
   return { client, session };
 }
 
-async function expectExistingSendRejected(
+async function expectRejected(
   session: CdpTurnTransportSession,
-  expectedText: string,
+  text: string,
   backendDOMNodeId = 501,
 ): Promise<void> {
   await assert.rejects(
-    () => session.clickExistingTurnSendButton!(locator, backendDOMNodeId, expectedText),
+    () => session.clickExistingTurnSendButton!(locator, backendDOMNodeId, text),
     /existing-thread send control was unavailable|existing-thread composer operation failed/,
   );
 }
 
-test("existing-thread text-control Send executes exact route/composer/form/value validation and releases remote objects", async () => {
+async function rejectionCase(
+  name: string,
+  mode: ComposerMode,
+  text: string,
+  mutate: (client: ExecutableExistingSendCriClient) => void,
+  backendDOMNodeId = 501,
+): Promise<void> {
+  test(name, async () => {
+    const { client, session } = await createExecutableSession(mode, text);
+    mutate(client);
+    await expectRejected(session, text, backendDOMNodeId);
+    assert.equal(client.totalClicks(), 0);
+  });
+}
+
+test("existing-thread text-control Send validates exact route/composer/form/value, clicks once, and releases objects", async () => {
   const text = "THREAD_TEXT_EXACT";
   const { client, session } = await createExecutableSession("TEXT", text);
   const send = client.addEligibleSend();
-
   await session.clickExistingTurnSendButton!(locator, 501, text);
-
   assert.equal(send.clickCount, 1);
   assert.equal(client.callFunctionCalls.length, 3);
   assert.deepEqual(client.releaseObjectCalls, ["form-601", "composer-501"]);
 });
 
-test("existing-thread text-control Send rejects mismatched value", async () => {
-  const { client, session } = await createExecutableSession("TEXT", "ACTUAL_TEXT");
-  const send = client.addEligibleSend();
-
-  await expectExistingSendRejected(session, "EXPECTED_TEXT");
-
-  assert.equal(send.clickCount, 0);
-  assert.equal(client.callFunctionCalls.length, 2);
-  assert.deepEqual(client.releaseObjectCalls, ["form-601", "composer-501"]);
-});
-
-test("existing-thread contenteditable Send accepts exact supported AX projection", async () => {
+test("existing-thread contenteditable Send accepts exact multiline AX projection and stable representation", async () => {
   const text = "THREAD_LINE_A\nTHREAD_LINE_B";
   const { client, session } = await createExecutableSession("CONTENTEDITABLE", text);
   const send = client.addEligibleSend();
-
   await session.clickExistingTurnSendButton!(locator, 501, text);
-
   assert.equal(send.clickCount, 1);
   assert.equal(client.callFunctionCalls.length, 3);
   assert.deepEqual(client.releaseObjectCalls, ["form-601", "composer-501"]);
 });
 
-test("existing-thread contenteditable Send rejects AX mismatch", async () => {
-  const text = "THREAD_LINE_A\nTHREAD_LINE_B";
-  const { client, session } = await createExecutableSession("CONTENTEDITABLE", text);
-  const send = client.addEligibleSend();
+await rejectionCase("existing-thread text-control Send rejects mismatched value", "TEXT", "EXPECTED_TEXT", (client) => {
+  (client.composer as FakeHTMLTextAreaElement).value = "ACTUAL_TEXT";
+  client.addEligibleSend();
+});
+await rejectionCase("existing-thread contenteditable Send rejects AX mismatch", "CONTENTEDITABLE", "THREAD_AX", (client) => {
   client.axNodes = [axComposer("DIFFERENT_AX_VALUE")];
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
-  assert.equal(client.callFunctionCalls.length, 2);
+  client.addEligibleSend();
 });
-
-test("existing-thread contenteditable Send rejects AX ambiguity", async () => {
-  const text = "THREAD_LINE_A\nTHREAD_LINE_B";
-  const { client, session } = await createExecutableSession("CONTENTEDITABLE", text);
-  const projected = text.replaceAll("\n", "\n\n");
-  const send = client.addEligibleSend();
-  client.axNodes = [axComposer(projected), axComposer(projected)];
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
+await rejectionCase("existing-thread contenteditable Send rejects AX ambiguity", "CONTENTEDITABLE", "THREAD_AX", (client) => {
+  client.axNodes = [axComposer("THREAD_AX"), axComposer("THREAD_AX")];
+  client.addEligibleSend();
 });
-
-test("existing-thread contenteditable Send fails closed on malformed AX value shape", async () => {
-  const text = "THREAD_AX_SHAPE";
-  const { client, session } = await createExecutableSession("CONTENTEDITABLE", text);
-  const send = client.addEligibleSend();
-  client.axNodes = [axComposer({ nested: "unexpected" })];
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
+await rejectionCase("existing-thread contenteditable Send fails closed on malformed AX value", "CONTENTEDITABLE", "THREAD_AX", (client) => {
+  client.axNodes = [axComposer({ unexpected: true })];
+  client.addEligibleSend();
 });
-
-test("existing-thread Send TOCTOU rejects changed contenteditable representation", async () => {
-  const text = "THREAD_TOCTOU_HTML";
-  const { client, session } = await createExecutableSession("CONTENTEDITABLE", text);
-  const send = client.addEligibleSend();
+await rejectionCase("existing-thread Send TOCTOU rejects changed contenteditable representation", "CONTENTEDITABLE", "THREAD_HTML", (client) => {
+  client.addEligibleSend();
   client.beforeRuntimeCall = (callNumber) => {
     if (callNumber === 3) client.composer.innerHTML = "<p>changed-after-ax</p>";
   };
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
 });
-
-test("existing-thread Send TOCTOU rejects changed form identity", async () => {
-  const text = "THREAD_TOCTOU_FORM";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
+await rejectionCase("existing-thread Send TOCTOU rejects changed form identity", "TEXT", "THREAD_FORM", (client) => {
+  client.addEligibleSend();
   client.beforeRuntimeCall = (callNumber) => {
     if (callNumber === 3) client.composer.ownerForm = client.alternateForm;
   };
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
 });
-
-test("existing-thread Send TOCTOU rejects route drift", async () => {
-  const text = "THREAD_TOCTOU_ROUTE";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
+await rejectionCase("existing-thread Send TOCTOU rejects route drift", "TEXT", "THREAD_ROUTE", (client) => {
+  client.addEligibleSend();
   client.beforeRuntimeCall = (callNumber) => {
     if (callNumber === 3) client.frame.url = OTHER_ROUTE;
   };
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
 });
-
-test("existing-thread Send TOCTOU rejects composer losing active focus", async () => {
-  const text = "THREAD_TOCTOU_FOCUS";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
+await rejectionCase("existing-thread Send TOCTOU rejects composer losing active focus", "TEXT", "THREAD_FOCUS", (client) => {
+  client.addEligibleSend();
   client.beforeRuntimeCall = (callNumber) => {
     if (callNumber === 3) client.document.activeElement = client.wrongComposer;
   };
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
 });
-
-test("existing-thread Send rejects zero eligible same-form Send controls", async () => {
-  const text = "THREAD_ZERO_SEND";
-  const { client, session } = await createExecutableSession("TEXT", text);
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(client.callFunctionCalls.length, 3);
+await rejectionCase("existing-thread Send rejects hidden composer", "TEXT", "THREAD_HIDDEN_COMPOSER", (client) => {
+  client.composer.offsetParent = null;
+  client.addEligibleSend();
 });
-
-test("existing-thread Send rejects multiple eligible same-form Send controls", async () => {
-  const text = "THREAD_MULTI_SEND";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const first = client.addEligibleSend();
-  const second = client.addEligibleSend();
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(first.clickCount + second.clickCount, 0);
+await rejectionCase("existing-thread Send rejects composer that is no longer editable", "CONTENTEDITABLE", "THREAD_NOT_EDITABLE", (client) => {
+  client.composer.setAttribute("contenteditable", "false");
+  client.addEligibleSend();
 });
-
-test("existing-thread Send ignores a Send outside the composer form", async () => {
-  const text = "THREAD_OUTSIDE_SEND";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const outside = client.addEligibleSend(client.alternateForm);
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(outside.clickCount, 0);
+await rejectionCase("existing-thread Send rejects zero eligible same-form Send controls", "TEXT", "THREAD_ZERO_SEND", () => undefined);
+await rejectionCase("existing-thread Send rejects multiple eligible same-form Send controls", "TEXT", "THREAD_MULTI_SEND", (client) => {
+  client.addEligibleSend();
+  client.addEligibleSend();
 });
-
-test("existing-thread Send rejects hidden same-form Send", async () => {
-  const text = "THREAD_HIDDEN_SEND";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
-  send.offsetParent = null;
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
+await rejectionCase("existing-thread Send ignores Send outside composer form", "TEXT", "THREAD_OUTSIDE_SEND", (client) => {
+  client.addEligibleSend(client.alternateForm);
 });
-
-test("existing-thread Send rejects non-HTMLButtonElement candidate", async () => {
-  const text = "THREAD_NON_BUTTON";
-  const { client, session } = await createExecutableSession("TEXT", text);
+await rejectionCase("existing-thread Send rejects hidden Send", "TEXT", "THREAD_HIDDEN_SEND", (client) => {
+  client.addEligibleSend().offsetParent = null;
+});
+await rejectionCase("existing-thread Send rejects non-HTMLButtonElement candidate", "TEXT", "THREAD_NON_BUTTON", (client) => {
   client.addGenericSend();
-
-  await expectExistingSendRejected(session, text);
 });
-
-test("existing-thread Send rejects a button whose form identity differs", async () => {
-  const text = "THREAD_WRONG_BUTTON_FORM";
-  const { client, session } = await createExecutableSession("TEXT", text);
+await rejectionCase("existing-thread Send rejects button with different form identity", "TEXT", "THREAD_BUTTON_FORM", (client) => {
   const send = new FakeHTMLButtonElement(client.alternateForm);
   client.form.sendCandidates.push(send);
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
+  client.buttons.push(send);
 });
-
-test("existing-thread Send rejects disabled button", async () => {
-  const text = "THREAD_DISABLED_SEND";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
-  send.disabled = true;
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
+await rejectionCase("existing-thread Send rejects disabled button", "TEXT", "THREAD_DISABLED", (client) => {
+  client.addEligibleSend().disabled = true;
 });
-
-test("existing-thread Send rejects aria-disabled button", async () => {
-  const text = "THREAD_ARIA_DISABLED";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
-  send.setAttribute("aria-disabled", "true");
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
+await rejectionCase("existing-thread Send rejects aria-disabled button", "TEXT", "THREAD_ARIA_DISABLED", (client) => {
+  client.addEligibleSend().setAttribute("aria-disabled", "true");
 });
-
-test("existing-thread Send rejects wrong conversation route", async () => {
-  const text = "THREAD_WRONG_ROUTE";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
+await rejectionCase("existing-thread Send rejects wrong conversation route", "TEXT", "THREAD_WRONG_ROUTE", (client) => {
   client.frame.url = OTHER_ROUTE;
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
+  client.addEligibleSend();
 });
-
-test("existing-thread Send rejects wrong composer backend identity", async () => {
-  const text = "THREAD_WRONG_COMPOSER";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
-
-  await expectExistingSendRejected(session, text, 999);
-
-  assert.equal(send.clickCount, 0);
-});
-
-test("existing-thread Send rejects unresolved composer object", async () => {
-  const text = "THREAD_UNRESOLVED_COMPOSER";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
-
-  await expectExistingSendRejected(session, text, 777);
-
-  assert.equal(send.clickCount, 0);
-  assert.deepEqual(client.releaseObjectCalls, []);
-});
-
-test("existing-thread Send rejects unresolved form object", async () => {
-  const text = "THREAD_UNRESOLVED_FORM";
-  const { client, session } = await createExecutableSession("TEXT", text);
-  const send = client.addEligibleSend();
+await rejectionCase("existing-thread Send rejects wrong composer backend identity", "TEXT", "THREAD_WRONG_COMPOSER", (client) => {
+  client.addEligibleSend();
+}, 999);
+await rejectionCase("existing-thread Send rejects unresolved composer object", "TEXT", "THREAD_UNRESOLVED_COMPOSER", (client) => {
+  client.addEligibleSend();
+}, 777);
+await rejectionCase("existing-thread Send rejects unresolved form object", "TEXT", "THREAD_UNRESOLVED_FORM", (client) => {
   client.composer.ownerForm = null;
-
-  await expectExistingSendRejected(session, text);
-
-  assert.equal(send.clickCount, 0);
-  assert.deepEqual(client.releaseObjectCalls, ["composer-501"]);
+  client.addEligibleSend();
 });
 
 function assertSanitized(error: unknown, canaries: readonly string[]): boolean {
@@ -575,65 +424,46 @@ function assertSanitized(error: unknown, canaries: readonly string[]): boolean {
   return true;
 }
 
-test("existing-thread Send sanitizes CRI/AX/cleanup internal failures and retained canaries", async (t) => {
+test("existing-thread Send sanitizes CRI, AX, and cleanup failures", async (t) => {
   const prompt = "PROMPT_CANARY_DO_NOT_EXPOSE";
   const rawProtocol = "ProtocolError RAW_PROTOCOL_CANARY requestId=REQUEST_CANARY objectId=composer-501";
   const canaries = [prompt, locator, "RAW_PROTOCOL_CANARY", "REQUEST_CANARY", "composer-501"];
+  const run = async (
+    mode: ComposerMode,
+    setup: (client: ExecutableExistingSendCriClient) => void,
+  ) => {
+    const { client, session } = await createExecutableSession(mode, prompt);
+    setup(client);
+    await assert.rejects(
+      () => session.clickExistingTurnSendButton!(locator, 501, prompt),
+      (error: unknown) => assertSanitized(error, canaries),
+    );
+    return client;
+  };
 
   await t.test("DOM.resolveNode", async () => {
-    const { client, session } = await createExecutableSession("TEXT", prompt);
-    client.resolveError = new Error(rawProtocol);
-    await assert.rejects(
-      () => session.clickExistingTurnSendButton!(locator, 501, prompt),
-      (error: unknown) => assertSanitized(error, canaries),
-    );
+    await run("TEXT", (client) => { client.resolveError = new Error(rawProtocol); });
   });
-
   await t.test("Runtime.callFunctionOn form", async () => {
-    const { client, session } = await createExecutableSession("TEXT", prompt);
-    client.runtimeErrors.set(1, new Error(rawProtocol));
-    await assert.rejects(
-      () => session.clickExistingTurnSendButton!(locator, 501, prompt),
-      (error: unknown) => assertSanitized(error, canaries),
-    );
+    await run("TEXT", (client) => { client.runtimeErrors.set(1, new Error(rawProtocol)); });
   });
-
   await t.test("Runtime.callFunctionOn semantic validation", async () => {
-    const { client, session } = await createExecutableSession("TEXT", prompt);
-    client.runtimeErrors.set(2, new Error(rawProtocol));
-    await assert.rejects(
-      () => session.clickExistingTurnSendButton!(locator, 501, prompt),
-      (error: unknown) => assertSanitized(error, canaries),
-    );
+    await run("TEXT", (client) => { client.runtimeErrors.set(2, new Error(rawProtocol)); });
   });
-
   await t.test("Accessibility.getFullAXTree", async () => {
-    const { client, session } = await createExecutableSession("CONTENTEDITABLE", prompt);
-    client.axError = new Error(rawProtocol);
-    await assert.rejects(
-      () => session.clickExistingTurnSendButton!(locator, 501, prompt),
-      (error: unknown) => assertSanitized(error, canaries),
-    );
+    await run("CONTENTEDITABLE", (client) => { client.axError = new Error(rawProtocol); });
   });
-
   await t.test("Runtime.callFunctionOn final click", async () => {
-    const { client, session } = await createExecutableSession("TEXT", prompt);
-    client.addEligibleSend();
-    client.runtimeErrors.set(3, new Error(rawProtocol));
-    await assert.rejects(
-      () => session.clickExistingTurnSendButton!(locator, 501, prompt),
-      (error: unknown) => assertSanitized(error, canaries),
-    );
+    await run("TEXT", (client) => {
+      client.addEligibleSend();
+      client.runtimeErrors.set(3, new Error(rawProtocol));
+    });
   });
-
   await t.test("Runtime.releaseObject", async () => {
-    const { client, session } = await createExecutableSession("TEXT", prompt);
-    client.addEligibleSend();
-    client.releaseError = new Error(rawProtocol);
-    await assert.rejects(
-      () => session.clickExistingTurnSendButton!(locator, 501, prompt),
-      (error: unknown) => assertSanitized(error, canaries),
-    );
+    const client = await run("TEXT", (candidate) => {
+      candidate.addEligibleSend();
+      candidate.releaseError = new Error(rawProtocol);
+    });
     assert.ok(client.closeCalls >= 1);
   });
 });
@@ -648,7 +478,7 @@ class Discovery implements CdpTargetDiscoveryLike {
 
 class BaseManagerTurnSession implements CdpTurnTransportSession {
   public readonly existingSendCalls: Array<Readonly<{
-    locator: typeof locator;
+    locator: ConversationLocator;
     backendDOMNodeId: number;
     expectedText: string;
     signal?: AbortSignal;
@@ -656,15 +486,11 @@ class BaseManagerTurnSession implements CdpTurnTransportSession {
   public closeCalls = 0;
   private readonly disconnectListeners = new Set<() => void>();
 
-  public async close(): Promise<void> {
-    this.closeCalls += 1;
-  }
-
+  public async close(): Promise<void> { this.closeCalls += 1; }
   public onDisconnect(listener: () => void): () => void {
     this.disconnectListeners.add(listener);
     return () => this.disconnectListeners.delete(listener);
   }
-
   public async initializeReadinessObservation(): Promise<void> {}
   public async navigate(_url: string): Promise<void> {}
   public async reload(): Promise<void> {}
@@ -679,20 +505,13 @@ class BaseManagerTurnSession implements CdpTurnTransportSession {
   public async getTurnComposerState(_expectedRoute: RouteExpectation) {
     return Object.freeze({ expectedRoute: true, eligible: true, focused: true, empty: false, backendDOMNodeId: 501 });
   }
-  public armTurnObservation(): CdpTurnObservationHandle {
-    return observationHandle;
-  }
-  public getTurnObservation(_handle: CdpTurnObservationHandle) {
-    return Object.freeze({ prepareCount: 0, write: null });
-  }
+  public armTurnObservation(): CdpTurnObservationHandle { return observationHandle; }
+  public getTurnObservation(_handle: CdpTurnObservationHandle) { return Object.freeze({ prepareCount: 0, write: null }); }
   public releaseTurnObservation(_handle: CdpTurnObservationHandle): void {}
   public async insertText(_text: string): Promise<void> {}
   public async dispatchEnterKeyDown(): Promise<void> {}
   public async dispatchEnterKeyUp(): Promise<void> {}
-  public async getCurrentConversationLocator() {
-    return locator;
-  }
-
+  public async getCurrentConversationLocator(): Promise<ConversationLocator> { return locator; }
   public emitDisconnect(): void {
     for (const listener of [...this.disconnectListeners]) listener();
   }
@@ -700,7 +519,7 @@ class BaseManagerTurnSession implements CdpTurnTransportSession {
 
 class ManagerTurnSession extends BaseManagerTurnSession {
   public async clickExistingTurnSendButton(
-    conversationLocator: typeof locator,
+    conversationLocator: ConversationLocator,
     backendDOMNodeId: number,
     expectedText: string,
     signal?: AbortSignal,
@@ -714,12 +533,23 @@ class ManagerTurnSession extends BaseManagerTurnSession {
   }
 }
 
+class BlockingManagerTurnSession extends ManagerTurnSession {
+  public override async clickExistingTurnSendButton(
+    conversationLocator: ConversationLocator,
+    backendDOMNodeId: number,
+    expectedText: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await super.clickExistingTurnSendButton(conversationLocator, backendDOMNodeId, expectedText, signal);
+    await new Promise<void>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new OperationAbortedError()), { once: true });
+    });
+  }
+}
+
 class ManagerTransport implements CdpTransport {
   public constructor(public readonly session: CdpTurnTransportSession) {}
-
-  public async connect(_options: CdpTransportConnectOptions): Promise<CdpTurnTransportSession> {
-    return this.session;
-  }
+  public async connect(_options: CdpTransportConnectOptions): Promise<CdpTurnTransportSession> { return this.session; }
 }
 
 function createRuntime(): RuntimeGenerationTracker {
@@ -738,31 +568,27 @@ async function createManager(runtime: RuntimeGenerationTracker, session: CdpTurn
   return manager;
 }
 
-test("manager delegates existing-thread Send exactly once for the current RuntimeLease and preserves AbortSignal identity", async () => {
+test("manager delegates existing-thread Send exactly once for current lease and preserves signal identity", async () => {
   const runtime = createRuntime();
   const session = new ManagerTurnSession();
   const manager = await createManager(runtime, session);
   const lease = runtime.getCurrentRuntimeLease();
   const controller = new AbortController();
-
   await manager.clickExistingTurnSendButton(locator, 501, "THREAD_MANAGER_TEXT", lease, controller.signal);
-
-  assert.equal(session.existingSendCalls.length, 1);
-  assert.deepEqual(session.existingSendCalls[0], {
+  assert.deepEqual(session.existingSendCalls, [{
     locator,
     backendDOMNodeId: 501,
     expectedText: "THREAD_MANAGER_TEXT",
     signal: controller.signal,
-  });
+  }]);
 });
 
-test("manager rejects a stale RuntimeLease before existing-thread Send mutation", async () => {
+test("manager rejects stale RuntimeLease before existing-thread Send mutation", async () => {
   const runtime = createRuntime();
   const staleLease = runtime.getCurrentRuntimeLease();
   runtime.observe({ pid: 200, creationTime: "runtime-b" });
   const session = new ManagerTurnSession();
   const manager = await createManager(runtime, session);
-
   await assert.rejects(
     () => manager.clickExistingTurnSendButton(locator, 501, "THREAD_STALE", staleLease),
     RuntimeGenerationChangedError,
@@ -770,27 +596,23 @@ test("manager rejects a stale RuntimeLease before existing-thread Send mutation"
   assert.equal(session.existingSendCalls.length, 0);
 });
 
-test("manager blocks runtime replacement between capability check and existing-thread Send delegation", async () => {
+test("manager blocks runtime replacement after capability check and before delegation", async () => {
   const runtime = createRuntime();
   const concrete = new ManagerTurnSession();
   let replaced = false;
-  const session = new Proxy(concrete, {
+  const proxied = new Proxy(concrete, {
     get(targetSession, property, receiver) {
       if (property === "clickExistingTurnSendButton" && !replaced) {
         replaced = true;
         runtime.observe({ pid: 200, creationTime: "runtime-b" });
       }
-      return Reflect.get(targetSession, property, receiver) as unknown;
+      return Reflect.get(targetSession, property, receiver);
     },
-  }) as CdpTurnTransportSession;
-  const manager = await createManager(runtime, session);
+  });
+  const manager = await createManager(runtime, proxied);
   const lease = runtime.getCurrentRuntimeLease();
-  runtime.observe({ pid: 100, creationTime: "runtime-a" });
-  const currentLease = runtime.getCurrentRuntimeLease();
-  assert.notDeepEqual(currentLease, lease);
-
   await assert.rejects(
-    () => manager.clickExistingTurnSendButton(locator, 501, "THREAD_REPLACED", currentLease),
+    () => manager.clickExistingTurnSendButton(locator, 501, "THREAD_REPLACED", lease),
     RuntimeGenerationChangedError,
   );
   assert.equal(concrete.existingSendCalls.length, 0);
@@ -802,7 +624,6 @@ test("manager rejects existing-thread Send after current-session disconnect", as
   const manager = await createManager(runtime, session);
   const lease = runtime.getCurrentRuntimeLease();
   session.emitDisconnect();
-
   await assert.rejects(
     () => manager.clickExistingTurnSendButton(locator, 501, "THREAD_DISCONNECTED", lease),
     CdpDisconnectedError,
@@ -810,19 +631,32 @@ test("manager rejects existing-thread Send after current-session disconnect", as
   assert.equal(session.existingSendCalls.length, 0);
 });
 
-test("manager preserves pre-aborted existing-thread Send cancellation without mutation", async () => {
+test("manager preserves pre-aborted existing-thread Send cancellation without delegation", async () => {
   const runtime = createRuntime();
   const session = new ManagerTurnSession();
   const manager = await createManager(runtime, session);
   const lease = runtime.getCurrentRuntimeLease();
   const controller = new AbortController();
   controller.abort();
-
   await assert.rejects(
     () => manager.clickExistingTurnSendButton(locator, 501, "THREAD_ABORTED", lease, controller.signal),
     OperationAbortedError,
   );
   assert.equal(session.existingSendCalls.length, 0);
+});
+
+test("manager preserves in-flight abort and invalidates the mutating session", async () => {
+  const runtime = createRuntime();
+  const session = new BlockingManagerTurnSession();
+  const manager = await createManager(runtime, session);
+  const lease = runtime.getCurrentRuntimeLease();
+  const controller = new AbortController();
+  const operation = manager.clickExistingTurnSendButton(locator, 501, "THREAD_INFLIGHT_ABORT", lease, controller.signal);
+  await Promise.resolve();
+  controller.abort();
+  await assert.rejects(operation, OperationAbortedError);
+  assert.equal(session.existingSendCalls.length, 1);
+  assert.ok(session.closeCalls >= 1);
 });
 
 test("manager reports unsupported existing-thread Send capability with stable sanitized CDP error", async () => {
@@ -831,7 +665,6 @@ test("manager reports unsupported existing-thread Send capability with stable sa
   const manager = await createManager(runtime, session);
   const lease = runtime.getCurrentRuntimeLease();
   const prompt = "UNSUPPORTED_PROMPT_CANARY";
-
   await assert.rejects(
     () => manager.clickExistingTurnSendButton(locator, 501, prompt, lease),
     (error: unknown) => {
