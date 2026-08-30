@@ -136,7 +136,6 @@ test("runtime recovery rejects extra keys, query strings, wrong methods and brow
 
   const method = await request(fixture.port, {
     method: "GET",
-    body: undefined,
   });
   assert.equal(method.statusCode, 405);
   assert.equal(method.headers.allow, "POST");
