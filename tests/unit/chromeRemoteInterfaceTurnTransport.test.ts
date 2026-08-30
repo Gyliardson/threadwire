@@ -341,11 +341,19 @@ test("typed Input primitives preserve insertText then Enter keyDown/keyUp orderi
   assert.equal("streamResourceContent" in session, false);
 });
 
-test("Project input defers unique enabled send-button validation until post-insert submission", async () => {
+test("Project contenteditable multiline input uses exact AX projection before atomic Send validation", async () => {
   const { client, session } = await createSession();
   const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  const projectPrompt = "PROJECT_PROMPT_LINE_A\nPROJECT_PROMPT_LINE_B";
   client.frame.url = projectLocator;
-  client.callFunctionResults.push({ objectId: "form-601" }, true);
+  client.axNodes = [eligibleComposerNode({ value: "PROJECT_PROMPT_LINE_A\n\nPROJECT_PROMPT_LINE_B" }, true)];
+  client.callFunctionResults.push(
+    { objectId: "form-601" },
+    true,
+    "AX_REQUIRED",
+    { kind: "AX_REQUIRED", html: "<p>synthetic-project-composer</p>" },
+    true,
+  );
 
   assert.equal(
     (await session.getTurnComposerState({ kind: "PROJECT_ROOT", locator: projectLocator }))
@@ -355,7 +363,7 @@ test("Project input defers unique enabled send-button validation until post-inse
   assert.ok(session.clickTurnSendButton);
   assert.ok(session.insertTextIntoProjectComposer);
   const formBackendDOMNodeId = await session.insertTextIntoProjectComposer(
-    "PROJECT_PROMPT_SECRET",
+    projectPrompt,
     projectLocator,
     501,
   );
@@ -363,35 +371,47 @@ test("Project input defers unique enabled send-button validation until post-inse
     projectLocator,
     501,
     formBackendDOMNodeId,
-    "PROJECT_PROMPT_SECRET",
+    projectPrompt,
   );
 
   assert.equal(formBackendDOMNodeId, 601);
   assert.deepEqual(client.focusCalls, []);
-  assert.deepEqual(client.inputCalls, []);
-  assert.equal(client.callFunctionCalls.length, 2);
-  const insertCall = client.callFunctionCalls[0]!;
-  const clickCall = client.callFunctionCalls[1]!;
-  assert.equal(String(insertCall.functionDeclaration).includes("PROJECT_PROMPT_SECRET"), false);
-  assert.equal(JSON.stringify(insertCall.arguments).includes("PROJECT_PROMPT_SECRET"), true);
-  assert.equal(clickCall.objectId, "composer-501");
+  assert.deepEqual(client.inputCalls, [{ method: "insertText", text: projectPrompt }]);
+  assert.equal(client.callFunctionCalls.length, 5);
+  const preflightCall = client.callFunctionCalls[0]!;
+  const preInputCall = client.callFunctionCalls[1]!;
+  const postInputCall = client.callFunctionCalls[2]!;
+  const preSendCall = client.callFunctionCalls[3]!;
+  const clickCall = client.callFunctionCalls[4]!;
+  assert.equal(String(preflightCall.functionDeclaration).includes(projectPrompt), false);
   assert.equal(
-    String(insertCall.functionDeclaration).includes('button[data-testid="send-button"]'),
+    (preflightCall.arguments as Array<{ value?: unknown }>)[1]?.value,
+    projectPrompt,
+  );
+  assert.equal(
+    String(preflightCall.functionDeclaration).includes('button[data-testid="send-button"]'),
     false,
   );
-  assert.equal(String(insertCall.functionDeclaration).includes("button.form === form"), false);
-  assert.equal(String(insertCall.functionDeclaration).includes("button.disabled"), false);
-  assert.equal(String(insertCall.functionDeclaration).includes("aria-disabled"), false);
+  assert.equal(String(preflightCall.functionDeclaration).includes("setter.call"), false);
+  assert.equal(String(preflightCall.functionDeclaration).includes("this.textContent = text"), false);
+  assert.equal(String(preflightCall.functionDeclaration).includes("InputEvent"), false);
+  assert.match(String(preInputCall.functionDeclaration), /this !== document\.activeElement/);
+  assert.match(String(preInputCall.functionDeclaration), /this\.closest\('form'\) !== expectedForm/);
+  assert.match(String(postInputCall.functionDeclaration), /AX_REQUIRED/);
+  assert.equal(String(postInputCall.functionDeclaration).includes('button[data-testid="send-button"]'), false);
+  assert.match(String(preSendCall.functionDeclaration), /innerHTML/);
+  assert.equal(String(preSendCall.functionDeclaration).includes('button[data-testid="send-button"]'), false);
+  assert.equal(clickCall.objectId, "composer-501");
   assert.match(String(clickCall.functionDeclaration), /this !== document\.activeElement/);
   assert.match(String(clickCall.functionDeclaration), /button\[data-testid="send-button"\]/);
   assert.match(String(clickCall.functionDeclaration), /matches\.length !== 1/);
   assert.match(String(clickCall.functionDeclaration), /this\.closest\('form'\) !== expectedForm/);
   assert.match(String(clickCall.functionDeclaration), /button\.form === expectedForm/);
   assert.match(String(clickCall.functionDeclaration), /button\.disabled/);
-  assert.match(String(clickCall.functionDeclaration), /inserted !== text/);
-  assert.match(
-    String(client.callFunctionCalls[0]!.functionDeclaration),
-    /value|textContent/,
+  assert.match(String(clickCall.functionDeclaration), /this\.innerHTML !== expectedHtml/);
+  assert.ok(
+    String(clickCall.functionDeclaration).indexOf("this.innerHTML !== expectedHtml") <
+      String(clickCall.functionDeclaration).indexOf("matches[0].click"),
   );
   assert.equal(JSON.stringify(clickCall).includes(projectLocator), true);
   assert.deepEqual(client.releaseObjectCalls, [
@@ -402,7 +422,63 @@ test("Project input defers unique enabled send-button validation until post-inse
   ]);
 });
 
-test("Project pre-insert rejection occurs before any prompt mutation expression", async () => {
+test("Project AX projection doubles each logical LF independently", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  const projectPrompt = "PROJECT_A\nPROJECT_B\nPROJECT_C";
+  client.frame.url = projectLocator;
+  client.axNodes = [eligibleComposerNode({ value: "PROJECT_A\n\nPROJECT_B\n\nPROJECT_C" }, true)];
+  client.callFunctionResults.push({ objectId: "form-601" }, true, "AX_REQUIRED");
+
+  assert.equal(
+    await session.insertTextIntoProjectComposer!(projectPrompt, projectLocator, 501),
+    601,
+  );
+  assert.deepEqual(client.inputCalls, [{ method: "insertText", text: projectPrompt }]);
+  assert.equal(client.callFunctionCalls.length, 3);
+  assert.deepEqual(client.releaseObjectCalls, ["form-601", "composer-501"]);
+});
+
+test("Project post-input AX mismatch fails closed after exactly one CDP insertion", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  const projectPrompt = "PROJECT_PROMPT_LINE_A\nPROJECT_PROMPT_LINE_B";
+  client.frame.url = projectLocator;
+  client.axNodes = [eligibleComposerNode({ value: projectPrompt }, true)];
+  client.callFunctionResults.push({ objectId: "form-601" }, true, "AX_REQUIRED");
+
+  await assert.rejects(
+    () => session.insertTextIntoProjectComposer!(projectPrompt, projectLocator, 501),
+    /expected Project composer was unavailable for input/,
+  );
+
+  assert.deepEqual(client.inputCalls, [{ method: "insertText", text: projectPrompt }]);
+  assert.equal(client.callFunctionCalls.length, 3);
+  assert.equal(
+    String(client.callFunctionCalls[2]!.functionDeclaration).includes('button[data-testid="send-button"]'),
+    false,
+  );
+  assert.deepEqual(client.releaseObjectCalls, ["form-601", "composer-501"]);
+});
+
+test("Project post-input AX ambiguity fails closed after exactly one CDP insertion", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  const projectPrompt = "PROJECT_A\nPROJECT_B";
+  const projected = { value: "PROJECT_A\n\nPROJECT_B" };
+  client.frame.url = projectLocator;
+  client.axNodes = [eligibleComposerNode(projected, true), eligibleComposerNode(projected, true)];
+  client.callFunctionResults.push({ objectId: "form-601" }, true, "AX_REQUIRED");
+
+  await assert.rejects(
+    () => session.insertTextIntoProjectComposer!(projectPrompt, projectLocator, 501),
+    /expected Project composer was unavailable for input/,
+  );
+  assert.deepEqual(client.inputCalls, [{ method: "insertText", text: projectPrompt }]);
+  assert.equal(client.callFunctionCalls.length, 3);
+});
+
+test("Project pre-insert rejection occurs before any CDP prompt insertion", async () => {
   const { client, session } = await createSession();
   const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
   client.callFunctionResults.push(false);
@@ -411,61 +487,160 @@ test("Project pre-insert rejection occurs before any prompt mutation expression"
     () => session.insertTextIntoProjectComposer!("PROJECT_PROMPT_SECRET", projectLocator, 501),
     /expected Project composer was unavailable for input/,
   );
+  assert.deepEqual(client.inputCalls, []);
+  assert.equal(client.callFunctionCalls.length, 1);
   const declaration = String(client.callFunctionCalls[0]!.functionDeclaration);
-  assert.ok(declaration.indexOf("location.origin") < declaration.indexOf("setter.call"));
+  assert.ok(declaration.indexOf("location.origin") < declaration.indexOf("const form = this.closest('form')"));
   assert.ok(
-    declaration.indexOf("const form = this.closest('form')") < declaration.indexOf("setter.call"),
+    declaration.indexOf("const form = this.closest('form')") < declaration.indexOf("typeof text !== 'string'"),
   );
-  assert.ok(declaration.indexOf("typeof text !== 'string'") < declaration.indexOf("setter.call"));
+  assert.equal(declaration.includes("setter.call"), false);
+  assert.equal(declaration.includes("this.textContent = text"), false);
+  assert.equal(declaration.includes("InputEvent"), false);
   assert.equal(declaration.includes('button[data-testid="send-button"]'), false);
 });
 
-test("Project input may materialize Send after text while post-insert validation remains fail-closed", async () => {
+test("Project input revalidates the same focused form before CDP insertion", async () => {
   const { client, session } = await createSession();
   const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
   client.frame.url = projectLocator;
   client.callFunctionResults.push({ objectId: "form-601" }, false);
 
+  await assert.rejects(
+    () => session.insertTextIntoProjectComposer!("PROJECT_PROMPT_SECRET", projectLocator, 501),
+    /expected Project composer was unavailable for input/,
+  );
+
+  assert.deepEqual(client.inputCalls, []);
+  assert.equal(client.callFunctionCalls.length, 2);
+  const revalidation = String(client.callFunctionCalls[1]!.functionDeclaration);
+  assert.match(revalidation, /this !== document\.activeElement/);
+  assert.match(revalidation, /this\.closest\('form'\) !== expectedForm/);
+  assert.match(revalidation, /content\.length === 0/);
+  assert.deepEqual(client.releaseObjectCalls, ["form-601", "composer-501"]);
+});
+
+test("Project Send refuses AX mismatch before any call containing a Send click", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  const projectPrompt = "PROJECT_PROMPT_SECRET";
+  client.frame.url = projectLocator;
+  client.axNodes = [eligibleComposerNode({ value: projectPrompt }, true)];
+  client.callFunctionResults.push({ objectId: "form-601" }, true, "AX_REQUIRED");
+
   const formBackendDOMNodeId = await session.insertTextIntoProjectComposer!(
-    "PROJECT_PROMPT_SECRET",
+    projectPrompt,
     projectLocator,
     501,
   );
-  assert.equal(formBackendDOMNodeId, 601);
+  client.axNodes = [eligibleComposerNode({ value: "DIFFERENT_PROJECT_PROMPT" }, true)];
+  client.callFunctionResults.push({ kind: "AX_REQUIRED", html: "<p>synthetic-project-composer</p>" });
+
   await assert.rejects(
     () =>
       session.clickTurnSendButton!(
         projectLocator,
         501,
         formBackendDOMNodeId,
-        "PROJECT_PROMPT_SECRET",
+        projectPrompt,
       ),
     /unique enabled turn send control was unavailable/,
   );
 
-  const insertDeclaration = String(client.callFunctionCalls[0]!.functionDeclaration);
-  const sendDeclaration = String(client.callFunctionCalls[1]!.functionDeclaration);
-  assert.equal(insertDeclaration.includes('button[data-testid="send-button"]'), false);
-  assert.equal(sendDeclaration.includes('button[data-testid="send-button"]'), true);
-  assert.match(sendDeclaration, /matches\.length !== 1/);
+  assert.equal(client.callFunctionCalls.length, 4);
+  assert.equal(
+    client.callFunctionCalls.some((call) =>
+      String(call.functionDeclaration).includes("matches[0].click"),
+    ),
+    false,
+  );
+});
+
+test("Project Send revalidates unchanged DOM after AX before the unique click", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  const projectPrompt = "PROJECT_PROMPT_SECRET";
+  client.frame.url = projectLocator;
+  client.axNodes = [eligibleComposerNode({ value: projectPrompt }, true)];
+  client.callFunctionResults.push(
+    { objectId: "form-601" },
+    true,
+    "AX_REQUIRED",
+    { kind: "AX_REQUIRED", html: "<p>synthetic-project-composer</p>" },
+    false,
+  );
+
+  const formBackendDOMNodeId = await session.insertTextIntoProjectComposer!(
+    projectPrompt,
+    projectLocator,
+    501,
+  );
+  await assert.rejects(
+    () =>
+      session.clickTurnSendButton!(
+        projectLocator,
+        501,
+        formBackendDOMNodeId,
+        projectPrompt,
+      ),
+    /unique enabled turn send control was unavailable/,
+  );
+
+  assert.equal(client.callFunctionCalls.length, 5);
+  const finalCall = client.callFunctionCalls[4]!;
+  const declaration = String(finalCall.functionDeclaration);
+  assert.match(declaration, /this !== document\.activeElement/);
+  assert.match(declaration, /this\.closest\('form'\) !== expectedForm/);
+  assert.match(declaration, /this\.innerHTML !== expectedHtml/);
+  assert.match(declaration, /matches\.length !== 1/);
+  assert.ok(declaration.indexOf("this.innerHTML !== expectedHtml") < declaration.indexOf("matches[0].click"));
+});
+
+test("Project text-control path remains exact and does not require AX", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  const projectPrompt = "PROJECT_PROMPT_SECRET";
+  client.frame.url = projectLocator;
+  client.axNodes = [];
+  client.callFunctionResults.push(
+    { objectId: "form-601" },
+    true,
+    "TEXT_CONTROL_EXACT",
+    { kind: "TEXT_CONTROL_EXACT" },
+    true,
+  );
+
+  const formBackendDOMNodeId = await session.insertTextIntoProjectComposer!(
+    projectPrompt,
+    projectLocator,
+    501,
+  );
+  await session.clickTurnSendButton!(
+    projectLocator,
+    501,
+    formBackendDOMNodeId,
+    projectPrompt,
+  );
+
+  assert.equal(formBackendDOMNodeId, 601);
+  assert.equal(client.callFunctionCalls.length, 5);
+  assert.match(String(client.callFunctionCalls[2]!.functionDeclaration), /this\.value === text/);
+  assert.match(String(client.callFunctionCalls[4]!.functionDeclaration), /this\.value !== text/);
 });
 
 test("Project send control refuses route or composer mismatch without reporting success", async () => {
   const { client, session } = await createSession();
   const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
-  client.callFunctionResults.push(false);
+  client.callFunctionResults.push(null);
 
   await assert.rejects(
     () => session.clickTurnSendButton!(projectLocator, 501, 601, "PROJECT_PROMPT_SECRET"),
     /unique enabled turn send control was unavailable/,
   );
   const declaration = String(client.callFunctionCalls[0]!.functionDeclaration);
-  assert.ok(declaration.indexOf("location.origin") < declaration.indexOf("matches[0].click"));
-  assert.ok(
-    declaration.indexOf("this.closest('form') !== expectedForm") <
-      declaration.indexOf("matches[0].click"),
-  );
-  assert.ok(declaration.indexOf("matches.length !== 1") < declaration.indexOf("matches[0].click"));
+  assert.match(declaration, /location\.origin/);
+  assert.match(declaration, /this\.closest\('form'\) !== expectedForm/);
+  assert.equal(declaration.includes("matches[0].click"), false);
 });
 
 test("Project composer object cleanup failure is sanitized", async () => {

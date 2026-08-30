@@ -54,7 +54,7 @@ class BlockingCompositionCdp implements TurnCdpPort {
     lease: RuntimeLease,
   ): Promise<CdpTurnComposerState> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
-    return Object.freeze({ expectedRoute: true, eligible: true, focused: true, empty: true });
+    return Object.freeze({ expectedRoute: true, eligible: true, focused: true, backendDOMNodeId: 101, empty: true });
   }
 
   public armTurnObservation(lease: RuntimeLease): CdpTurnObservationHandle {
@@ -79,6 +79,25 @@ class BlockingCompositionCdp implements TurnCdpPort {
     await this.releaseInsert.promise;
     this.runtime.assertRuntimeLeaseCurrent(lease);
   }
+
+  public async clickExistingTurnSendButton(
+
+    _conversationLocator: unknown,
+
+    _backendDOMNodeId: number,
+
+    _expectedText: string,
+
+    _lease: RuntimeLease,
+
+  ): Promise<void> {
+
+    await this.dispatchEnterKeyDown(_lease);
+
+    await this.dispatchEnterKeyUp(_lease);
+
+  }
+
 
   public async dispatchEnterKeyDown(_lease: RuntimeLease): Promise<void> {
     this.keyDownCalls += 1;

@@ -211,6 +211,25 @@ class LateWritePort implements TurnCdpPort {
     await this.session.insertText(text);
   }
 
+  public async clickExistingTurnSendButton(
+
+    _conversationLocator: unknown,
+
+    _backendDOMNodeId: number,
+
+    _expectedText: string,
+
+    lease: RuntimeLease,
+
+  ): Promise<void> {
+
+    await this.dispatchEnterKeyDown(lease);
+
+    await this.dispatchEnterKeyUp(lease);
+
+  }
+
+
   public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     await this.session.dispatchEnterKeyDown();
@@ -329,7 +348,7 @@ class PreSubmitWriteCdp implements TurnCdpPort {
     lease: RuntimeLease,
   ): Promise<CdpTurnComposerState> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
-    return Object.freeze({ expectedRoute: true, eligible: true, focused: true, empty: true });
+    return Object.freeze({ expectedRoute: true, eligible: true, focused: true, backendDOMNodeId: 101, empty: true });
   }
 
   public armTurnObservation(lease: RuntimeLease): CdpTurnObservationHandle {
@@ -355,6 +374,25 @@ class PreSubmitWriteCdp implements TurnCdpPort {
     this.insertReached.resolve();
     await this.releaseInsert.promise;
   }
+
+  public async clickExistingTurnSendButton(
+
+    _conversationLocator: unknown,
+
+    _backendDOMNodeId: number,
+
+    _expectedText: string,
+
+    _lease: RuntimeLease,
+
+  ): Promise<void> {
+
+    await this.dispatchEnterKeyDown(_lease);
+
+    await this.dispatchEnterKeyUp(_lease);
+
+  }
+
 
   public async dispatchEnterKeyDown(_lease: RuntimeLease): Promise<void> {
     this.keyDownCalls += 1;
@@ -506,7 +544,7 @@ class AbortFailedWriteCdp implements TurnCdpPort {
     lease: RuntimeLease,
   ): Promise<CdpTurnComposerState> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
-    return Object.freeze({ expectedRoute: true, eligible: true, focused: true, empty: true });
+    return Object.freeze({ expectedRoute: true, eligible: true, focused: true, backendDOMNodeId: 101, empty: true });
   }
 
   public armTurnObservation(_lease: RuntimeLease): CdpTurnObservationHandle {
@@ -530,6 +568,16 @@ class AbortFailedWriteCdp implements TurnCdpPort {
 
   public releaseTurnObservation(_handle: CdpTurnObservationHandle): void {}
   public async insertText(_text: string, _lease: RuntimeLease): Promise<void> {}
+  public async clickExistingTurnSendButton(
+    _conversationLocator: unknown,
+    _backendDOMNodeId: number,
+    _expectedText: string,
+    _lease: RuntimeLease,
+  ): Promise<void> {
+    await this.dispatchEnterKeyDown(_lease);
+    await this.dispatchEnterKeyUp(_lease);
+  }
+
   public async dispatchEnterKeyDown(_lease: RuntimeLease): Promise<void> {
     this.submitted = true;
   }

@@ -486,6 +486,30 @@ export class CdpSessionManager {
     );
   }
 
+  public async clickExistingTurnSendButton(
+    conversationLocator: ConversationLocator,
+    backendDOMNodeId: number,
+    expectedText: string,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const session = this.requireTurnSessionForLease(lease);
+    if (typeof session.clickExistingTurnSendButton !== "function") {
+      throw new CdpDisconnectedError("The connected CDP session does not support existing-thread submission.");
+    }
+    await this.runReadinessSessionOperation(
+      session,
+      lease,
+      () => session.clickExistingTurnSendButton!(
+        conversationLocator,
+        backendDOMNodeId,
+        expectedText,
+        signal,
+      ),
+      signal,
+    );
+  }
+
   public async getCurrentConversationLocator(
     lease: RuntimeLease,
   ): Promise<ConversationLocator | null> {

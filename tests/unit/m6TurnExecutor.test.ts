@@ -125,6 +125,16 @@ class FakeStreamingTurnPort implements TurnCdpPort {
   ): Promise<number> {
     return 601;
   }
+  public async clickExistingTurnSendButton(
+    _conversationLocator: unknown,
+    _backendDOMNodeId: number,
+    _expectedText: string,
+    _lease: RuntimeLease,
+  ): Promise<void> {
+    await this.dispatchEnterKeyDown(_lease);
+    await this.dispatchEnterKeyUp(_lease);
+  }
+
   public async dispatchEnterKeyDown(_lease: RuntimeLease): Promise<void> {
     this.keyDownAction?.();
   }
@@ -879,6 +889,7 @@ test("streaming succeeds when TurnCdpPort does not implement rendered-DOM snapsh
     discardTurnResponse: f.port.discardTurnResponse.bind(f.port),
     releaseTurnObservation: f.port.releaseTurnObservation.bind(f.port),
     insertText: f.port.insertText.bind(f.port),
+    clickExistingTurnSendButton: f.port.clickExistingTurnSendButton.bind(f.port),
     dispatchEnterKeyDown: f.port.dispatchEnterKeyDown.bind(f.port),
     dispatchEnterKeyUp: f.port.dispatchEnterKeyUp.bind(f.port),
     getCurrentConversationLocator: f.port.getCurrentConversationLocator.bind(f.port),

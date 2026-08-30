@@ -39,7 +39,7 @@ class BaselineRacePort implements TurnCdpPort {
     _expectedRoute: RouteExpectation,
     _lease: RuntimeLease,
   ): Promise<CdpTurnComposerState> {
-    return { expectedRoute: true, eligible: true, focused: true, empty: true };
+    return { expectedRoute: true, eligible: true, focused: true, backendDOMNodeId: 101, empty: true };
   }
 
   public armTurnObservation(): CdpTurnObservationHandle {
@@ -68,6 +68,10 @@ class BaselineRacePort implements TurnCdpPort {
 
   public async insertText(): Promise<void> {
     this.insertCalls += 1;
+  }
+
+  public async clickExistingTurnSendButton(): Promise<void> {
+    throw new Error("existing-thread Send must not run after a pre-submit write");
   }
 
   public async dispatchEnterKeyDown(): Promise<void> {}

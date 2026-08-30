@@ -193,6 +193,25 @@ class SessionPort implements TurnCdpPort {
     await this.session.insertText(text);
   }
 
+  public async clickExistingTurnSendButton(
+
+    _conversationLocator: unknown,
+
+    _backendDOMNodeId: number,
+
+    _expectedText: string,
+
+    lease: RuntimeLease,
+
+  ): Promise<void> {
+
+    await this.dispatchEnterKeyDown(lease);
+
+    await this.dispatchEnterKeyUp(lease);
+
+  }
+
+
   public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     await this.session.dispatchEnterKeyDown();
