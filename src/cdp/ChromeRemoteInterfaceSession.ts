@@ -557,6 +557,23 @@ export class ChromeRemoteInterfaceSession
     }
   }
 
+  public async clickExistingTurnSendButton(
+    conversationLocator: ConversationLocator,
+    backendDOMNodeId: number,
+    expectedText: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const clicked = await this.clickExistingComposerSend(
+      conversationLocator,
+      backendDOMNodeId,
+      expectedText,
+      signal,
+    );
+    if (!clicked) {
+      throw new Error("The unique enabled existing-thread send control was unavailable.");
+    }
+  }
+
   public async insertTextIntoProjectComposer(
     text: string,
     projectLocator: ProjectLocator,
@@ -886,6 +903,137 @@ export class ChromeRemoteInterfaceSession
       throw new Error("CDP Project composer operation failed without retained protocol metadata.");
     }
     return formBackendDOMNodeId;
+  }
+
+  private async clickExistingComposerSend(
+    conversationLocator: ConversationLocator,
+    backendDOMNodeId: number,
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const { dom, runtime } = this.projectComposerDomains(backendDOMNodeId, signal);
+    const objectIds: string[] = [];
+    let operationFailed = false;
+    let clicked = false;
+    try {
+      const composer = await dom.resolveNode({ backendNodeId: backendDOMNodeId });
+      const composerObjectId = composer.object.objectId;
+      if (typeof composerObjectId !== "string" || composerObjectId.length === 0) {
+        throw new Error("Existing-thread composer identity could not be resolved.");
+      }
+      objectIds.push(composerObjectId);
+      throwIfAborted(signal);
+      const form = await runtime.callFunctionOn({
+        objectId: composerObjectId,
+        functionDeclaration: `function(expectedHref, text) {
+          const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+          const expected = new URL(expectedHref);
+          const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+          if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+              this !== document.activeElement ||
+              !(this instanceof HTMLElement) || !visible(this) ||
+              !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox') ||
+              typeof text !== 'string' || text.length === 0) {
+            return null;
+          }
+          const currentForm = this.closest('form');
+          if (!(currentForm instanceof HTMLFormElement)) return null;
+          return currentForm;
+        }`,
+        arguments: [{ value: conversationLocator }, { value: text }],
+        returnByValue: false,
+      });
+      const formObjectId = form.result.objectId;
+      if (form.exceptionDetails !== undefined || typeof formObjectId !== "string" || formObjectId.length === 0) {
+        throw new Error("Existing-thread composer form could not be resolved.");
+      }
+      objectIds.push(formObjectId);
+      throwIfAborted(signal);
+      const validation = await runtime.callFunctionOn({
+        objectId: composerObjectId,
+        functionDeclaration: `function(expectedHref, expectedForm, text) {
+          const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+          const expected = new URL(expectedHref);
+          const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+          if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+              this !== document.activeElement ||
+              !(this instanceof HTMLElement) || !visible(this) ||
+              !(expectedForm instanceof HTMLFormElement) || this.closest('form') !== expectedForm ||
+              !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox') ||
+              typeof text !== 'string' || text.length === 0) {
+            return null;
+          }
+          if (this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement) {
+            return this.value === text ? { kind: 'TEXT_CONTROL_EXACT' } : null;
+          }
+          return { kind: 'AX_REQUIRED', html: this.innerHTML };
+        }`,
+        arguments: [{ value: conversationLocator }, { objectId: formObjectId }, { value: text }],
+        returnByValue: true,
+      });
+      throwIfAborted(signal);
+      if (validation.exceptionDetails !== undefined) throw new Error("Existing-thread composer validation was malformed.");
+      const validationValue = validation.result.value;
+      if (validationValue !== null && validationValue !== undefined) {
+        if (!isObject(validationValue) || typeof validationValue.kind !== "string") {
+          throw new Error("Existing-thread composer validation was malformed.");
+        }
+        const kind = validationValue.kind;
+        let expectedHtml = null;
+        let textVerified = kind === "TEXT_CONTROL_EXACT";
+        if (kind === "AX_REQUIRED") {
+          if (typeof validationValue.html !== "string") throw new Error("Existing-thread composer validation was malformed.");
+          expectedHtml = validationValue.html;
+          textVerified = await this.projectComposerAxTextMatches(backendDOMNodeId, text, signal);
+        } else if (kind !== "TEXT_CONTROL_EXACT") {
+          throw new Error("Existing-thread composer validation was malformed.");
+        }
+        if (textVerified) {
+          throwIfAborted(signal);
+          const result = await runtime.callFunctionOn({
+            objectId: composerObjectId,
+            functionDeclaration: `function(expectedHref, expectedForm, text, kind, expectedHtml) {
+              const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+              const expected = new URL(expectedHref);
+              const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+              if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+                  this !== document.activeElement ||
+                  !(this instanceof HTMLElement) || !visible(this) ||
+                  !(expectedForm instanceof HTMLFormElement) || this.closest('form') !== expectedForm ||
+                  !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox') ||
+                  typeof text !== 'string' || text.length === 0) return false;
+              if (kind === 'TEXT_CONTROL_EXACT') {
+                if (!(this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement) || this.value !== text) return false;
+              } else if (kind === 'AX_REQUIRED') {
+                if (this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement ||
+                    typeof expectedHtml !== 'string' || this.innerHTML !== expectedHtml) return false;
+              } else return false;
+              const matches = Array.from(expectedForm.querySelectorAll('button[data-testid="send-button"]'))
+                .filter((button) => visible(button) && button instanceof HTMLButtonElement &&
+                  button.form === expectedForm && !button.disabled && button.getAttribute('aria-disabled') !== 'true');
+              if (matches.length !== 1) return false;
+              matches[0].click();
+              return true;
+            }`,
+            arguments: [
+              { value: conversationLocator }, { objectId: formObjectId }, { value: text },
+              { value: kind }, { value: expectedHtml },
+            ],
+            returnByValue: true,
+          });
+          throwIfAborted(signal);
+          if (result.exceptionDetails !== undefined || typeof result.result.value !== "boolean") {
+            throw new Error("Existing-thread composer validation was malformed.");
+          }
+          clicked = result.result.value;
+        }
+      }
+    } catch {
+      operationFailed = true;
+    }
+    await this.releaseProjectComposerObjects(runtime, objectIds);
+    if (operationFailed) throw new Error("CDP existing-thread composer operation failed without retained protocol metadata.");
+    return clicked;
   }
 
   private async clickProjectComposerSend(

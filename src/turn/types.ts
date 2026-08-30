@@ -86,5 +86,12 @@ export interface TurnCdpPort {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void>;
+  clickExistingTurnSendButton?(
+    conversationLocator: ConversationLocator,
+    backendDOMNodeId: number,
+    expectedText: string,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void>;
   getCurrentConversationLocator(lease: RuntimeLease): Promise<ConversationLocator | null>;
 }

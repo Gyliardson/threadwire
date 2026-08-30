@@ -103,6 +103,12 @@ export interface CdpTurnTransportSession extends CdpTransportSession {
     expectedText: string,
     signal?: AbortSignal,
   ): Promise<void>;
+  clickExistingTurnSendButton?(
+    conversationLocator: ConversationLocator,
+    backendDOMNodeId: number,
+    expectedText: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
   getCurrentConversationLocator(): Promise<ConversationLocator | null>;
 }
 

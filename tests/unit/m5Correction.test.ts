@@ -79,7 +79,7 @@ class ScriptedTurnCdp implements TurnCdpPort {
     lease: RuntimeLease,
   ): Promise<CdpTurnComposerState> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
-    return Object.freeze({ expectedRoute: true, eligible: true, focused: true, empty: true });
+    return Object.freeze({ expectedRoute: true, eligible: true, focused: true, backendDOMNodeId: 101, empty: true });
   }
 
   public armTurnObservation(lease: RuntimeLease): CdpTurnObservationHandle {
@@ -116,6 +116,25 @@ class ScriptedTurnCdp implements TurnCdpPort {
     this.events.push("insert");
     this.insertHook?.();
   }
+
+  public async clickExistingTurnSendButton(
+
+    _conversationLocator: unknown,
+
+    _backendDOMNodeId: number,
+
+    _expectedText: string,
+
+    lease: RuntimeLease,
+
+  ): Promise<void> {
+
+    await this.dispatchEnterKeyDown(lease);
+
+    await this.dispatchEnterKeyUp(lease);
+
+  }
+
 
   public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
     this.runtime.assertRuntimeLeaseCurrent(lease);
@@ -563,6 +582,25 @@ class SessionTurnPort implements TurnCdpPort {
     this.runtime.assertRuntimeLeaseCurrent(lease);
     await this.session.insertText(text);
   }
+
+  public async clickExistingTurnSendButton(
+
+    _conversationLocator: unknown,
+
+    _backendDOMNodeId: number,
+
+    _expectedText: string,
+
+    lease: RuntimeLease,
+
+  ): Promise<void> {
+
+    await this.dispatchEnterKeyDown(lease);
+
+    await this.dispatchEnterKeyUp(lease);
+
+  }
+
 
   public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
     this.runtime.assertRuntimeLeaseCurrent(lease);

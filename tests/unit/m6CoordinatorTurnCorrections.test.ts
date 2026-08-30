@@ -92,7 +92,7 @@ class FakeStreamingTurnPort implements TurnCdpPort {
     _expectedRoute: RouteExpectation,
     _lease: RuntimeLease,
   ): Promise<CdpTurnComposerState> {
-    return { expectedRoute: true, eligible: true, focused: true, empty: true };
+    return { expectedRoute: true, eligible: true, focused: true, backendDOMNodeId: 101, empty: true };
   }
   public async captureTurnResponseRenderBaseline(
     _lease: RuntimeLease,
@@ -147,6 +147,16 @@ class FakeStreamingTurnPort implements TurnCdpPort {
   public async insertText(_text: string, _lease: RuntimeLease): Promise<void> {
     this.insertTextCalls += 1;
   }
+  public async clickExistingTurnSendButton(
+    _conversationLocator: unknown,
+    _backendDOMNodeId: number,
+    _expectedText: string,
+    _lease: RuntimeLease,
+  ): Promise<void> {
+    await this.dispatchEnterKeyDown(_lease);
+    await this.dispatchEnterKeyUp(_lease);
+  }
+
   public async dispatchEnterKeyDown(_lease: RuntimeLease): Promise<void> {
     this.keyDownCalls += 1;
     this.keyDownAction?.();

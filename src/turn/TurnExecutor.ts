@@ -269,6 +269,15 @@ export class TurnExecutor {
           throw new TurnInputFailedError();
         }
         projectComposerBackendDOMNodeId = backendDOMNodeId;
+      } else if (target.kind === "THREAD") {
+        if (typeof this.cdp.clickExistingTurnSendButton !== "function") {
+          throw new TurnInputFailedError();
+        }
+        const backendDOMNodeId = composer.backendDOMNodeId;
+        if (!Number.isSafeInteger(backendDOMNodeId) || backendDOMNodeId === undefined || backendDOMNodeId <= 0) {
+          throw new TurnInputFailedError();
+        }
+        projectComposerBackendDOMNodeId = backendDOMNodeId;
       }
     } catch (error) {
       if (error instanceof ResponseStreamUnavailableError) {
@@ -381,6 +390,25 @@ export class TurnExecutor {
             throw error;
           }
           this.failClosed(lease, error);
+        }
+      } else if (target.kind === "THREAD") {
+        if (expectedRoute.kind !== "THREAD") this.failClosed(lease, new TurnInputFailedError());
+        try {
+          await withTimeout(
+            async (commandSignal) =>
+              await this.cdp.clickExistingTurnSendButton!.call(
+                this.cdp,
+                expectedRoute.locator,
+                projectComposerBackendDOMNodeId!,
+                text,
+                lease,
+                commandSignal,
+              ),
+            this.commandTimeoutMs,
+            { message: "Timed out waiting for the existing-thread send control." },
+          );
+        } catch (error) {
+          this.rethrowPostCommitCommand(error, lease);
         }
       } else {
         let keyDownAccepted = false;
