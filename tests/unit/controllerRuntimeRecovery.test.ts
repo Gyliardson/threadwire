@@ -143,17 +143,26 @@ test("runtime recovery waits for Project public-completion confirmation", async 
   assert.equal(calls.includes("runtime.restart"), true);
 });
 
-test("rolled-back Project completion blocks recovery rather than replacing the runtime", async () => {
+test("rolled-back Project completion permits explicit recovery without replaying the uncertain turn", async () => {
   const { controller, calls } = fixture({ execute: async () => createdResult() });
   const result = await controller.executeTurn(
     { target: { kind: "PROJECT", projectHandle: "prj_recovery_fixture" as never }, prompt: "fixture" },
     () => undefined,
   );
 
+  assert.equal(calls.filter((call) => call === "executor.executeStreaming").length, 1);
   controller.rollbackTurnCompletion(result);
-  await assert.rejects(() => controller.recoverRuntime(), TurnStateUncertainError);
-  assert.equal(calls.includes("cdp.disconnect"), false);
-  assert.equal(calls.includes("runtime.restart"), false);
+
+  const health = await controller.recoverRuntime();
+
+  assert.deepEqual(health, { classic: "RUNNING", cdp: "CONNECTED" });
+  assert.equal(calls.filter((call) => call === "executor.executeStreaming").length, 1);
+  assert.deepEqual(calls.slice(-4), [
+    "cdp.disconnect",
+    "runtime.restart",
+    "cdp.connect",
+    "cdp.assertCurrentRuntime",
+  ]);
 });
 
 test("public retry classification is true only for proven pre-admission controller capacity", () => {
