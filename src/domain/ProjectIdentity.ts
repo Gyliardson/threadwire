@@ -8,7 +8,7 @@ export type ProjectName = string & { readonly [projectNameBrand]: true };
 export type ProjectHandle = string & { readonly [projectHandleBrand]: true };
 export type ProjectLocator = string & { readonly [projectLocatorBrand]: true };
 
-const MAX_PROJECT_NAME_CODE_POINTS = 100;
+const MAX_PROJECT_NAME_CODE_POINTS = 50;
 const MAX_PROJECT_NAME_BYTES = 400;
 
 export function createProjectName(value: string): ProjectName {
