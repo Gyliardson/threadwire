@@ -34,6 +34,104 @@ test("multiple SSE records in one chunk preserve accepted delta order", () => {
   ]);
 });
 
+test("proven batched append operations emit assistant text in record and item order", () => {
+  const consumer = new ResponseStreamConsumer();
+  consumer.pushBase64(
+    b64(
+      sse("delta", {
+        v: [
+          { p: "/message/content/parts/0", o: "append", v: "A" },
+          { p: "/message/status", o: "replace", v: "in_progress" },
+          { p: "/message/content/parts/0", o: "append", v: "B" },
+        ],
+      }) +
+        sse("delta", { v: "C" }) +
+        sse("delta", {
+          v: [{ p: "/message/content/parts/0", o: "append", v: "D" }],
+        }),
+    ),
+  );
+  assert.deepEqual(consumer.drain(), [
+    { type: "TEXT_DELTA", text: "A" },
+    { type: "TEXT_DELTA", text: "B" },
+    { type: "TEXT_DELTA", text: "C" },
+    { type: "TEXT_DELTA", text: "D" },
+  ]);
+});
+
+test("batched extraction excludes roles, metadata operations, and arbitrary nested strings", () => {
+  const consumer = new ResponseStreamConsumer();
+  consumer.pushBase64(
+    b64(
+      [
+        sse("delta", {
+          role: "user",
+          v: [{ p: "/message/content/parts/0", o: "append", v: "INPUT_ECHO_SECRET" }],
+        }),
+        sse("delta", {
+          role: "system",
+          v: [{ p: "/message/content/parts/0", o: "append", v: "SYSTEM_SECRET" }],
+        }),
+        sse("delta", {
+          v: [{ p: "/message/status", o: "replace", v: "STATUS_SECRET" }],
+        }),
+        sse("delta", {
+          v: [{ p: "/message/content/parts/0", o: "replace", v: "WRONG_OPERATION_SECRET" }],
+        }),
+        sse("delta", {
+          v: [{ p: "/message/content/parts/1", o: "append", v: "WRONG_PATH_SECRET" }],
+        }),
+        sse("delta", {
+          v: [{ nested: { p: "/message/content/parts/0", o: "append", v: "NESTED_SECRET" } }],
+        }),
+        sse("message", {
+          v: [{ p: "/message/content/parts/0", o: "append", v: "WRONG_EVENT_SECRET" }],
+        }),
+      ].join(""),
+    ),
+  );
+  assert.deepEqual(consumer.drain(), []);
+});
+
+test("malformed batched operation items fail closed without affecting supported siblings", () => {
+  const consumer = new ResponseStreamConsumer();
+  consumer.pushBase64(
+    b64(
+      sse("delta", {
+        v: [
+          null,
+          "ARBITRARY_ARRAY_SECRET",
+          { p: "/message/content/parts/0", o: "append" },
+          { p: "/message/content/parts/0", o: "append", v: 42 },
+          { p: "/message/content/parts/0", o: "append", v: "accepted" },
+        ],
+      }),
+    ),
+  );
+  assert.deepEqual(consumer.drain(), [{ type: "TEXT_DELTA", text: "accepted" }]);
+});
+
+test("batched text shares the normalized queue character bound and errors stay sanitized", () => {
+  const canary = "BATCHED_RAW_CANARY";
+  const consumer = new ResponseStreamConsumer({ maxQueuedTextChars: 4 });
+  let thrown: unknown;
+  try {
+    consumer.pushBase64(
+      b64(
+        sse("delta", {
+          v: [{ p: "/message/content/parts/0", o: "append", v: `12345${canary}` }],
+        }),
+      ),
+    );
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown instanceof ResponseStreamConsumerError);
+  assert.equal(thrown.kind, "BUFFER_OVERFLOW");
+  assert.equal(thrown.message.includes(canary), false);
+  assert.equal(JSON.stringify(thrown).includes(canary), false);
+});
+
 test("LF and CRLF framing are accepted", () => {
   const consumer = new ResponseStreamConsumer();
   consumer.pushBase64(b64(sse("delta", { v: "lf" }, "\n") + sse("delta", { v: "crlf" }, "\r\n")));

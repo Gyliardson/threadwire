@@ -4,6 +4,7 @@ import {
   ThreadHandle,
 } from "../domain/ThreadIdentity.js";
 import { RuntimeLease } from "../domain/RuntimeGeneration.js";
+import { ProjectLocator } from "../domain/ProjectIdentity.js";
 import {
   CdpDisconnectedError,
   CdpNavigationFailedError,
@@ -37,6 +38,16 @@ export interface ConversationReadinessPort {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void>;
+  isProjectRouteCurrent(
+    expectedLocator: ProjectLocator,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  waitForProjectRoute(
+    expectedLocator: ProjectLocator,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 
 export type ExistingConversationRouteResult = Readonly<{
@@ -44,7 +55,11 @@ export type ExistingConversationRouteResult = Readonly<{
   threadHandle: ThreadHandle;
 }>;
 export type FreshConversationRouteResult = Readonly<{ kind: "FRESH" }>;
-export type ConversationRouteResult = ExistingConversationRouteResult | FreshConversationRouteResult;
+export type ProjectConversationRouteResult = Readonly<{ kind: "PROJECT" }>;
+export type ConversationRouteResult =
+  | ExistingConversationRouteResult
+  | FreshConversationRouteResult
+  | ProjectConversationRouteResult;
 
 function sanitizedRouteNavigationCause(error: unknown): Error {
   if (error instanceof CdpDisconnectedError) {
@@ -92,6 +107,32 @@ export class ConversationRouter {
         await this.reload(operationSignal);
         await this.readiness.waitForFreshRoute(lease, operationSignal);
         return Object.freeze({ kind: "FRESH" as const });
+      },
+      signal ? { signal } : {},
+    );
+  }
+
+  public async routeToProject(
+    locator: ProjectLocator,
+    signal?: AbortSignal,
+  ): Promise<ProjectConversationRouteResult> {
+    return await this.scheduler.schedule(
+      "ROUTE",
+      async (operationSignal, lease) => {
+        const alreadyAtProject = await this.readiness.isProjectRouteCurrent(
+          locator,
+          lease,
+          operationSignal,
+        );
+        if (!alreadyAtProject) {
+          await this.navigateAndWaitForLoadSettlement(
+            locator,
+            { kind: "PROJECT_ROOT", locator },
+            operationSignal,
+          );
+        }
+        await this.readiness.waitForProjectRoute(locator, lease, operationSignal);
+        return Object.freeze({ kind: "PROJECT" as const });
       },
       signal ? { signal } : {},
     );

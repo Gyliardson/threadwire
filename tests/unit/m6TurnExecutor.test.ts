@@ -8,12 +8,15 @@ import {
 } from "../../src/cdp/CdpTransport.js";
 import { RuntimeGenerationTracker, RuntimeLease } from "../../src/domain/RuntimeGeneration.js";
 import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { createProjectLocator } from "../../src/domain/ProjectIdentity.js";
 import {
   OperationAbortedError,
   ResponseParseFailedError,
   ResponseStreamFailedError,
   RuntimeGenerationChangedError,
   ResponseStreamUnavailableError,
+  ThreadNotFoundError,
+  TurnStateUncertainError,
   TurnWriteFailedError,
 } from "../../src/domain/errors.js";
 import { RouteExpectation } from "../../src/readiness/types.js";
@@ -64,6 +67,9 @@ class FakeStreamingTurnPort implements TurnCdpPort {
   });
   public readonly responseEvents: NormalizedResponseStreamEvent[] = [];
   public keyDownAction: (() => void) | null = null;
+  public sendButtonAction: (() => void) | null = null;
+  public locator: ReturnType<typeof createConversationLocator> | null = null;
+  public readonly locators: ReturnType<typeof createConversationLocator>[] = [];
   public armOptions: CdpTurnObservationOptions | undefined;
   public discarded = false;
   public released = false;
@@ -75,7 +81,13 @@ class FakeStreamingTurnPort implements TurnCdpPort {
     _expectedRoute: RouteExpectation,
     _lease: RuntimeLease,
   ): Promise<CdpTurnComposerState> {
-    return { expectedRoute: true, eligible: true, focused: true, empty: true };
+    return {
+      expectedRoute: true,
+      eligible: true,
+      focused: true,
+      empty: true,
+      backendDOMNodeId: 601,
+    };
   }
   public armTurnObservation(
     _lease: RuntimeLease,
@@ -105,12 +117,29 @@ class FakeStreamingTurnPort implements TurnCdpPort {
     this.released = true;
   }
   public async insertText(_text: string, _lease: RuntimeLease): Promise<void> {}
+  public async insertTextIntoProjectComposer(
+    _text: string,
+    _projectLocator: ReturnType<typeof createProjectLocator>,
+    _backendDOMNodeId: number,
+    _lease: RuntimeLease,
+  ): Promise<number> {
+    return 601;
+  }
   public async dispatchEnterKeyDown(_lease: RuntimeLease): Promise<void> {
     this.keyDownAction?.();
   }
   public async dispatchEnterKeyUp(_lease: RuntimeLease): Promise<void> {}
+  public async clickTurnSendButton(
+    _projectLocator: ReturnType<typeof createProjectLocator>,
+    _backendDOMNodeId: number,
+    _formBackendDOMNodeId: number,
+    _expectedText: string,
+    _lease: RuntimeLease,
+  ): Promise<void> {
+    this.sendButtonAction?.();
+  }
   public async getCurrentConversationLocator(_lease: RuntimeLease) {
-    return null;
+    return this.locators.shift() ?? this.locator;
   }
 }
 
@@ -136,7 +165,10 @@ async function fixture(
   runtime.observe({ pid: 600, creationTime: "m6-turn" });
   const scheduler = new OperationScheduler(runtime);
   port.runtime = runtime;
-  const registry = new ThreadRegistry({ handleFactory: () => "m6_handle" });
+  let handleIndex = 0;
+  const registry = new ThreadRegistry({
+    handleFactory: () => (handleIndex++ === 0 ? "m6_handle" : "m6_project_handle"),
+  });
   const locator = createConversationLocator("https://chatgpt.com/c/m6-turn");
   const handle = registry.register(locator);
   const executor = new TurnExecutor(registry, scheduler, new NoopPreflight(), port, {
@@ -206,6 +238,215 @@ test("executeStreaming keeps [DONE] internal and publishes FINAL_TEXT then COMPL
   assert.equal(f.port.finalSnapshotCalls, 0);
   assert.equal(routeRan, true);
   assert.equal(f.port.released, true);
+});
+
+test("Project turn reuses normalized streaming and returns a newly registered opaque ThreadHandle", async () => {
+  const f = await fixture();
+  const delivered: ResponseStreamEvent[] = [];
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000020/project");
+  const conversationLocator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000020/c/project-conversation",
+  );
+  f.port.locator = conversationLocator;
+  f.port.sendButtonAction = () => {
+    f.port.snapshot = Object.freeze({
+      prepareCount: 1,
+      write: Object.freeze({ lifecycle: "FINISHED" as const }),
+      response: Object.freeze({ lifecycle: "COMPLETED" as const, failure: null }),
+    });
+    f.port.responseEvents.push(
+      Object.freeze({ type: "TEXT_DELTA" as const, text: "project response" }),
+      Object.freeze({ type: "COMPLETED" as const }),
+    );
+  };
+
+  const result = await f.executor.executeStreaming(
+    { kind: "PROJECT", projectLocator },
+    "synthetic prompt",
+    (event) => delivered.push(event),
+  );
+
+  assert.equal(result.created, true);
+  assert.deepEqual(f.registry.knownThreads().length, 1);
+  assert.throws(() => f.registry.resolve(result.threadHandle), ThreadNotFoundError);
+  assert.deepEqual(delivered, [
+    { type: "TEXT_DELTA", text: "project response" },
+    { type: "FINAL_TEXT", text: "project response" },
+    { type: "COMPLETED" },
+  ]);
+  f.executor.confirmCompletedTurn(result);
+  assert.equal(f.registry.resolve(result.threadHandle), conversationLocator);
+  assert.deepEqual(f.registry.knownThreads().length, 2);
+});
+
+test("failed public Project completion rolls back its provisional handle", async () => {
+  const f = await fixture();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000025/project");
+  f.port.locator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000025/c/project-conversation",
+  );
+  f.port.sendButtonAction = () => {
+    f.port.snapshot = Object.freeze({
+      prepareCount: 1,
+      write: Object.freeze({ lifecycle: "FINISHED" as const }),
+      response: Object.freeze({ lifecycle: "COMPLETED" as const, failure: null }),
+    });
+    f.port.responseEvents.push(
+      Object.freeze({ type: "TEXT_DELTA" as const, text: "project response" }),
+      Object.freeze({ type: "COMPLETED" as const }),
+    );
+  };
+
+  const result = await f.executor.executeStreaming(
+    { kind: "PROJECT", projectLocator },
+    "synthetic prompt",
+    () => undefined,
+  );
+  f.executor.rollbackCompletedTurn(result);
+
+  assert.throws(() => f.registry.resolve(result.threadHandle), ThreadNotFoundError);
+  assert.equal(f.registry.knownThreads().length, 1);
+  await assert.rejects(
+    f.scheduler.schedule("TURN", async () => "must-not-run"),
+    TurnStateUncertainError,
+  );
+});
+
+test("Project completion lost during final response delivery latches uncertainty", async () => {
+  const f = await fixture();
+  const abort = new AbortController();
+  const delivered: ResponseStreamEvent[] = [];
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000021/project");
+  f.port.locator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000021/c/project-conversation",
+  );
+  f.port.sendButtonAction = () => {
+    f.port.snapshot = Object.freeze({
+      prepareCount: 1,
+      write: Object.freeze({ lifecycle: "FINISHED" as const }),
+      response: Object.freeze({ lifecycle: "COMPLETED" as const, failure: null }),
+    });
+    f.port.responseEvents.push(
+      Object.freeze({ type: "TEXT_DELTA" as const, text: "project response" }),
+      Object.freeze({ type: "COMPLETED" as const }),
+    );
+  };
+
+  await assert.rejects(
+    f.executor.executeStreaming(
+      { kind: "PROJECT", projectLocator },
+      "synthetic prompt",
+      (event) => {
+        delivered.push(event);
+        if (event.type === "FINAL_TEXT") abort.abort(new Error("transport closed"));
+      },
+      abort.signal,
+    ),
+    TurnStateUncertainError,
+  );
+  assert.deepEqual(delivered, [
+    { type: "TEXT_DELTA", text: "project response" },
+    { type: "FINAL_TEXT", text: "project response" },
+  ]);
+  assert.equal(f.registry.knownThreads().length, 1);
+  await assert.rejects(
+    f.scheduler.schedule("ROUTE", async () => "must-not-run"),
+    TurnStateUncertainError,
+  );
+});
+
+test("Project registration is rolled back when COMPLETED delivery fails", async () => {
+  const f = await fixture();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000022/project");
+  f.port.locator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000022/c/project-conversation",
+  );
+  f.port.sendButtonAction = () => {
+    f.port.snapshot = Object.freeze({
+      prepareCount: 1,
+      write: Object.freeze({ lifecycle: "FINISHED" as const }),
+      response: Object.freeze({ lifecycle: "COMPLETED" as const, failure: null }),
+    });
+    f.port.responseEvents.push(
+      Object.freeze({ type: "TEXT_DELTA" as const, text: "project response" }),
+      Object.freeze({ type: "COMPLETED" as const }),
+    );
+  };
+
+  await assert.rejects(
+    f.executor.executeStreaming(
+      { kind: "PROJECT", projectLocator },
+      "synthetic prompt",
+      (event) => {
+        if (event.type === "COMPLETED") throw new Error("completion delivery failed");
+      },
+    ),
+    TurnStateUncertainError,
+  );
+  assert.equal(f.registry.knownThreads().length, 1);
+});
+
+test("Project response is not delivered before resulting conversation ownership is proven", async () => {
+  const f = await fixture();
+  const delivered: ResponseStreamEvent[] = [];
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000023/project");
+  f.port.locator = createConversationLocator(
+    "https://chatgpt.com/g/g-p-00000000000000000000000000000024/c/project-conversation",
+  );
+  f.port.sendButtonAction = () => {
+    f.port.snapshot = Object.freeze({
+      prepareCount: 1,
+      write: Object.freeze({ lifecycle: "FINISHED" as const }),
+      response: Object.freeze({ lifecycle: "COMPLETED" as const, failure: null }),
+    });
+    f.port.responseEvents.push(
+      Object.freeze({ type: "TEXT_DELTA" as const, text: "FOREIGN_PROJECT_CANARY" }),
+      Object.freeze({ type: "COMPLETED" as const }),
+    );
+  };
+
+  const turn = f.executor.executeStreaming(
+      { kind: "PROJECT", projectLocator },
+      "synthetic prompt",
+      (event) => delivered.push(event),
+    );
+  await f.sleep.entered.promise;
+  f.sleep.release.resolve();
+  await assert.rejects(turn, TurnStateUncertainError);
+  assert.deepEqual(delivered, []);
+  assert.equal(f.registry.knownThreads().length, 1);
+});
+
+test("Project response remains private when an owned route drifts before final authority", async () => {
+  const f = await fixture();
+  const delivered: ResponseStreamEvent[] = [];
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000023/project");
+  f.port.locators.push(
+    createConversationLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000023/c/project-conversation"),
+    createConversationLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000024/c/project-conversation"),
+  );
+  f.port.sendButtonAction = () => {
+    f.port.snapshot = Object.freeze({
+      prepareCount: 1,
+      write: Object.freeze({ lifecycle: "FINISHED" as const }),
+      response: Object.freeze({ lifecycle: "COMPLETED" as const, failure: null }),
+    });
+    f.port.responseEvents.push(
+      Object.freeze({ type: "TEXT_DELTA" as const, text: "DRIFTED_PROJECT_CANARY" }),
+      Object.freeze({ type: "COMPLETED" as const }),
+    );
+  };
+
+  const turn = f.executor.executeStreaming(
+    { kind: "PROJECT", projectLocator },
+    "synthetic prompt",
+    (event) => delivered.push(event),
+  );
+  await f.sleep.entered.promise;
+  f.sleep.release.resolve();
+  await assert.rejects(turn, TurnStateUncertainError);
+  assert.deepEqual(delivered, []);
+  assert.equal(f.registry.knownThreads().length, 1);
 });
 
 test("FINAL_TEXT equals the exact concatenation of accepted normalized deltas in arrival order and retains whitespace", async () => {

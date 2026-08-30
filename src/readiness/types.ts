@@ -1,9 +1,11 @@
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import { RuntimeLease } from "../domain/RuntimeGeneration.js";
+import { ProjectLocator } from "../domain/ProjectIdentity.js";
 
 export type RouteExpectation =
   | Readonly<{ kind: "THREAD"; locator: ConversationLocator }>
-  | Readonly<{ kind: "FRESH_ROOT" }>;
+  | Readonly<{ kind: "FRESH_ROOT" }>
+  | Readonly<{ kind: "PROJECT_ROOT"; locator: ProjectLocator }>;
 
 export interface ReadinessMainFrameState {
   readonly frameId: string;

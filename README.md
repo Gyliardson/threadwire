@@ -2,7 +2,7 @@
 
 Threadwire is an experimental local controller for ChatGPT Classic on Windows. It drives the legitimate ChatGPT Classic process and its WebContents through localhost Chrome DevTools Protocol (CDP) rather than implementing a standalone or reverse-engineered ChatGPT HTTP client.
 
-> **Project status:** active MVP development. The repository currently implements runtime supervision, CDP recovery/session management, conversation routing/scheduling, existing/fresh-route readiness, turn execution, conservative response streaming with authoritative final rendered reconciliation, and a localhost HTTP/SSE API. ThreadHandle persistence and the later observability/integration milestones are not yet complete.
+> **Project status:** active MVP development. The repository currently implements runtime supervision, CDP recovery/session management, conversation routing/scheduling, existing/fresh/Project-route readiness, Project creation, Project-scoped first turns, turn execution, conservative response streaming with authoritative final rendered reconciliation, and a localhost HTTP/SSE API. ThreadHandle persistence and the later observability/integration milestones are not yet complete.
 
 Threadwire is an independent, unofficial project and is not affiliated with or endorsed by OpenAI.
 
@@ -32,6 +32,7 @@ The current MVP implementation includes:
 - **M6:** conservative normalized response streaming plus authoritative `FINAL_TEXT` reconciliation from the rendered assistant response.
 - **M7:** bounded true cold-start/CDP recovery acceptance and hardening.
 - **M8:** localhost-only HTTP/SSE API over the existing routing, scheduling, turn, and response pipeline.
+- **Projects:** opaque Project creation plus new Project-owned conversations that return ordinary opaque `ThreadHandle` values for follow-up turns.
 
 The 500 ms fresh-route guard is an engineering default, not a proven frontend minimum or a claim about a specific frontend mechanism.
 
@@ -121,6 +122,24 @@ Returns currently known in-memory opaque thread handles:
 
 ThreadHandle persistence is planned for M9; this endpoint does not imply persistence across controller restarts.
 
+### `POST /v1/projects`
+
+Creates a Project through the legitimate frontend:
+
+```json
+{
+  "name": "Threadwire Project"
+}
+```
+
+Success returns only an opaque Project handle:
+
+```json
+{
+  "projectHandle": "prj_..."
+}
+```
+
 ### `POST /v1/turns`
 
 Fresh turn request:
@@ -143,6 +162,20 @@ Existing-thread request:
   "prompt": "Follow up"
 }
 ```
+
+Project-scoped first turn request:
+
+```json
+{
+  "target": {
+    "kind": "PROJECT",
+    "projectHandle": "prj_..."
+  },
+  "prompt": "Start a new conversation in this Project"
+}
+```
+
+`PROJECT` always creates a new conversation inside the referenced Project. Its successful `COMPLETED` event returns the normal opaque `threadHandle`; subsequent messages use the existing `THREAD` target.
 
 Successful requests use Server-Sent Events. The public success sequence is:
 

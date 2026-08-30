@@ -2,6 +2,9 @@ import { CdpSessionManager } from "../cdp/CdpSessionManager.js";
 import { ControllerConfig } from "../config/ControllerConfig.js";
 import { CdpConnectionState } from "../domain/RuntimeState.js";
 import { ThreadHandle } from "../domain/ThreadIdentity.js";
+import { ProjectHandle, ProjectLocator } from "../domain/ProjectIdentity.js";
+import { ProjectCreator } from "../project/ProjectCreator.js";
+import { ProjectRegistry } from "../project/ProjectRegistry.js";
 import { ReadinessController } from "../readiness/ReadinessController.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import { ConversationRouter } from "../routing/ConversationRouter.js";
@@ -10,6 +13,7 @@ import { ThreadRegistry } from "../routing/ThreadRegistry.js";
 import { ClassicSupervisor } from "../runtime/ClassicSupervisor.js";
 import { TurnExecutor } from "../turn/TurnExecutor.js";
 import { TurnResponseEventListener, TurnResult, TurnTarget } from "../turn/types.js";
+import { withTimeout } from "../utils/timeout.js";
 import {
   ControllerTurnQueue,
   DEFAULT_CONTROLLER_MAX_OUTSTANDING_TURNS,
@@ -17,12 +21,19 @@ import {
 
 export type ControllerTurnTarget =
   | Readonly<{ kind: "FRESH" }>
-  | Readonly<{ kind: "THREAD"; threadHandle: ThreadHandle }>;
+  | Readonly<{ kind: "THREAD"; threadHandle: ThreadHandle }>
+  | Readonly<{ kind: "PROJECT"; projectHandle: ProjectHandle }>;
 
 export interface ControllerTurnRequest {
   readonly target: ControllerTurnTarget;
   readonly prompt: string;
 }
+
+export interface ControllerCreateProjectRequest {
+  readonly name: string;
+}
+
+export type ControllerCreateProjectResult = Readonly<{ projectHandle: ProjectHandle }>;
 
 export interface ControllerHealth {
   readonly classic: "RUNNING" | "STOPPED";
@@ -43,12 +54,19 @@ export interface CdpControllerPort {
 
 export interface ThreadRegistryControllerPort {
   resolve(handle: ThreadHandle): unknown;
+  registrationState(handle: ThreadHandle): "COMMITTED" | "PROVISIONAL";
+  waitForCommit(handle: ThreadHandle, signal?: AbortSignal): Promise<void>;
   knownThreads(): readonly ThreadHandle[];
+}
+
+export interface ProjectRegistryControllerPort {
+  resolve(handle: ProjectHandle): ProjectLocator;
 }
 
 export interface ConversationRouterControllerPort {
   routeFresh(signal?: AbortSignal): Promise<unknown>;
   routeToThread(handle: ThreadHandle, signal?: AbortSignal): Promise<unknown>;
+  routeToProject(locator: ProjectLocator, signal?: AbortSignal): Promise<unknown>;
 }
 
 export interface TurnExecutorControllerPort {
@@ -58,22 +76,41 @@ export interface TurnExecutorControllerPort {
     listener: TurnResponseEventListener,
     signal?: AbortSignal,
   ): Promise<TurnResult>;
+  confirmCompletedTurn?(result: TurnResult): void;
+  rollbackCompletedTurn?(result: TurnResult): void;
+}
+
+export interface ProjectCreatorControllerPort {
+  create(name: string, signal?: AbortSignal): Promise<ControllerCreateProjectResult>;
 }
 
 export interface ThreadwireControllerDependencies {
   readonly runtime: RuntimeControllerPort;
   readonly cdp: CdpControllerPort;
   readonly registry: ThreadRegistryControllerPort;
+  readonly projectRegistry: ProjectRegistryControllerPort;
   readonly router: ConversationRouterControllerPort;
   readonly executor: TurnExecutorControllerPort;
+  readonly projectCreator: ProjectCreatorControllerPort;
 }
 
 export interface ThreadwireControllerOptions {
   readonly maxOutstandingTurns?: number;
+  readonly provisionalThreadWaitTimeoutMs?: number;
+}
+
+export const DEFAULT_PROVISIONAL_THREAD_WAIT_TIMEOUT_MS = 15_000;
+
+interface PendingCompletionBarrier {
+  readonly promise: Promise<boolean>;
+  readonly settle: (committed: boolean) => void;
 }
 
 export class ThreadwireController {
   private readonly turnQueue: ControllerTurnQueue;
+  private readonly provisionalThreadWaitTimeoutMs: number;
+  private pendingCompletionBarrier: PendingCompletionBarrier | null = null;
+  private readonly pendingCompletionResults = new WeakSet<TurnResult>();
 
   public constructor(
     private readonly dependencies: ThreadwireControllerDependencies,
@@ -82,6 +119,14 @@ export class ThreadwireController {
     this.turnQueue = new ControllerTurnQueue(
       options.maxOutstandingTurns ?? DEFAULT_CONTROLLER_MAX_OUTSTANDING_TURNS,
     );
+    this.provisionalThreadWaitTimeoutMs =
+      options.provisionalThreadWaitTimeoutMs ?? DEFAULT_PROVISIONAL_THREAD_WAIT_TIMEOUT_MS;
+    if (
+      !Number.isFinite(this.provisionalThreadWaitTimeoutMs) ||
+      this.provisionalThreadWaitTimeoutMs <= 0
+    ) {
+      throw new RangeError("provisionalThreadWaitTimeoutMs must be a positive finite number.");
+    }
   }
 
   public async health(signal?: AbortSignal): Promise<ControllerHealth> {
@@ -101,12 +146,29 @@ export class ThreadwireController {
     listener: (event: ResponseStreamEvent) => void,
     signal?: AbortSignal,
   ): Promise<TurnResult> {
-    if (request.target.kind === "THREAD") {
-      this.dependencies.registry.resolve(request.target.threadHandle);
+    let projectLocator: ProjectLocator | null = null;
+    const threadHandle = request.target.kind === "THREAD" ? request.target.threadHandle : null;
+    let threadRegistrationState: "COMMITTED" | "PROVISIONAL" | null = null;
+    if (threadHandle !== null) {
+      threadRegistrationState = this.dependencies.registry.registrationState(threadHandle);
+    } else if (request.target.kind === "PROJECT") {
+      projectLocator = this.dependencies.projectRegistry.resolve(request.target.projectHandle);
     }
 
     return this.turnQueue.schedule(
       async () => {
+        if (threadHandle !== null && threadRegistrationState === "PROVISIONAL") {
+          await withTimeout(
+            async (waitSignal) =>
+              await this.dependencies.registry.waitForCommit(threadHandle, waitSignal),
+            this.provisionalThreadWaitTimeoutMs,
+            {
+              message: "Timed out waiting for provisional Thread registration.",
+              ...(signal ? { signal } : {}),
+            },
+          );
+        }
+        await this.awaitPendingCompletion(signal);
         await this.dependencies.runtime.ensureStarted(signal);
         await this.dependencies.cdp.connect(signal);
         this.dependencies.cdp.assertCurrentRuntime();
@@ -115,17 +177,52 @@ export class ThreadwireController {
         if (request.target.kind === "FRESH") {
           await this.dependencies.router.routeFresh(signal);
           target = { kind: "FRESH" };
-        } else {
+        } else if (request.target.kind === "THREAD") {
           await this.dependencies.router.routeToThread(request.target.threadHandle, signal);
           target = { kind: "THREAD", threadHandle: request.target.threadHandle };
+        } else {
+          await this.dependencies.router.routeToProject(projectLocator!, signal);
+          target = { kind: "PROJECT", projectLocator: projectLocator! };
         }
 
-        return await this.dependencies.executor.executeStreaming(
+        const turnResult = await this.dependencies.executor.executeStreaming(
           target,
           request.prompt,
           listener,
           signal,
         );
+
+        if (request.target.kind === "PROJECT" && turnResult.created) {
+          this.installCompletionBarrier(turnResult);
+        }
+
+        return turnResult;
+      },
+      signal,
+    );
+  }
+
+  public confirmTurnCompletion(result: TurnResult): void {
+    this.dependencies.executor.confirmCompletedTurn?.(result);
+    this.settleCompletionBarrier(result, true);
+  }
+
+  public rollbackTurnCompletion(result: TurnResult): void {
+    this.dependencies.executor.rollbackCompletedTurn?.(result);
+    this.settleCompletionBarrier(result, false);
+  }
+
+  public createProject(
+    request: ControllerCreateProjectRequest,
+    signal?: AbortSignal,
+  ): Promise<ControllerCreateProjectResult> {
+    return this.turnQueue.schedule(
+      async () => {
+        await this.awaitPendingCompletion(signal);
+        await this.dependencies.runtime.ensureStarted(signal);
+        await this.dependencies.cdp.connect(signal);
+        this.dependencies.cdp.assertCurrentRuntime();
+        return await this.dependencies.projectCreator.create(request.name, signal);
       },
       signal,
     );
@@ -133,6 +230,59 @@ export class ThreadwireController {
 
   public async close(): Promise<void> {
     await this.dependencies.cdp.disconnect();
+  }
+
+  private installCompletionBarrier(result: TurnResult): void {
+    let settle!: (committed: boolean) => void;
+    const promise = new Promise<boolean>((resolve) => {
+      settle = resolve;
+    });
+    this.pendingCompletionBarrier = { promise, settle };
+    this.pendingCompletionResults.add(result);
+  }
+
+  private settleCompletionBarrier(result: TurnResult, committed: boolean): void {
+    if (!this.pendingCompletionResults.has(result)) {
+      return;
+    }
+    this.pendingCompletionResults.delete(result);
+    const barrier = this.pendingCompletionBarrier;
+    if (barrier === null) {
+      return;
+    }
+    this.pendingCompletionBarrier = null;
+    barrier.settle(committed);
+  }
+
+  private async awaitPendingCompletion(signal?: AbortSignal): Promise<void> {
+    const barrier = this.pendingCompletionBarrier;
+    if (barrier === null) {
+      return;
+    }
+    const committed = await withTimeout(
+      async (waitSignal) => {
+        const onAbort = (): void => {
+          // Allow the barrier to settle naturally; the timeout/abort will race.
+        };
+        waitSignal.addEventListener("abort", onAbort, { once: true });
+        try {
+          return await barrier.promise;
+        } finally {
+          waitSignal.removeEventListener("abort", onAbort);
+        }
+      },
+      this.provisionalThreadWaitTimeoutMs,
+      {
+        message: "Timed out waiting for Project public-completion settlement.",
+        ...(signal ? { signal } : {}),
+      },
+    );
+    if (!committed) {
+      const { TurnStateUncertainError } = await import("../domain/errors.js");
+      throw new TurnStateUncertainError(
+        "A prior Project public-completion transaction was rolled back.",
+      );
+    }
   }
 }
 
@@ -147,9 +297,11 @@ export function createThreadwireController(
   const readiness = new ReadinessController(cdp);
   const router = new ConversationRouter(registry, scheduler, cdp, readiness);
   const executor = new TurnExecutor(registry, scheduler, readiness, cdp);
+  const projectRegistry = new ProjectRegistry();
+  const projectCreator = new ProjectCreator(projectRegistry, scheduler, cdp);
 
   return new ThreadwireController(
-    { runtime: supervisor, cdp, registry, router, executor },
+    { runtime: supervisor, cdp, registry, projectRegistry, router, executor, projectCreator },
     options,
   );
 }

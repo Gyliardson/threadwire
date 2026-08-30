@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { createProjectLocator } from "../../src/domain/ProjectIdentity.js";
 import { RuntimeGenerationTracker, RuntimeLease } from "../../src/domain/RuntimeGeneration.js";
 import {
   ExistingRouteReadinessTimeoutError,
@@ -21,6 +22,9 @@ import {
 } from "../../src/readiness/types.js";
 
 const locator = createConversationLocator("https://chatgpt.com/c/synthetic-readiness");
+const projectLocator = createProjectLocator(
+  "https://chatgpt.com/g/g-p-00000000000000000000000000000055/project",
+);
 
 function createRuntime(): { runtime: RuntimeGenerationTracker; lease: RuntimeLease } {
   const runtime = new RuntimeGenerationTracker();
@@ -109,6 +113,22 @@ test("all aligned gate signals focus then complete without a fixed stabilization
   assert.deepEqual(observation.focuses, [101]);
   assert.equal(observation.snapshotCalls, 2);
   assert.equal(sleepCalls, 1);
+});
+
+test("Project route current observation is one-shot and never focuses the composer", async () => {
+  const { lease } = createRuntime();
+  const matching = new QueueObservation([snapshot({ expectedRoute: true })]);
+  const matchingController = fastController(matching);
+
+  assert.equal(await matchingController.isProjectRouteCurrent(projectLocator, lease), true);
+  assert.equal(matching.snapshotCalls, 1);
+  assert.deepEqual(matching.focuses, []);
+
+  const different = new QueueObservation([snapshot({ expectedRoute: false })]);
+  const differentController = fastController(different);
+  assert.equal(await differentController.isProjectRouteCurrent(projectLocator, lease), false);
+  assert.equal(different.snapshotCalls, 1);
+  assert.deepEqual(different.focuses, []);
 });
 
 test("aborted before start returns OperationAbortedError without observation", async () => {

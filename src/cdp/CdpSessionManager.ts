@@ -7,6 +7,7 @@ import {
   sameRuntimeLease,
 } from "../domain/RuntimeGeneration.js";
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
+import { ProjectLocator, ProjectName } from "../domain/ProjectIdentity.js";
 import { CdpConnectionState } from "../domain/RuntimeState.js";
 import {
   CdpAttachFailedError,
@@ -26,6 +27,7 @@ import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscove
 import {
   CdpFinalRenderedAssistantSnapshot,
   CdpNavigationSettlementTransportSession,
+  CdpProjectUiTransportSession,
   CdpResponseRenderBaseline,
   CdpResponseTurnTransportSession,
   CdpTransport,
@@ -81,6 +83,13 @@ function isResponseTurnTransportSession(
     typeof candidate.takeTurnResponseEvents === "function" &&
     typeof candidate.discardTurnResponse === "function"
   );
+}
+
+function isProjectUiTransportSession(
+  session: CdpTransportSession,
+): session is CdpProjectUiTransportSession {
+  const candidate = session as Partial<CdpProjectUiTransportSession>;
+  return typeof candidate.createProjectThroughUi === "function";
 }
 
 function sanitizedNavigationCause(error: unknown): Error {
@@ -422,6 +431,25 @@ export class CdpSessionManager {
     await this.runTurnSessionOperation(session, lease, () => session.insertText(text));
   }
 
+  public async insertTextIntoProjectComposer(
+    text: string,
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const session = this.requireTurnSessionForLease(lease);
+    if (typeof session.insertTextIntoProjectComposer !== "function") {
+      throw new CdpDisconnectedError("The connected CDP session does not support Project turn input.");
+    }
+    return await this.runReadinessSessionOperation(
+      session,
+      lease,
+      () => session.insertTextIntoProjectComposer!(text, projectLocator, backendDOMNodeId, signal),
+      signal,
+    );
+  }
+
   public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
     const session = this.requireTurnSessionForLease(lease);
     await this.runTurnSessionOperation(session, lease, () => session.dispatchEnterKeyDown());
@@ -432,6 +460,32 @@ export class CdpSessionManager {
     await this.runTurnSessionOperation(session, lease, () => session.dispatchEnterKeyUp());
   }
 
+  public async clickTurnSendButton(
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    formBackendDOMNodeId: number,
+    expectedText: string,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const session = this.requireTurnSessionForLease(lease);
+    if (typeof session.clickTurnSendButton !== "function") {
+      throw new CdpDisconnectedError("The connected CDP session does not support Project turn submission.");
+    }
+    await this.runReadinessSessionOperation(
+      session,
+      lease,
+      () => session.clickTurnSendButton!(
+        projectLocator,
+        backendDOMNodeId,
+        formBackendDOMNodeId,
+        expectedText,
+        signal,
+      ),
+      signal,
+    );
+  }
+
   public async getCurrentConversationLocator(
     lease: RuntimeLease,
   ): Promise<ConversationLocator | null> {
@@ -440,6 +494,24 @@ export class CdpSessionManager {
       session,
       lease,
       () => session.getCurrentConversationLocator(),
+    );
+  }
+
+  public async createProjectThroughUi(
+    name: ProjectName,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+    onMutationAttempted?: () => void,
+  ): Promise<ProjectLocator> {
+    const session = this.requireSessionForLease(lease);
+    if (!isProjectUiTransportSession(session)) {
+      throw new CdpDisconnectedError("The connected CDP session does not support project creation.");
+    }
+    return await this.runReadinessSessionOperation(
+      session,
+      lease,
+      () => session.createProjectThroughUi(name, signal, onMutationAttempted),
+      signal,
     );
   }
 
@@ -462,13 +534,16 @@ export class CdpSessionManager {
     let onAbort: (() => void) | null = null;
     const abortPromise = new Promise<never>((_resolve, reject) => {
       onAbort = () => {
-        this.invalidateSessionAfterInFlightAbort(session);
+        let abortError: unknown;
         try {
           throwIfAborted(signal);
-          reject(new OperationAbortedError());
         } catch (error) {
-          reject(error);
+          abortError = error;
         }
+        void this.invalidateSessionAfterInFlightAbort(session).then(
+          () => reject(abortError ?? new OperationAbortedError()),
+          () => reject(abortError ?? new OperationAbortedError()),
+        );
       };
       signal.addEventListener("abort", onAbort, { once: true });
     });
@@ -501,7 +576,7 @@ export class CdpSessionManager {
     }
   }
 
-  private invalidateSessionAfterInFlightAbort(session: CdpTransportSession): void {
+  private async invalidateSessionAfterInFlightAbort(session: CdpTransportSession): Promise<void> {
     if (this.session !== session) {
       return;
     }
@@ -512,7 +587,7 @@ export class CdpSessionManager {
     this.boundLease = null;
     this.selectedTargetId = null;
     this.currentState = "DISCONNECTED";
-    void session.close().catch(() => undefined);
+    await session.close().catch(() => undefined);
   }
 
   private requireSessionForLease(lease: RuntimeLease): CdpTransportSession {

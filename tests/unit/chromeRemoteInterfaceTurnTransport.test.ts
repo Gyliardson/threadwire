@@ -4,6 +4,7 @@ import { ChromeRemoteInterfaceTransport } from "../../src/cdp/ChromeRemoteInterf
 import { CdpTurnTransportSession } from "../../src/cdp/CdpTransport.js";
 import { CdpTargetInfo } from "../../src/cdp/types.js";
 import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { createProjectLocator } from "../../src/domain/ProjectIdentity.js";
 import { RouteExpectation } from "../../src/readiness/types.js";
 
 const target: CdpTargetInfo = {
@@ -66,6 +67,13 @@ class FakeTurnCriClient {
   };
   public axNodes: readonly unknown[] = [eligibleComposerNode({ value: "" }, true)];
   public readonly inputCalls: Array<Readonly<Record<string, unknown>>> = [];
+  public readonly focusCalls: number[] = [];
+  public readonly evaluateCalls: string[] = [];
+  public readonly evaluateResults: unknown[] = [];
+  public readonly callFunctionCalls: Array<Readonly<Record<string, unknown>>> = [];
+  public readonly callFunctionResults: unknown[] = [];
+  public readonly releaseObjectCalls: string[] = [];
+  public releaseObjectError: Error | null = null;
   private readonly disconnectListeners = new Set<() => void>();
   private readonly requestListeners = new Set<RequestListener>();
   private readonly responseListeners = new Set<ResponseListener>();
@@ -83,7 +91,15 @@ class FakeTurnCriClient {
   };
 
   public readonly DOM = {
-    focus: async (_params: { backendNodeId: number }) => undefined,
+    focus: async ({ backendNodeId }: { backendNodeId: number }) => {
+      this.focusCalls.push(backendNodeId);
+    },
+    resolveNode: async ({ backendNodeId }: { backendNodeId: number }) => ({
+      object: { objectId: backendNodeId === 501 ? "composer-501" : `form-${backendNodeId}` },
+    }),
+    describeNode: async ({ objectId }: { objectId: string }) => ({
+      node: { backendNodeId: Number(objectId.replace("form-", "")) },
+    }),
   };
 
   public readonly Input = {
@@ -92,6 +108,26 @@ class FakeTurnCriClient {
     },
     dispatchKeyEvent: async (params: Record<string, unknown>) => {
       this.inputCalls.push(Object.freeze({ method: "dispatchKeyEvent", ...params }));
+    },
+  };
+
+  public readonly Runtime = {
+    evaluate: async ({ expression }: { expression: string; returnByValue?: boolean }) => {
+      this.evaluateCalls.push(expression);
+      const value = this.evaluateResults.shift();
+      return { result: { value } };
+    },
+    callFunctionOn: async (params: Record<string, unknown>) => {
+      this.callFunctionCalls.push(params);
+      const result = this.callFunctionResults.shift();
+      if (typeof result === "object" && result !== null && "objectId" in result) {
+        return { result };
+      }
+      return { result: { value: result } };
+    },
+    releaseObject: async ({ objectId }: { objectId: string }) => {
+      this.releaseObjectCalls.push(objectId);
+      if (this.releaseObjectError !== null) throw this.releaseObjectError;
     },
   };
 
@@ -215,6 +251,7 @@ test("turn composer state exposes route/eligible/focused/empty booleans only", a
     eligible: true,
     focused: true,
     empty: true,
+    backendDOMNodeId: 501,
   });
   assert.equal(JSON.stringify(empty).includes("ACCESSIBLE_NAME_SECRET"), false);
 
@@ -225,6 +262,7 @@ test("turn composer state exposes route/eligible/focused/empty booleans only", a
     eligible: true,
     focused: true,
     empty: false,
+    backendDOMNodeId: 501,
   });
   assert.equal(JSON.stringify(nonEmpty).includes("ACCESSIBLE_VALUE_SECRET"), false);
 
@@ -243,6 +281,7 @@ test("real Classic empty composer shape with absent AXNode.value is known empty"
     eligible: true,
     focused: true,
     empty: true,
+    backendDOMNodeId: 501,
   });
 });
 
@@ -300,6 +339,148 @@ test("typed Input primitives preserve insertText then Enter keyDown/keyUp orderi
   assert.equal("evaluate" in session, false);
   assert.equal("getResponseBody" in session, false);
   assert.equal("streamResourceContent" in session, false);
+});
+
+test("Project input defers unique enabled send-button validation until post-insert submission", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  client.frame.url = projectLocator;
+  client.callFunctionResults.push({ objectId: "form-601" }, true);
+
+  assert.equal(
+    (await session.getTurnComposerState({ kind: "PROJECT_ROOT", locator: projectLocator }))
+      .expectedRoute,
+    true,
+  );
+  assert.ok(session.clickTurnSendButton);
+  assert.ok(session.insertTextIntoProjectComposer);
+  const formBackendDOMNodeId = await session.insertTextIntoProjectComposer(
+    "PROJECT_PROMPT_SECRET",
+    projectLocator,
+    501,
+  );
+  await session.clickTurnSendButton(
+    projectLocator,
+    501,
+    formBackendDOMNodeId,
+    "PROJECT_PROMPT_SECRET",
+  );
+
+  assert.equal(formBackendDOMNodeId, 601);
+  assert.deepEqual(client.focusCalls, []);
+  assert.deepEqual(client.inputCalls, []);
+  assert.equal(client.callFunctionCalls.length, 2);
+  const insertCall = client.callFunctionCalls[0]!;
+  const clickCall = client.callFunctionCalls[1]!;
+  assert.equal(String(insertCall.functionDeclaration).includes("PROJECT_PROMPT_SECRET"), false);
+  assert.equal(JSON.stringify(insertCall.arguments).includes("PROJECT_PROMPT_SECRET"), true);
+  assert.equal(clickCall.objectId, "composer-501");
+  assert.equal(
+    String(insertCall.functionDeclaration).includes('button[data-testid="send-button"]'),
+    false,
+  );
+  assert.equal(String(insertCall.functionDeclaration).includes("button.form === form"), false);
+  assert.equal(String(insertCall.functionDeclaration).includes("button.disabled"), false);
+  assert.equal(String(insertCall.functionDeclaration).includes("aria-disabled"), false);
+  assert.match(String(clickCall.functionDeclaration), /this !== document\.activeElement/);
+  assert.match(String(clickCall.functionDeclaration), /button\[data-testid="send-button"\]/);
+  assert.match(String(clickCall.functionDeclaration), /matches\.length !== 1/);
+  assert.match(String(clickCall.functionDeclaration), /this\.closest\('form'\) !== expectedForm/);
+  assert.match(String(clickCall.functionDeclaration), /button\.form === expectedForm/);
+  assert.match(String(clickCall.functionDeclaration), /button\.disabled/);
+  assert.match(String(clickCall.functionDeclaration), /inserted !== text/);
+  assert.match(
+    String(client.callFunctionCalls[0]!.functionDeclaration),
+    /value|textContent/,
+  );
+  assert.equal(JSON.stringify(clickCall).includes(projectLocator), true);
+  assert.deepEqual(client.releaseObjectCalls, [
+    "form-601",
+    "composer-501",
+    "form-601",
+    "composer-501",
+  ]);
+});
+
+test("Project pre-insert rejection occurs before any prompt mutation expression", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  client.callFunctionResults.push(false);
+
+  await assert.rejects(
+    () => session.insertTextIntoProjectComposer!("PROJECT_PROMPT_SECRET", projectLocator, 501),
+    /expected Project composer was unavailable for input/,
+  );
+  const declaration = String(client.callFunctionCalls[0]!.functionDeclaration);
+  assert.ok(declaration.indexOf("location.origin") < declaration.indexOf("setter.call"));
+  assert.ok(
+    declaration.indexOf("const form = this.closest('form')") < declaration.indexOf("setter.call"),
+  );
+  assert.ok(declaration.indexOf("typeof text !== 'string'") < declaration.indexOf("setter.call"));
+  assert.equal(declaration.includes('button[data-testid="send-button"]'), false);
+});
+
+test("Project input may materialize Send after text while post-insert validation remains fail-closed", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  client.frame.url = projectLocator;
+  client.callFunctionResults.push({ objectId: "form-601" }, false);
+
+  const formBackendDOMNodeId = await session.insertTextIntoProjectComposer!(
+    "PROJECT_PROMPT_SECRET",
+    projectLocator,
+    501,
+  );
+  assert.equal(formBackendDOMNodeId, 601);
+  await assert.rejects(
+    () =>
+      session.clickTurnSendButton!(
+        projectLocator,
+        501,
+        formBackendDOMNodeId,
+        "PROJECT_PROMPT_SECRET",
+      ),
+    /unique enabled turn send control was unavailable/,
+  );
+
+  const insertDeclaration = String(client.callFunctionCalls[0]!.functionDeclaration);
+  const sendDeclaration = String(client.callFunctionCalls[1]!.functionDeclaration);
+  assert.equal(insertDeclaration.includes('button[data-testid="send-button"]'), false);
+  assert.equal(sendDeclaration.includes('button[data-testid="send-button"]'), true);
+  assert.match(sendDeclaration, /matches\.length !== 1/);
+});
+
+test("Project send control refuses route or composer mismatch without reporting success", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  client.callFunctionResults.push(false);
+
+  await assert.rejects(
+    () => session.clickTurnSendButton!(projectLocator, 501, 601, "PROJECT_PROMPT_SECRET"),
+    /unique enabled turn send control was unavailable/,
+  );
+  const declaration = String(client.callFunctionCalls[0]!.functionDeclaration);
+  assert.ok(declaration.indexOf("location.origin") < declaration.indexOf("matches[0].click"));
+  assert.ok(
+    declaration.indexOf("this.closest('form') !== expectedForm") <
+      declaration.indexOf("matches[0].click"),
+  );
+  assert.ok(declaration.indexOf("matches.length !== 1") < declaration.indexOf("matches[0].click"));
+});
+
+test("Project composer object cleanup failure is sanitized", async () => {
+  const { client, session } = await createSession();
+  const projectLocator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+  client.callFunctionResults.push({ objectId: "form-601" });
+  client.releaseObjectError = new Error("REMOTE_OBJECT_SECRET");
+
+  await assert.rejects(
+    () => session.insertTextIntoProjectComposer!("PROJECT_PROMPT_SECRET", projectLocator, 501),
+    (error: unknown) =>
+      error instanceof Error &&
+      !error.message.includes("REMOTE_OBJECT_SECRET") &&
+      !error.message.includes("PROJECT_PROMPT_SECRET"),
+  );
 });
 
 test("selected write needs 2xx response metadata plus loadingFinished for success", async () => {

@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CdpConnectionState } from "../../src/domain/RuntimeState.js";
 import { ThreadHandle } from "../../src/domain/ThreadIdentity.js";
-import { OperationAbortedError, ThreadNotFoundError } from "../../src/domain/errors.js";
+import { ProjectHandle, createProjectLocator } from "../../src/domain/ProjectIdentity.js";
+import {
+  OperationAbortedError,
+  OperationTimeoutError,
+  ProjectNotFoundError,
+  ThreadNotFoundError,
+  TurnStateUncertainError,
+} from "../../src/domain/errors.js";
 import {
   ControllerTurnRequest,
   ThreadwireController,
@@ -12,6 +19,10 @@ import { ControllerBusyError } from "../../src/controller/ControllerTurnQueue.js
 import { TurnResult } from "../../src/turn/types.js";
 
 const HANDLE = "tw_test_handle" as ThreadHandle;
+const PROJECT_HANDLE = "prj_test_handle" as ProjectHandle;
+const PROJECT_LOCATOR = createProjectLocator(
+  "https://chatgpt.com/g/g-p-00000000000000000000000000000007/project",
+);
 const FRESH_REQUEST: ControllerTurnRequest = {
   target: { kind: "FRESH" },
   prompt: "hello",
@@ -55,6 +66,16 @@ function dependencies(overrides: Partial<ThreadwireControllerDependencies> = {})
       },
     },
     registry: {
+      registrationState(handle) {
+        calls.push(`state:${handle}`);
+        if (handle !== HANDLE) {
+          throw new ThreadNotFoundError();
+        }
+        return "COMMITTED" as const;
+      },
+      async waitForCommit(handle) {
+        calls.push(`wait:${handle}`);
+      },
       resolve(handle) {
         calls.push(`resolve:${handle}`);
         if (handle !== HANDLE) {
@@ -66,6 +87,15 @@ function dependencies(overrides: Partial<ThreadwireControllerDependencies> = {})
         return [HANDLE];
       },
     },
+    projectRegistry: {
+      resolve(handle) {
+        calls.push(`resolveProject:${handle}`);
+        if (handle !== PROJECT_HANDLE) {
+          throw new ProjectNotFoundError();
+        }
+        return PROJECT_LOCATOR;
+      },
+    },
     router: {
       async routeFresh() {
         calls.push("routeFresh");
@@ -73,13 +103,22 @@ function dependencies(overrides: Partial<ThreadwireControllerDependencies> = {})
       async routeToThread(handle) {
         calls.push(`routeThread:${handle}`);
       },
+      async routeToProject(locator) {
+        calls.push(`routeProject:${locator === PROJECT_LOCATOR}`);
+      },
     },
     executor: {
       async executeStreaming(target, text, listener) {
         calls.push(`execute:${target.kind}:${text}`);
         listener({ type: "FINAL_TEXT", text: "answer" });
         listener({ type: "COMPLETED" });
-        return result(target.kind === "FRESH");
+        return result(target.kind !== "THREAD");
+      },
+    },
+    projectCreator: {
+      async create(name) {
+        calls.push(`createProject:${name}`);
+        return { projectHandle: PROJECT_HANDLE };
       },
     },
   };
@@ -111,7 +150,7 @@ test("unknown handles fail before runtime startup or routing", () => {
       ),
     ThreadNotFoundError,
   );
-  assert.deepEqual(fixture.calls, [`resolve:${unknown}`]);
+  assert.deepEqual(fixture.calls, [`state:${unknown}`]);
 });
 
 test("fresh workflow establishes runtime then routes then executes", async () => {
@@ -143,13 +182,200 @@ test("existing workflow validates the handle then routes the same opaque handle"
 
   assert.equal(turn.created, false);
   assert.deepEqual(fixture.calls, [
-    `resolve:${HANDLE}`,
+    `state:${HANDLE}`,
     "ensureStarted",
     "connect",
     "assertCurrentRuntime",
     `routeThread:${HANDLE}`,
     "execute:THREAD:follow-up",
   ]);
+});
+
+test("provisional THREAD admission waits before runtime work and proceeds after commit", async () => {
+  let release!: () => void;
+  const settlement = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const fixture = dependencies({
+    registry: {
+      registrationState() {
+        fixture.calls.push(`state:${HANDLE}`);
+        return "PROVISIONAL";
+      },
+      async waitForCommit() {
+        fixture.calls.push(`wait:${HANDLE}`);
+        await settlement;
+      },
+      resolve() {
+        throw new ThreadNotFoundError();
+      },
+      knownThreads() {
+        return [];
+      },
+    },
+  });
+  const controller = new ThreadwireController(fixture.dependencies);
+
+  const followUp = controller.executeTurn(
+    { target: { kind: "THREAD", threadHandle: HANDLE }, prompt: "follow-up" },
+    () => undefined,
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(fixture.calls, [`state:${HANDLE}`, `wait:${HANDLE}`]);
+
+  release();
+  await followUp;
+  assert.deepEqual(fixture.calls.slice(2), [
+    "ensureStarted",
+    "connect",
+    "assertCurrentRuntime",
+    `routeThread:${HANDLE}`,
+    "execute:THREAD:follow-up",
+  ]);
+});
+
+test("provisional THREAD rollback rejects without runtime mutation", async () => {
+  let rejectSettlement!: (error: Error) => void;
+  const settlement = new Promise<void>((_resolve, reject) => {
+    rejectSettlement = reject;
+  });
+  const fixture = dependencies({
+    registry: {
+      registrationState: () => "PROVISIONAL",
+      async waitForCommit() {
+        await settlement;
+      },
+      resolve() {
+        throw new ThreadNotFoundError();
+      },
+      knownThreads: () => [],
+    },
+  });
+  const controller = new ThreadwireController(fixture.dependencies);
+  const followUp = controller.executeTurn(
+    { target: { kind: "THREAD", threadHandle: HANDLE }, prompt: "follow-up" },
+    () => undefined,
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  rejectSettlement(new ThreadNotFoundError());
+
+  await assert.rejects(followUp, ThreadNotFoundError);
+  assert.equal(fixture.calls.includes("ensureStarted"), false);
+  assert.equal(fixture.calls.includes(`routeThread:${HANDLE}`), false);
+});
+
+test("provisional THREAD admission wait is bounded before runtime mutation", async () => {
+  const fixture = dependencies({
+    registry: {
+      registrationState: () => "PROVISIONAL",
+      async waitForCommit() {
+        await new Promise<void>(() => undefined);
+      },
+      resolve() {
+        throw new ThreadNotFoundError();
+      },
+      knownThreads: () => [],
+    },
+  });
+  const controller = new ThreadwireController(fixture.dependencies, {
+    provisionalThreadWaitTimeoutMs: 5,
+  });
+
+  await assert.rejects(
+    controller.executeTurn(
+      { target: { kind: "THREAD", threadHandle: HANDLE }, prompt: "follow-up" },
+      () => undefined,
+    ),
+    OperationTimeoutError,
+  );
+  assert.equal(fixture.calls.includes("ensureStarted"), false);
+});
+
+test("project-scoped workflow resolves before startup, routes privately, and executes as a creating turn", async () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies);
+
+  const turn = await controller.executeTurn(
+    { target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE }, prompt: "project prompt" },
+    () => undefined,
+  );
+
+  assert.equal(turn.created, true);
+  assert.deepEqual(fixture.calls, [
+    `resolveProject:${PROJECT_HANDLE}`,
+    "ensureStarted",
+    "connect",
+    "assertCurrentRuntime",
+    "routeProject:true",
+    "execute:PROJECT:project prompt",
+  ]);
+});
+
+test("unknown project handles fail before runtime startup or routing", () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies);
+  const unknown = "prj_unknown" as ProjectHandle;
+
+  assert.throws(
+    () => controller.executeTurn(
+      { target: { kind: "PROJECT", projectHandle: unknown }, prompt: "x" },
+      () => undefined,
+    ),
+    ProjectNotFoundError,
+  );
+  assert.deepEqual(fixture.calls, [`resolveProject:${unknown}`]);
+});
+
+test("project workflow establishes runtime and returns an opaque handle", async () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies);
+  const created = await controller.createProject({ name: "Threadwire Acceptance" });
+  assert.deepEqual(created, { projectHandle: PROJECT_HANDLE });
+  assert.deepEqual(fixture.calls, [
+    "ensureStarted",
+    "connect",
+    "assertCurrentRuntime",
+    "createProject:Threadwire Acceptance",
+  ]);
+});
+
+test("controller queue prevents project creation from interleaving with a turn workflow", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const fixture = dependencies({
+    executor: {
+      async executeStreaming() {
+        await gate;
+        return result(true);
+      },
+    },
+  });
+  const controller = new ThreadwireController(fixture.dependencies, { maxOutstandingTurns: 2 });
+  const turn = controller.executeTurn(FRESH_REQUEST, () => undefined);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const project = controller.createProject({ name: "Serialized Project" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fixture.calls.includes("createProject:Serialized Project"), false);
+  release();
+  await Promise.all([turn, project]);
+  assert.equal(fixture.calls.includes("createProject:Serialized Project"), true);
+});
+
+test("controller queue continues after a started project workflow rejects", async () => {
+  const fixture = dependencies({
+    projectCreator: {
+      async create() {
+        throw new Error("synthetic project failure");
+      },
+    },
+  });
+  const controller = new ThreadwireController(fixture.dependencies, { maxOutstandingTurns: 2 });
+  const project = controller.createProject({ name: "Rejected Project" });
+  const turn = controller.executeTurn(FRESH_REQUEST, () => undefined);
+
+  await assert.rejects(project, /synthetic project failure/);
+  assert.equal((await turn).created, true);
+  assert.equal(fixture.calls.includes("execute:FRESH:hello"), true);
 });
 
 test("the controller queue serializes the complete route-to-turn workflow", async () => {
@@ -244,3 +470,160 @@ test("an aborted queued workflow never starts", async () => {
   await first;
   assert.equal(executions, 1);
 });
+
+test("successful PROJECT result blocks a subsequently queued FRESH from runtime work before confirmTurnCompletion", async () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies, { maxOutstandingTurns: 2 });
+
+  const projectResult = await controller.executeTurn(
+    { target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE }, prompt: "project" },
+    () => undefined,
+  );
+  assert.equal(projectResult.created, true);
+
+  const freshCalls: string[] = [];
+  fixture.calls.length = 0;
+  const fresh = controller.executeTurn(FRESH_REQUEST, () => undefined);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  freshCalls.push(...fixture.calls);
+
+  assert.equal(freshCalls.includes("ensureStarted"), false);
+  assert.equal(freshCalls.includes("connect"), false);
+  assert.equal(freshCalls.includes("routeFresh"), false);
+
+  controller.confirmTurnCompletion(projectResult);
+  const freshResult = await fresh;
+  assert.equal(freshResult.created, true);
+  assert.equal(fixture.calls.includes("ensureStarted"), true);
+});
+
+test("after confirmation the queued FRESH workflow proceeds normally", async () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies, { maxOutstandingTurns: 2 });
+
+  const projectResult = await controller.executeTurn(
+    { target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE }, prompt: "project" },
+    () => undefined,
+  );
+  controller.confirmTurnCompletion(projectResult);
+
+  const freshResult = await controller.executeTurn(FRESH_REQUEST, () => undefined);
+  assert.equal(freshResult.created, true);
+  assert.equal(fixture.calls.filter((c) => c === "ensureStarted").length, 2);
+});
+
+test("createProject queued behind a pending Project public completion cannot start early", async () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies, { maxOutstandingTurns: 2 });
+
+  const projectResult = await controller.executeTurn(
+    { target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE }, prompt: "project" },
+    () => undefined,
+  );
+
+  fixture.calls.length = 0;
+  const createPromise = controller.createProject({ name: "Serialized" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fixture.calls.includes("ensureStarted"), false);
+  assert.equal(fixture.calls.includes("createProject:Serialized"), false);
+
+  controller.confirmTurnCompletion(projectResult);
+  const created = await createPromise;
+  assert.deepEqual(created, { projectHandle: PROJECT_HANDLE });
+  assert.equal(fixture.calls.includes("createProject:Serialized"), true);
+});
+
+test("rollbackTurnCompletion causes a queued mutation to reject before runtime work", async () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies, { maxOutstandingTurns: 2 });
+
+  const projectResult = await controller.executeTurn(
+    { target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE }, prompt: "project" },
+    () => undefined,
+  );
+
+  fixture.calls.length = 0;
+  const fresh = controller.executeTurn(FRESH_REQUEST, () => undefined);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  controller.rollbackTurnCompletion(projectResult);
+  await assert.rejects(fresh, TurnStateUncertainError);
+  assert.equal(fixture.calls.includes("ensureStarted"), false);
+  assert.equal(fixture.calls.includes("routeFresh"), false);
+});
+
+test("project completion barrier wait is bounded and cancellation-aware", async () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies, {
+    maxOutstandingTurns: 2,
+    provisionalThreadWaitTimeoutMs: 5,
+  });
+
+  await controller.executeTurn(
+    { target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE }, prompt: "project" },
+    () => undefined,
+  );
+
+  await assert.rejects(
+    controller.executeTurn(FRESH_REQUEST, () => undefined),
+    OperationTimeoutError,
+  );
+
+  const fixture2 = dependencies();
+  const controller2 = new ThreadwireController(fixture2.dependencies, { maxOutstandingTurns: 2 });
+  await controller2.executeTurn(
+    { target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE }, prompt: "project" },
+    () => undefined,
+  );
+  const abort = new AbortController();
+  const cancelled = controller2.executeTurn(FRESH_REQUEST, () => undefined, abort.signal);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  abort.abort();
+  await assert.rejects(cancelled, OperationAbortedError);
+});
+
+test("existing provisional THREAD admission still works with the completion barrier", async () => {
+  let commitWait!: () => void;
+  const commitGate = new Promise<void>((resolve) => { commitWait = resolve; });
+  const fixture = dependencies({
+    registry: {
+      registrationState: () => "PROVISIONAL" as const,
+      async waitForCommit() {
+        await commitGate;
+      },
+      resolve() {
+        return "private-locator";
+      },
+      knownThreads: () => [HANDLE],
+    },
+  });
+  const controller = new ThreadwireController(fixture.dependencies);
+
+  const followUp = controller.executeTurn(
+    { target: { kind: "THREAD", threadHandle: HANDLE }, prompt: "follow" },
+    () => undefined,
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fixture.calls.includes("ensureStarted"), false);
+
+  commitWait();
+  const followUpResult = await followUp;
+  assert.equal(followUpResult.created, false);
+  assert.equal(fixture.calls.includes("ensureStarted"), true);
+});
+
+test("read-only health and knownThreads do not depend on the completion barrier", async () => {
+  const fixture = dependencies();
+  const controller = new ThreadwireController(fixture.dependencies, { maxOutstandingTurns: 2 });
+
+  await controller.executeTurn(
+    { target: { kind: "PROJECT", projectHandle: PROJECT_HANDLE }, prompt: "project" },
+    () => undefined,
+  );
+
+  const health = await controller.health();
+  assert.equal(health.classic, "RUNNING");
+  const threads = controller.knownThreads();
+  assert.deepEqual(threads, [HANDLE]);
+});
+

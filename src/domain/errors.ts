@@ -24,6 +24,11 @@ export type ThreadwireErrorCode =
   | "CONVERSATION_LOCATOR_INVALID"
   | "THREAD_NOT_FOUND"
   | "THREAD_HANDLE_COLLISION"
+  | "PROJECT_LOCATOR_INVALID"
+  | "PROJECT_NOT_FOUND"
+  | "PROJECT_HANDLE_COLLISION"
+  | "PROJECT_CREATION_FAILED"
+  | "PROJECT_CONVERSATION_NOT_CREATED"
   | "ROUTE_NAVIGATION_FAILED"
   | "EXISTING_ROUTE_READINESS_TIMEOUT"
   | "FRESH_ROUTE_READINESS_TIMEOUT"
@@ -217,6 +222,41 @@ export class ThreadHandleCollisionError extends ThreadwireError {
   constructor(message: string = "Unable to allocate a unique Threadwire thread handle.", options?: ErrorOptions) {
     super(message, "THREAD_HANDLE_COLLISION", options);
     this.name = "ThreadHandleCollisionError";
+  }
+}
+
+export class ProjectLocatorInvalidError extends ThreadwireError {
+  constructor(message: string = "Project locator is invalid for the Threadwire route contract.", options?: ErrorOptions) {
+    super(message, "PROJECT_LOCATOR_INVALID", options);
+    this.name = "ProjectLocatorInvalidError";
+  }
+}
+
+export class ProjectHandleCollisionError extends ThreadwireError {
+  constructor(message: string = "Unable to allocate a unique Threadwire project handle.", options?: ErrorOptions) {
+    super(message, "PROJECT_HANDLE_COLLISION", options);
+    this.name = "ProjectHandleCollisionError";
+  }
+}
+
+export class ProjectNotFoundError extends ThreadwireError {
+  constructor(message: string = "Project handle is not known to Threadwire.", options?: ErrorOptions) {
+    super(message, "PROJECT_NOT_FOUND", options);
+    this.name = "ProjectNotFoundError";
+  }
+}
+
+export class ProjectCreationFailedError extends ThreadwireError {
+  constructor(message: string = "ChatGPT Project creation could not be completed safely.", options?: ErrorOptions) {
+    super(message, "PROJECT_CREATION_FAILED", options);
+    this.name = "ProjectCreationFailedError";
+  }
+}
+
+export class ProjectConversationNotCreatedError extends ThreadwireError {
+  constructor(message: string = "The Project turn did not establish a conversation owned by the selected Project.", options?: ErrorOptions) {
+    super(message, "PROJECT_CONVERSATION_NOT_CREATED", options);
+    this.name = "ProjectConversationNotCreatedError";
   }
 }
 

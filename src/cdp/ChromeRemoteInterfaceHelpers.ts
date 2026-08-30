@@ -4,6 +4,7 @@ import {
   ConversationLocator,
   createConversationLocator,
 } from "../domain/ThreadIdentity.js";
+import { ProjectLocator, createProjectLocator } from "../domain/ProjectIdentity.js";
 import { ReadinessEditableTarget, RouteExpectation } from "../readiness/types.js";
 
 export type { CriClient };
@@ -113,6 +114,16 @@ export function routeMatchesExpected(rawUrl: string, expectedRoute: RouteExpecta
     } catch {
       return false;
     }
+  }
+
+  if (expectedRoute.kind === "PROJECT_ROOT") {
+    let normalized: ProjectLocator;
+    try {
+      normalized = createProjectLocator(rawUrl);
+    } catch {
+      return false;
+    }
+    return normalized === expectedRoute.locator;
   }
 
   let normalized: ConversationLocator;

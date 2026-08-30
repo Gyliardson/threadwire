@@ -4,12 +4,16 @@ import test from "node:test";
 import { ThreadwireHttpServer, ThreadwireApiController } from "../../src/api/ThreadwireHttpServer.js";
 import { ControllerTurnRequest } from "../../src/controller/ThreadwireController.js";
 import { ThreadHandle } from "../../src/domain/ThreadIdentity.js";
+import { ProjectHandle } from "../../src/domain/ProjectIdentity.js";
 import { ResponseStreamEvent } from "../../src/response/types.js";
 import { TurnResult } from "../../src/turn/types.js";
 
 const HANDLE = "tw_delta_optional" as ThreadHandle;
 
 class DeltaFreeController implements ThreadwireApiController {
+  public confirmTurnCompletion(_result: TurnResult): void {}
+
+  public rollbackTurnCompletion(_result: TurnResult): void {}
   public async health() {
     return { classic: "RUNNING" as const, cdp: "CONNECTED" as const };
   }
@@ -31,6 +35,10 @@ class DeltaFreeController implements ThreadwireApiController {
       threadHandle: HANDLE,
       created: false as const,
     });
+  }
+
+  public async createProject(): Promise<{ projectHandle: ProjectHandle }> {
+    return { projectHandle: "prj_delta_optional" as ProjectHandle };
   }
 
   public async close(): Promise<void> {}

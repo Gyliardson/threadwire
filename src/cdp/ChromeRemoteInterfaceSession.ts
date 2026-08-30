@@ -1,9 +1,15 @@
 import { ConversationLocator, createConversationLocator } from "../domain/ThreadIdentity.js";
+import {
+  ProjectLocator,
+  ProjectName,
+  createProjectLocator,
+} from "../domain/ProjectIdentity.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { NormalizedResponseStreamEvent } from "../response/types.js";
 import {
   CdpFinalRenderedAssistantSnapshot,
   CdpNavigationSettlementTransportSession,
+  CdpProjectUiTransportSession,
   CdpResponseRenderBaseline,
   CdpResponseTurnTransportSession,
   CdpTurnComposerState,
@@ -36,7 +42,7 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 }
 
 export class ChromeRemoteInterfaceSession
-  implements CdpResponseTurnTransportSession, CdpNavigationSettlementTransportSession
+  implements CdpResponseTurnTransportSession, CdpNavigationSettlementTransportSession, CdpProjectUiTransportSession
 {
   private readonly activeRelevantRequestIds = new Set<string>();
   private readonly disconnectListeners = new Set<() => void>();
@@ -350,6 +356,7 @@ export class ChromeRemoteInterfaceSession
       eligible: true,
       focused: target.focused,
       empty: target.empty,
+      backendDOMNodeId: target.backendDOMNodeId,
     });
   }
 
@@ -522,6 +529,43 @@ export class ChromeRemoteInterfaceSession
     await this.dispatchEnter("keyUp");
   }
 
+  public async clickTurnSendButton(
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    formBackendDOMNodeId: number,
+    expectedText: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const clicked = await this.clickProjectComposerSend(
+      projectLocator,
+      backendDOMNodeId,
+      formBackendDOMNodeId,
+      expectedText,
+      signal,
+    );
+    if (!clicked) {
+      throw new Error("The unique enabled turn send control was unavailable.");
+    }
+  }
+
+  public async insertTextIntoProjectComposer(
+    text: string,
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const formBackendDOMNodeId = await this.insertProjectComposerText(
+      projectLocator,
+      backendDOMNodeId,
+      text,
+      signal,
+    );
+    if (formBackendDOMNodeId === null) {
+      throw new Error("The expected Project composer was unavailable for input.");
+    }
+    return formBackendDOMNodeId;
+  }
+
   public async getCurrentConversationLocator(): Promise<ConversationLocator | null> {
     if (this.closed) {
       throw new Error("CDP session is closed.");
@@ -531,6 +575,362 @@ export class ChromeRemoteInterfaceSession
       return createConversationLocator(frameTree.frameTree.frame.url);
     } catch {
       return null;
+    }
+  }
+
+  public async createProjectThroughUi(
+    name: ProjectName,
+    signal?: AbortSignal,
+    onMutationAttempted?: () => void,
+  ): Promise<ProjectLocator> {
+    if (this.closed || !this.readinessInitialized) {
+      throw new Error("CDP project UI operation is unavailable.");
+    }
+    throwIfAborted(signal);
+    const initialFrameTree = await this.client.Page.getFrameTree();
+    let initialLocator: ProjectLocator | null = null;
+    try {
+      initialLocator = createProjectLocator(initialFrameTree.frameTree.frame.url);
+    } catch {
+      // Project creation may begin from any supported ChatGPT route.
+    }
+    const opened = await this.evaluateProjectBoolean(`(() => {
+      const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+      const controls = Array.from(document.querySelectorAll('button, [role="button"]'));
+      const matches = controls.filter((control) => {
+        const label = (control.getAttribute('aria-label') ?? '').toLocaleLowerCase();
+        return ['new project', 'create project', 'novo projeto', 'criar projeto'].includes(label) &&
+          visible(control) && control.closest('nav, [role="navigation"]') !== null;
+      });
+      if (matches.length !== 1) return false;
+      matches[0].click();
+      return true;
+    })()`);
+    if (!opened) {
+      throw new Error("Project creation control was unavailable.");
+    }
+
+    let inputFocused = false;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      throwIfAborted(signal);
+      inputFocused = await this.evaluateProjectBoolean(`(() => {
+        const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+        const controls = Array.from(document.querySelectorAll('button, [role="button"]')).filter((control) => {
+          const signal = [control.getAttribute('aria-label'), control.getAttribute('title'), control.getAttribute('data-testid')]
+            .filter(Boolean).join(' ').toLocaleLowerCase();
+          return (signal.includes('project') || signal.includes('projeto')) &&
+            control.closest('nav, [role="navigation"]') === null && visible(control);
+        });
+        let surface = controls[0]?.parentElement ?? null;
+        while (surface !== null && !controls.every((control) => surface.contains(control))) surface = surface.parentElement;
+        if (surface === null) return false;
+        const inputs = Array.from(surface.querySelectorAll('input[type="text"]')).filter(visible);
+        if (inputs.length !== 1) return false;
+        inputs[0].focus();
+        return true;
+      })()`);
+      if (inputFocused) break;
+      await delay(100, signal);
+    }
+    if (!inputFocused) {
+      throw new Error("Project name input was unavailable.");
+    }
+
+    throwIfAborted(signal);
+    try {
+      await this.client.Input.insertText({ text: name });
+    } catch {
+      throw new Error("Project name input failed without retained protocol metadata.");
+    }
+
+    let confirmed = false;
+    onMutationAttempted?.();
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      throwIfAborted(signal);
+      confirmed = await this.evaluateProjectBoolean(`(() => {
+        const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+        const inputs = Array.from(document.querySelectorAll('input[type="text"]')).filter(visible);
+        const matchingInputs = inputs.filter((input) => input.value === ${JSON.stringify(name)});
+        if (matchingInputs.length !== 1) return false;
+        let surface = matchingInputs[0].parentElement;
+        while (surface !== null) {
+          const buttons = Array.from(surface.querySelectorAll('button, [role="button"]')).filter(visible);
+          const matches = buttons.filter((button) => {
+            const text = (button.textContent ?? '').trim().toLocaleLowerCase();
+            return (text.includes('create') || text.includes('criar')) &&
+              (text.includes('project') || text.includes('projeto'));
+          });
+          if (matches.length === 1) {
+            const button = matches[0];
+            if ((button instanceof HTMLButtonElement && button.disabled) || button.getAttribute('aria-disabled') === 'true') return false;
+            button.click();
+            return true;
+          }
+          surface = surface.parentElement;
+        }
+        return false;
+      })()`);
+      if (confirmed) break;
+      await delay(100, signal);
+    }
+    if (!confirmed) {
+      throw new Error("Project creation confirmation was unavailable.");
+    }
+
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      throwIfAborted(signal);
+      const frameTree = await this.client.Page.getFrameTree();
+      let locator: ProjectLocator;
+      try {
+        locator = createProjectLocator(frameTree.frameTree.frame.url);
+      } catch {
+        await delay(100, signal);
+        continue;
+      }
+      if (locator === initialLocator) {
+        await delay(100, signal);
+        continue;
+      }
+      const nameVisible = await this.evaluateProjectBoolean(`(() =>
+        Array.from(document.querySelectorAll('h1, h2')).some((heading) =>
+          (heading.textContent ?? '').replace(/\\s+/g, ' ').trim() === ${JSON.stringify(name)}
+        )
+      )()`);
+      if (nameVisible) {
+        return locator;
+      }
+      await delay(100, signal);
+    }
+    throw new Error("Project creation postcondition was not observed.");
+  }
+
+  private async evaluateProjectBoolean(expression: string): Promise<boolean> {
+    let result: Awaited<ReturnType<CriClient["Runtime"]["evaluate"]>>;
+    try {
+      result = await this.client.Runtime.evaluate({ expression, returnByValue: true });
+    } catch {
+      throw new Error("CDP project UI observation failed without retained protocol metadata.");
+    }
+    if (result.exceptionDetails !== undefined || typeof result.result.value !== "boolean") {
+      throw new Error("CDP project UI observation was malformed.");
+    }
+    return result.result.value;
+  }
+
+  private async insertProjectComposerText(
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<number | null> {
+    const { dom, runtime } = this.projectComposerDomains(backendDOMNodeId, signal);
+    const objectIds: string[] = [];
+    let operationFailed = false;
+    let formBackendDOMNodeId: number | null = null;
+    try {
+      const composer = await dom.resolveNode({ backendNodeId: backendDOMNodeId });
+      const composerObjectId = composer.object.objectId;
+      if (typeof composerObjectId !== "string" || composerObjectId.length === 0) {
+        throw new Error("Project composer identity could not be resolved.");
+      }
+      objectIds.push(composerObjectId);
+      throwIfAborted(signal);
+      const result = await runtime.callFunctionOn({
+        objectId: composerObjectId,
+        functionDeclaration: `function(expectedHref, text) {
+          const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+          const expected = new URL(expectedHref);
+          const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+          if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+              location.search !== '' || location.hash !== '' || this !== document.activeElement ||
+              !(this instanceof HTMLElement) || !visible(this) ||
+              !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox')) {
+            return null;
+          }
+          const form = this.closest('form');
+          if (form === null || typeof text !== 'string' || text.length === 0) return null;
+          const content = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
+            ? this.value
+            : this.textContent;
+          if (content !== null && content.length !== 0) return null;
+          this.focus();
+          if (this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement) {
+            const prototype = this instanceof HTMLTextAreaElement
+              ? HTMLTextAreaElement.prototype
+              : HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+            if (setter === undefined) return null;
+            setter.call(this, text);
+          } else if (this.isContentEditable) {
+            this.textContent = text;
+          } else {
+            return null;
+          }
+          this.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
+            data: text,
+            inputType: 'insertText',
+          }));
+          const inserted = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
+            ? this.value
+            : this.textContent;
+          return inserted === text ? form : null;
+        }`,
+        arguments: [{ value: projectLocator }, { value: text }],
+        returnByValue: false,
+      });
+      const formObjectId = result.result.objectId;
+      if (typeof formObjectId === "string") {
+        objectIds.push(formObjectId);
+      }
+      throwIfAborted(signal);
+      if (result.exceptionDetails !== undefined || typeof formObjectId !== "string") {
+        formBackendDOMNodeId = null;
+      } else {
+        const described = await dom.describeNode({ objectId: formObjectId });
+        throwIfAborted(signal);
+        const candidate = described.node.backendNodeId;
+        if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate > 0) {
+          formBackendDOMNodeId = candidate;
+        }
+      }
+    } catch {
+      operationFailed = true;
+    }
+
+    await this.releaseProjectComposerObjects(runtime, objectIds);
+    if (operationFailed) {
+      throw new Error("CDP Project composer operation failed without retained protocol metadata.");
+    }
+    return formBackendDOMNodeId;
+  }
+
+  private async clickProjectComposerSend(
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    formBackendDOMNodeId: number,
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const { dom, runtime } = this.projectComposerDomains(backendDOMNodeId, signal);
+    if (!Number.isSafeInteger(formBackendDOMNodeId) || formBackendDOMNodeId <= 0) {
+      throw new TypeError("Project turn form identity is invalid.");
+    }
+    const objectIds: string[] = [];
+    let operationFailed = false;
+    let clicked = false;
+    try {
+      const composer = await dom.resolveNode({ backendNodeId: backendDOMNodeId });
+      const composerObjectId = composer.object.objectId;
+      if (typeof composerObjectId !== "string" || composerObjectId.length === 0) {
+        throw new Error("Project composer identity could not be resolved.");
+      }
+      objectIds.push(composerObjectId);
+      throwIfAborted(signal);
+      const form = await dom.resolveNode({ backendNodeId: formBackendDOMNodeId });
+      const formObjectId = form.object.objectId;
+      if (typeof formObjectId !== "string" || formObjectId.length === 0) {
+        throw new Error("Project composer identity could not be resolved.");
+      }
+      objectIds.push(formObjectId);
+      throwIfAborted(signal);
+      const result = await runtime.callFunctionOn({
+        objectId: composerObjectId,
+        functionDeclaration: `function(expectedHref, expectedForm, text) {
+          const visible = (element) => element instanceof HTMLElement && element.offsetParent !== null;
+          const expected = new URL(expectedHref);
+          const currentPath = location.pathname.endsWith('/') ? location.pathname.slice(0, -1) : location.pathname;
+          if (location.origin !== expected.origin || currentPath !== expected.pathname ||
+              location.search !== '' || location.hash !== '' || this !== document.activeElement ||
+              !(this instanceof HTMLElement) || !visible(this) ||
+              !(expectedForm instanceof HTMLFormElement) || this.closest('form') !== expectedForm ||
+              !(this.matches('textarea, [contenteditable="true"]') || this.getAttribute('role') === 'textbox')) {
+            return false;
+          }
+          const inserted = this instanceof HTMLTextAreaElement || this instanceof HTMLInputElement
+            ? this.value
+            : this.textContent;
+          if (typeof text !== 'string' || text.length === 0 || inserted !== text) return false;
+          const matches = Array.from(expectedForm.querySelectorAll('button[data-testid="send-button"]'))
+            .filter((button) => visible(button) && button instanceof HTMLButtonElement &&
+              button.form === expectedForm && !button.disabled &&
+              button.getAttribute('aria-disabled') !== 'true');
+          if (matches.length !== 1) return false;
+          matches[0].click();
+          return true;
+        }`,
+        arguments: [
+          { value: projectLocator },
+          { objectId: formObjectId },
+          { value: text },
+        ],
+        returnByValue: true,
+      });
+      throwIfAborted(signal);
+      if (result.exceptionDetails !== undefined || typeof result.result.value !== "boolean") {
+        throw new Error("Project composer identity observation was malformed.");
+      }
+      clicked = result.result.value;
+    } catch {
+      operationFailed = true;
+    }
+
+    await this.releaseProjectComposerObjects(runtime, objectIds);
+    if (operationFailed) {
+      throw new Error("CDP Project composer operation failed without retained protocol metadata.");
+    }
+    return clicked;
+  }
+
+  private projectComposerDomains(backendDOMNodeId: number, signal?: AbortSignal) {
+    throwIfAborted(signal);
+    if (this.closed || !this.readinessInitialized) {
+      throw new Error("CDP Project composer operation is unavailable.");
+    }
+    if (!Number.isSafeInteger(backendDOMNodeId) || backendDOMNodeId <= 0) {
+      throw new TypeError("Project turn composer identity is invalid.");
+    }
+    const dom = this.client.DOM as unknown as {
+      resolveNode(params: { backendNodeId: number }): Promise<{
+        object: { objectId?: string };
+      }>;
+      describeNode(params: { objectId: string }): Promise<{
+        node: { backendNodeId?: number };
+      }>;
+    };
+    const runtime = this.client.Runtime as unknown as {
+      callFunctionOn(params: Readonly<Record<string, unknown>>): Promise<{
+        result: { value?: unknown; objectId?: string };
+        exceptionDetails?: unknown;
+      }>;
+      releaseObject(params: Readonly<{ objectId: string }>): Promise<void>;
+    };
+    if (
+      typeof dom.resolveNode !== "function" ||
+      typeof dom.describeNode !== "function" ||
+      typeof runtime.callFunctionOn !== "function" ||
+      typeof runtime.releaseObject !== "function"
+    ) {
+      throw new Error("CDP Project composer identity observation is unavailable.");
+    }
+    return { dom, runtime };
+  }
+
+  private async releaseProjectComposerObjects(
+    runtime: { releaseObject(params: Readonly<{ objectId: string }>): Promise<void> },
+    objectIds: readonly string[],
+  ): Promise<void> {
+    let cleanupFailed = false;
+    for (const objectId of [...objectIds].reverse()) {
+      try {
+        await runtime.releaseObject({ objectId });
+      } catch {
+        cleanupFailed = true;
+      }
+    }
+    if (cleanupFailed) {
+      await this.close().catch(() => undefined);
+      throw new Error("CDP Project composer cleanup failed without retained protocol metadata.");
     }
   }
 

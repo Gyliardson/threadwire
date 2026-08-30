@@ -1,4 +1,5 @@
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
+import { ProjectLocator, ProjectName } from "../domain/ProjectIdentity.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { NormalizedResponseStreamEvent } from "../response/types.js";
 import { CdpTargetInfo } from "./types.js";
@@ -20,6 +21,7 @@ export interface CdpTurnComposerState {
   readonly eligible: boolean;
   readonly focused: boolean;
   readonly empty: boolean;
+  readonly backendDOMNodeId?: number;
 }
 
 export interface CdpResponseRenderBaseline {
@@ -86,8 +88,21 @@ export interface CdpTurnTransportSession extends CdpTransportSession {
   getTurnObservation(handle: CdpTurnObservationHandle): CdpTurnObservationSnapshot;
   releaseTurnObservation(handle: CdpTurnObservationHandle): void;
   insertText(text: string): Promise<void>;
+  insertTextIntoProjectComposer?(
+    text: string,
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    signal?: AbortSignal,
+  ): Promise<number>;
   dispatchEnterKeyDown(): Promise<void>;
   dispatchEnterKeyUp(): Promise<void>;
+  clickTurnSendButton?(
+    projectLocator: ProjectLocator,
+    backendDOMNodeId: number,
+    formBackendDOMNodeId: number,
+    expectedText: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
   getCurrentConversationLocator(): Promise<ConversationLocator | null>;
 }
 
@@ -99,6 +114,14 @@ export interface CdpResponseTurnTransportSession extends CdpTurnTransportSession
   ): Promise<CdpFinalRenderedAssistantSnapshot | null>;
   takeTurnResponseEvents(handle: CdpTurnObservationHandle): readonly NormalizedResponseStreamEvent[];
   discardTurnResponse(handle: CdpTurnObservationHandle): void;
+}
+
+export interface CdpProjectUiTransportSession extends CdpTransportSession {
+  createProjectThroughUi(
+    name: ProjectName,
+    signal?: AbortSignal,
+    onMutationAttempted?: () => void,
+  ): Promise<ProjectLocator>;
 }
 
 export interface CdpTransport {

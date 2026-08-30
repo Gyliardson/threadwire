@@ -17,7 +17,7 @@ import {
   OperationTimeoutError,
   ProcessExitTimeoutError,
 } from "../domain/errors.js";
-import { delay, withTimeout } from "../utils/timeout.js";
+import { delay, throwIfAborted, withTimeout } from "../utils/timeout.js";
 import {
   ClassicInstallationResolver,
   ClassicInstallationSource,
@@ -34,6 +34,7 @@ import {
 const DEFAULT_PROCESS_POLL_INTERVAL_MS = 250;
 const DEFAULT_PROCESS_STOP_TIMEOUT_MS = 5000;
 const DEFAULT_PROCESS_START_TIMEOUT_MS = 10000;
+const REQUIRED_STOP_QUIESCENT_OBSERVATIONS = 2;
 
 const STOP_PROCESS_SCRIPT = `
 $ErrorActionPreference = 'Stop'
@@ -97,6 +98,8 @@ export class ClassicSupervisor implements RuntimeLeaseSource {
   private readonly processPollIntervalMs: number;
   private readonly processStopTimeoutMs: number;
   private readonly processStartTimeoutMs: number;
+  private lifecycleTail: Promise<void> = Promise.resolve();
+  private stopInProgress = false;
 
   public constructor(
     private readonly config: ControllerConfig,
@@ -125,7 +128,9 @@ export class ClassicSupervisor implements RuntimeLeaseSource {
   public async inspect(signal?: AbortSignal): Promise<ClassicRuntimeSnapshot> {
     const processes = await this.inspector.getClassicProcesses(signal);
     const mainProcess = selectUniqueMainProcess(processes);
-    const generation = this.tracker.observe(mainProcess ? runtimeIdentity(mainProcess) : null);
+    const generation = this.stopInProgress
+      ? this.tracker.currentGeneration
+      : this.tracker.observe(mainProcess ? runtimeIdentity(mainProcess) : null);
     return {
       isRunning: mainProcess !== null,
       pid: mainProcess?.pid ?? null,
@@ -135,15 +140,32 @@ export class ClassicSupervisor implements RuntimeLeaseSource {
     };
   }
 
-  public async ensureStarted(signal?: AbortSignal): Promise<RuntimeGeneration> {
-    const snapshot = await this.inspect(signal);
-    if (snapshot.isRunning) {
-      return snapshot.generation;
-    }
-    return await this.startNewGeneration(signal);
+  public ensureStarted(signal?: AbortSignal): Promise<RuntimeGeneration> {
+    return this.runLifecycle(async () => {
+      throwIfAborted(signal);
+      const snapshot = await this.inspect(signal);
+      if (snapshot.isRunning) {
+        return snapshot.generation;
+      }
+      return await this.startNewGeneration(signal);
+    }, signal);
   }
 
-  public async stop(signal?: AbortSignal): Promise<void> {
+  public stop(signal?: AbortSignal): Promise<void> {
+    return this.runLifecycle(async () => await this.stopExclusive(signal), signal);
+  }
+
+  private async stopExclusive(signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    this.stopInProgress = true;
+    try {
+      await this.stopCapturedProcesses(signal);
+    } finally {
+      this.stopInProgress = false;
+    }
+  }
+
+  private async stopCapturedProcesses(signal?: AbortSignal): Promise<void> {
     const processes = await this.inspector.getClassicProcesses(signal);
     const mainProcess = selectUniqueMainProcess(processes);
     if (mainProcess) {
@@ -154,42 +176,60 @@ export class ClassicSupervisor implements RuntimeLeaseSource {
       this.tracker.observe(null);
       return;
     }
+    this.tracker.observe(null);
 
     const previousIdentities = processes.map(runtimeIdentity);
     const serializedIdentities = JSON.stringify(previousIdentities);
 
+    let stopCommandError: unknown;
     try {
-      await this.runner.run(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", STOP_PROCESS_SCRIPT],
-        {
-          ...(signal ? { signal } : {}),
-          env: { ...process.env, THREADWIRE_CLASSIC_IDENTITIES: serializedIdentities },
-        },
+      await withTimeout(
+        async (commandSignal) => await this.runner.run(
+          "powershell.exe",
+          ["-NoProfile", "-NonInteractive", "-Command", STOP_PROCESS_SCRIPT],
+          {
+            signal: commandSignal,
+            env: { ...process.env, THREADWIRE_CLASSIC_IDENTITIES: serializedIdentities },
+          },
+        ),
+        this.processStopTimeoutMs,
+        signal
+          ? { signal, message: "Timed out executing the Classic stop command." }
+          : { message: "Timed out executing the Classic stop command." },
       );
     } catch (error) {
       if (error instanceof OperationAbortedError) {
         throw error;
       }
-      throw new ClassicStopFailedError(undefined, { cause: error });
+      stopCommandError = error;
     }
 
     try {
       await withTimeout(
         async (waitSignal) => {
+          let quiescentObservations = 0;
           while (true) {
             const remaining = await this.inspector.getClassicProcesses(waitSignal);
+            const unexpectedProcessPresent = remaining.some(
+              (process) => !previousIdentities.some((identity) => processMatchesIdentity(process, identity)),
+            );
+            if (unexpectedProcessPresent) {
+              this.tracker.observe(null);
+              throw new ClassicStopFailedError(
+                "A different ChatGPT Classic runtime appeared while stopping the previous runtime.",
+              );
+            }
             const previousStillPresent = previousIdentities.some((identity) =>
               remaining.some((process) => processMatchesIdentity(process, identity)),
             );
             if (!previousStillPresent) {
-              if (remaining.length !== 0) {
-                throw new ClassicStopFailedError(
-                  "A different ChatGPT Classic runtime appeared while stopping the previous runtime.",
-                );
+              quiescentObservations += 1;
+              if (quiescentObservations >= REQUIRED_STOP_QUIESCENT_OBSERVATIONS) {
+                this.tracker.observe(null);
+                return;
               }
-              this.tracker.observe(null);
-              return;
+            } else {
+              quiescentObservations = 0;
             }
             await delay(this.processPollIntervalMs, waitSignal);
           }
@@ -199,21 +239,66 @@ export class ClassicSupervisor implements RuntimeLeaseSource {
       );
     } catch (error) {
       if (error instanceof OperationTimeoutError) {
+        if (stopCommandError !== undefined) {
+          throw new ClassicStopFailedError(undefined, { cause: stopCommandError });
+        }
         throw new ProcessExitTimeoutError(undefined, { cause: error });
       }
       throw error;
     }
   }
 
-  public async restart(signal?: AbortSignal): Promise<RuntimeGeneration> {
-    await this.stop(signal);
-    return await this.startNewGeneration(signal);
+  public restart(signal?: AbortSignal): Promise<RuntimeGeneration> {
+    return this.runLifecycle(async () => {
+      throwIfAborted(signal);
+      await this.stopExclusive(signal);
+      return await this.startNewGeneration(signal);
+    }, signal);
+  }
+
+  private runLifecycle<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    try {
+      throwIfAborted(signal);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
+    const scheduled = this.lifecycleTail.then(operation, operation);
+    this.lifecycleTail = scheduled.then(() => undefined, () => undefined);
+    if (!signal) {
+      return scheduled;
+    }
+
+    let onAbort!: () => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        try {
+          throwIfAborted(signal);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+      }
+    });
+    return Promise.race([scheduled, aborted]).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
   }
 
   private async startNewGeneration(signal?: AbortSignal): Promise<RuntimeGeneration> {
     const generationBeforeLaunch = this.tracker.currentGeneration;
     const installation = await this.resolver.resolve(signal);
     const invocation = buildClassicLaunchInvocation(installation.executablePath, this.config);
+    const processesBeforeLaunch = await this.inspector.getClassicProcesses(signal);
+    if (processesBeforeLaunch.length !== 0) {
+      this.tracker.observe(null);
+      throw new ClassicStartFailedError(
+        "A ChatGPT Classic runtime appeared before the controlled launch began.",
+      );
+    }
 
     try {
       await this.runner.run(

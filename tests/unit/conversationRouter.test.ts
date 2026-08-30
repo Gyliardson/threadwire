@@ -6,6 +6,7 @@ import {
   RuntimeLease,
 } from "../../src/domain/RuntimeGeneration.js";
 import { ThreadHandle, ConversationLocator, createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { ProjectLocator, createProjectLocator } from "../../src/domain/ProjectIdentity.js";
 import {
   ExistingRouteReadinessTimeoutError,
   RouteNavigationFailedError,
@@ -99,6 +100,10 @@ class RecordingNavigation implements ConversationNavigationPort {
 class ControlledReadiness implements ConversationReadinessPort {
   public existingCalls = 0;
   public freshCalls = 0;
+  public projectCalls = 0;
+  public projectRouteCurrentCalls = 0;
+  public projectRouteCurrent = false;
+  public projectRouteObservationFailure: Error | null = null;
   public block: Deferred<void> | null = null;
   public failure: Error | null = null;
 
@@ -129,6 +134,31 @@ class ControlledReadiness implements ConversationReadinessPort {
       await withTimeout(() => this.block!.promise, 5000, signal ? { signal } : {});
     }
     this.events.push("fresh_ready");
+  }
+
+  public async isProjectRouteCurrent(
+    _locator: ProjectLocator,
+    _lease: RuntimeLease,
+    _signal?: AbortSignal,
+  ): Promise<boolean> {
+    this.projectRouteCurrentCalls += 1;
+    this.events.push("project_route_observation");
+    if (this.projectRouteObservationFailure) throw this.projectRouteObservationFailure;
+    return this.projectRouteCurrent;
+  }
+
+  public async waitForProjectRoute(
+    _locator: ProjectLocator,
+    _lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.projectCalls += 1;
+    this.events.push("project_readiness");
+    if (this.failure) throw this.failure;
+    if (this.block) {
+      await withTimeout(() => this.block!.promise, 5000, signal ? { signal } : {});
+    }
+    this.events.push("project_ready");
   }
 }
 
@@ -206,6 +236,74 @@ test("routeFresh navigates to root, reloads once, and allocates no ThreadHandle"
   assert.equal(handleCalls, before);
   assert.equal("threadHandle" in result, false);
   assert.equal(readiness.existingCalls, 0);
+});
+
+test("known Project locator routes through the shared scheduler without exposing it in the result", async () => {
+  const { router, navigation, readiness, events } = createHarness();
+  const locator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000002/project");
+
+  const result = await router.routeToProject(locator);
+
+  assert.deepEqual(navigation.urls, [locator]);
+  assert.deepEqual(events, [
+    "project_route_observation",
+    "navigate_settled",
+    "project_readiness",
+    "project_ready",
+  ]);
+  assert.equal(readiness.projectRouteCurrentCalls, 1);
+  assert.equal(readiness.projectCalls, 1);
+  assert.deepEqual(result, { kind: "PROJECT" });
+  assert.equal(JSON.stringify(result).includes("g-p-00000000000000000000000000000002"), false);
+});
+
+test("already-current Project route skips redundant navigation and still proves readiness", async () => {
+  const { router, navigation, readiness, events } = createHarness();
+  const locator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000012/project");
+  readiness.projectRouteCurrent = true;
+
+  const result = await router.routeToProject(locator);
+
+  assert.deepEqual(navigation.urls, []);
+  assert.deepEqual(events, ["project_route_observation", "project_readiness", "project_ready"]);
+  assert.equal(readiness.projectRouteCurrentCalls, 1);
+  assert.equal(readiness.projectCalls, 1);
+  assert.deepEqual(result, { kind: "PROJECT" });
+});
+
+test("Project route settlement failure prevents readiness", async () => {
+  const { router, navigation, readiness, events } = createHarness();
+  const locator = createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000003/project");
+  navigation.failure = new Error("Project settlement upstream secret detail");
+
+  await assert.rejects(
+    router.routeToProject(locator),
+    (error: unknown) =>
+      error instanceof RouteNavigationFailedError &&
+      error.code === "ROUTE_NAVIGATION_FAILED" &&
+      !error.message.includes("secret detail"),
+  );
+
+  assert.deepEqual(events, ["project_route_observation", "navigate_settled"]);
+  assert.equal(readiness.projectRouteCurrentCalls, 1);
+  assert.equal(readiness.projectCalls, 0);
+});
+
+test("queued Project routing rejects a stale runtime before navigation or readiness", async () => {
+  const { runtime, scheduler, router, navigation, readiness } = createHarness();
+  const blocker = deferred<void>();
+  const active = scheduler.schedule("TURN", async () => await blocker.promise);
+  const project = router.routeToProject(
+    createProjectLocator("https://chatgpt.com/g/g-p-00000000000000000000000000000004/project"),
+  );
+
+  runtime.observe({ pid: 200, creationTime: "runtime-b" });
+  blocker.resolve();
+  await active;
+
+  await assert.rejects(project, RuntimeGenerationChangedError);
+  assert.deepEqual(navigation.urls, []);
+  assert.equal(readiness.projectCalls, 0);
 });
 
 test("concurrent route requests are serialized through the shared scheduler", async () => {
