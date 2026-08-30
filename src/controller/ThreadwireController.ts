@@ -43,6 +43,7 @@ export interface ControllerHealth {
 export interface RuntimeControllerPort {
   inspect(signal?: AbortSignal): Promise<Readonly<{ isRunning: boolean }>>;
   ensureStarted(signal?: AbortSignal): Promise<unknown>;
+  restart?(signal?: AbortSignal): Promise<unknown>;
 }
 
 export interface CdpControllerPort {
@@ -223,6 +224,27 @@ export class ThreadwireController {
         await this.dependencies.cdp.connect(signal);
         this.dependencies.cdp.assertCurrentRuntime();
         return await this.dependencies.projectCreator.create(request.name, signal);
+      },
+      signal,
+    );
+  }
+
+  public recoverRuntime(signal?: AbortSignal): Promise<ControllerHealth> {
+    return this.turnQueue.schedule(
+      async () => {
+        await this.awaitPendingCompletion(signal);
+        const restart = this.dependencies.runtime.restart;
+        if (restart === undefined) {
+          throw new Error("Runtime recovery is unavailable.");
+        }
+        await this.dependencies.cdp.disconnect();
+        await restart.call(this.dependencies.runtime, signal);
+        await this.dependencies.cdp.connect(signal);
+        this.dependencies.cdp.assertCurrentRuntime();
+        return Object.freeze({
+          classic: "RUNNING" as const,
+          cdp: this.dependencies.cdp.state,
+        });
       },
       signal,
     );
