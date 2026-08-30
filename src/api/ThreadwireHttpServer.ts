@@ -40,6 +40,7 @@ export interface ThreadwireApiController {
     request: ControllerCreateProjectRequest,
     signal?: AbortSignal,
   ): Promise<ControllerCreateProjectResult>;
+  recoverRuntime?(signal?: AbortSignal): Promise<ControllerHealth>;
   close(): Promise<void>;
 }
 
@@ -160,6 +161,13 @@ function parseProjectRequest(value: unknown): ControllerCreateProjectRequest {
   try {
     return Object.freeze({ name: createProjectName(body.name) });
   } catch {
+    throw new ApiRequestError("API_REQUEST_INVALID", 400);
+  }
+}
+
+function parseRuntimeRecoveryRequest(value: unknown): void {
+  const body = asRecord(value);
+  if (body === null || !hasExactKeys(body, [])) {
     throw new ApiRequestError("API_REQUEST_INVALID", 400);
   }
 }
@@ -292,6 +300,21 @@ export class ThreadwireHttpServer {
       return;
     }
 
+    if (url.pathname === "/v1/runtime/recover" && request.method !== "POST") {
+      response.setHeader("Allow", "POST");
+      this.writeJson(
+        response,
+        405,
+        serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 405)),
+      );
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/runtime/recover") {
+      await this.handleRuntimeRecovery(request, response);
+      return;
+    }
+
     if (url.pathname === "/v1/turns" && request.method !== "POST") {
       response.setHeader("Allow", "POST");
       this.writeJson(
@@ -336,6 +359,75 @@ export class ThreadwireHttpServer {
     }
     if (request.headers.origin !== undefined || !isAllowedHost(request.headers.host)) {
       throw new ApiRequestError("API_REQUEST_REJECTED", 403);
+    }
+  }
+
+  private async handleRuntimeRecovery(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    if (this.inflightTurns >= this.maxInflightTurns) {
+      this.writeJson(response, 429, serializePublicError(new ControllerBusyError()));
+      return;
+    }
+
+    this.inflightTurns += 1;
+    const abortController = new AbortController();
+    const onRequestAborted = (): void => abortController.abort();
+    const onResponseClose = (): void => {
+      if (!response.writableEnded) abortController.abort();
+    };
+    request.once("aborted", onRequestAborted);
+    response.once("close", onResponseClose);
+    try {
+      const contentType = request.headers["content-type"];
+      const contentEncoding = request.headers["content-encoding"];
+      if (
+        typeof contentType !== "string" ||
+        contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" ||
+        (contentEncoding !== undefined && contentEncoding !== "identity")
+      ) {
+        this.writeJson(
+          response,
+          415,
+          serializePublicError(new ApiRequestError("API_REQUEST_INVALID", 415)),
+        );
+        return;
+      }
+
+      try {
+        parseRuntimeRecoveryRequest(JSON.parse(await this.readBody(request)) as unknown);
+      } catch (error) {
+        if (abortController.signal.aborted || response.destroyed) {
+          return;
+        }
+        const apiError = error instanceof ApiRequestError
+          ? error
+          : new ApiRequestError("API_REQUEST_INVALID", 400);
+        this.writeJson(response, apiError.statusCode, serializePublicError(apiError));
+        return;
+      }
+
+      if (abortController.signal.aborted || request.aborted || response.destroyed) {
+        return;
+      }
+      const recoverRuntime = this.controller.recoverRuntime;
+      if (recoverRuntime === undefined) {
+        this.writeJson(response, 500, serializePublicError(new Error("Runtime recovery unavailable.")));
+        return;
+      }
+      try {
+        const health = await recoverRuntime.call(this.controller, abortController.signal);
+        this.writeJson(response, 200, health);
+      } catch (error) {
+        if (!response.destroyed) {
+          this.writeJson(response, preStreamStatus(error), serializePublicError(error));
+        }
+      }
+    } finally {
+      request.removeListener("aborted", onRequestAborted);
+      response.removeListener("close", onResponseClose);
+      this.inflightTurns -= 1;
     }
   }
 
