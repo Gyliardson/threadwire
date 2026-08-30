@@ -13,7 +13,7 @@ import { ThreadRegistry } from "../routing/ThreadRegistry.js";
 import { ClassicSupervisor } from "../runtime/ClassicSupervisor.js";
 import { TurnExecutor } from "../turn/TurnExecutor.js";
 import { TurnResponseEventListener, TurnResult, TurnTarget } from "../turn/types.js";
-import { withTimeout } from "../utils/timeout.js";
+import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import {
   ControllerTurnQueue,
   DEFAULT_CONTROLLER_MAX_OUTSTANDING_TURNS,
@@ -233,13 +233,20 @@ export class ThreadwireController {
     return this.turnQueue.schedule(
       async () => {
         await this.awaitPendingCompletion(signal);
+        throwIfAborted(signal);
         const restart = this.dependencies.runtime.restart;
         if (restart === undefined) {
           throw new Error("Runtime recovery is unavailable.");
         }
+
+        // The request signal may cancel while recovery is still queued or before the
+        // destructive lifecycle starts. Once CDP disconnect begins, however, the
+        // runtime replacement must reach a terminal safe state even if the client
+        // disappears; otherwise the controller queue could admit a new mutation
+        // while Classic is only partially restarted.
         await this.dependencies.cdp.disconnect();
-        await restart.call(this.dependencies.runtime, signal);
-        await this.dependencies.cdp.connect(signal);
+        await restart.call(this.dependencies.runtime);
+        await this.dependencies.cdp.connect();
         this.dependencies.cdp.assertCurrentRuntime();
         return Object.freeze({
           classic: "RUNNING" as const,
