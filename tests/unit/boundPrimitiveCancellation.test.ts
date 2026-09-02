@@ -163,39 +163,43 @@ async function fixture() {
 
 type PrimitiveCase = Readonly<{
   name: string;
-  run(manager: BoundCdpSessionManager, lease: RuntimeLease): Promise<void>;
+  run(
+    manager: BoundCdpSessionManager,
+    lease: RuntimeLease,
+    signal: AbortSignal,
+  ): Promise<void>;
   count(client: PrimitiveCriClient): number;
 }>;
 
 const primitiveCases: readonly PrimitiveCase[] = [
   {
     name: "Input.insertText",
-    run: async (manager, lease) => await manager.insertText("synthetic", lease),
+    run: async (manager, lease, signal) => await manager.insertText("synthetic", lease, signal),
     count: (client) => client.insertTextCalls,
   },
   {
     name: "Input.dispatchKeyEvent keyDown",
-    run: async (manager, lease) => await manager.dispatchEnterKeyDown(lease),
+    run: async (manager, lease, signal) => await manager.dispatchEnterKeyDown(lease, signal),
     count: (client) => client.keyDownCalls,
   },
   {
     name: "Input.dispatchKeyEvent keyUp",
-    run: async (manager, lease) => await manager.dispatchEnterKeyUp(lease),
+    run: async (manager, lease, signal) => await manager.dispatchEnterKeyUp(lease, signal),
     count: (client) => client.keyUpCalls,
   },
   {
     name: "Page.navigate",
-    run: async (manager) => await manager.navigate("https://chatgpt.com/"),
+    run: async (manager, _lease, signal) => await manager.navigate("https://chatgpt.com/", signal),
     count: (client) => client.pageNavigateCalls,
   },
   {
     name: "Page.reload",
-    run: async (manager) => await manager.reload(),
+    run: async (manager, _lease, signal) => await manager.reload(signal),
     count: (client) => client.pageReloadCalls,
   },
   {
     name: "DOM.focus",
-    run: async (manager, lease) => await manager.focusBackendNode(501, lease),
+    run: async (manager, lease, signal) => await manager.focusBackendNode(501, lease, signal),
     count: (client) => client.focusCalls,
   },
 ];
@@ -205,7 +209,7 @@ for (const primitive of primitiveCases) {
     const f = await fixture();
     const block = f.guard.blockOnFutureCall(2);
     const operation = withTimeout(
-      async () => await primitive.run(f.manager, f.lease),
+      async (commandSignal) => await primitive.run(f.manager, f.lease, commandSignal),
       20,
     );
 
@@ -219,7 +223,7 @@ for (const primitive of primitiveCases) {
   });
 }
 
-test("caller abort propagates through nested timeout authority and blocks detached raw mutation", async () => {
+test("caller abort linked to command authority blocks detached raw mutation", async () => {
   const f = await fixture();
   const scheduler = new OperationScheduler(f.runtime);
   const controller = new AbortController();
@@ -227,10 +231,11 @@ test("caller abort propagates through nested timeout authority and blocks detach
 
   const operation = scheduler.schedule(
     "TURN",
-    async (_operationSignal, lease) =>
+    async (operationSignal, lease) =>
       await withTimeout(
-        async () => await f.manager.insertText("synthetic", lease),
+        async (commandSignal) => await f.manager.insertText("synthetic", lease, commandSignal),
         1_000,
+        operationSignal ? { signal: operationSignal } : {},
       ),
     { signal: controller.signal },
   );
@@ -255,7 +260,7 @@ test("scheduler can advance after timeout without allowing the detached old raw 
     "TURN",
     async (_operationSignal, lease) =>
       await withTimeout(
-        async () => await f.manager.insertText("old", lease),
+        async (commandSignal) => await f.manager.insertText("old", lease, commandSignal),
         20,
       ),
   );

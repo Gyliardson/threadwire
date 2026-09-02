@@ -22,11 +22,7 @@ import {
 } from "../domain/errors.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { NormalizedResponseStreamEvent } from "../response/types.js";
-import {
-  currentOperationSignal,
-  throwIfAborted,
-  withTimeout,
-} from "../utils/timeout.js";
+import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
 import {
@@ -107,10 +103,6 @@ function sanitizedNavigationCause(error: unknown): Error {
   return new Error("CDP navigation failed without retained low-level metadata.");
 }
 
-function mutationAuthoritySignal(signal?: AbortSignal): AbortSignal | undefined {
-  return currentOperationSignal() ?? signal;
-}
-
 export class CdpSessionManager {
   private currentState: CdpConnectionState = "DISCONNECTED";
   private session: CdpTransportSession | null = null;
@@ -144,6 +136,10 @@ export class CdpSessionManager {
 
   public get targetId(): string | null {
     return this.selectedTargetId;
+  }
+
+  protected rawMutationSignal(_signal?: AbortSignal): AbortSignal | undefined {
+    return undefined;
   }
 
   public async connect(signal?: AbortSignal): Promise<void> {
@@ -259,11 +255,15 @@ export class CdpSessionManager {
 
   public async navigate(url: string, signal?: AbortSignal): Promise<void> {
     this.assertCurrentRuntime();
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
+    throwIfAborted(signal);
     const session = this.session!;
+    const rawSignal = this.rawMutationSignal(signal);
     try {
-      await session.navigate(url, effectiveSignal);
+      if (rawSignal) {
+        await session.navigate(url, rawSignal);
+      } else {
+        await session.navigate(url);
+      }
     } catch (error) {
       if (
         error instanceof RuntimeGenerationChangedError ||
@@ -278,11 +278,15 @@ export class CdpSessionManager {
 
   public async reload(signal?: AbortSignal): Promise<void> {
     this.assertCurrentRuntime();
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
+    throwIfAborted(signal);
     const session = this.session!;
+    const rawSignal = this.rawMutationSignal(signal);
     try {
-      await session.reload(effectiveSignal);
+      if (rawSignal) {
+        await session.reload(rawSignal);
+      } else {
+        await session.reload();
+      }
     } catch (error) {
       if (
         error instanceof RuntimeGenerationChangedError ||
@@ -357,18 +361,20 @@ export class CdpSessionManager {
       throw new CdpReadinessFailedError();
     }
 
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
+    throwIfAborted(signal);
     const session = this.requireSessionForLease(lease);
+    const rawSignal = this.rawMutationSignal(signal);
     try {
       await this.runReadinessSessionOperation(
         session,
         lease,
-        () => session.focusBackendNode(backendDOMNodeId, effectiveSignal),
-        effectiveSignal,
+        () => rawSignal
+          ? session.focusBackendNode(backendDOMNodeId, rawSignal)
+          : session.focusBackendNode(backendDOMNodeId),
+        signal,
       );
     } catch (error) {
-      this.rethrowReadinessLifecycleError(error, session, lease, effectiveSignal);
+      this.rethrowReadinessLifecycleError(error, session, lease, signal);
     }
   }
 
@@ -463,14 +469,14 @@ export class CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
+    const rawSignal = this.rawMutationSignal(signal);
+    throwIfAborted(rawSignal);
     const session = this.requireTurnSessionForLease(lease);
     await this.runTurnSessionOperation(
       session,
       lease,
-      () => session.insertText(text, effectiveSignal),
-      effectiveSignal,
+      () => rawSignal ? session.insertText(text, rawSignal) : session.insertText(text),
+      rawSignal,
     );
   }
 
@@ -481,8 +487,6 @@ export class CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<number> {
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
     const session = this.requireTurnSessionForLease(lease);
     if (typeof session.insertTextIntoProjectComposer !== "function") {
       throw new CdpDisconnectedError("The connected CDP session does not support Project turn input.");
@@ -490,13 +494,8 @@ export class CdpSessionManager {
     return await this.runReadinessSessionOperation(
       session,
       lease,
-      () => session.insertTextIntoProjectComposer!(
-        text,
-        projectLocator,
-        backendDOMNodeId,
-        effectiveSignal,
-      ),
-      effectiveSignal,
+      () => session.insertTextIntoProjectComposer!(text, projectLocator, backendDOMNodeId, signal),
+      signal,
     );
   }
 
@@ -504,14 +503,14 @@ export class CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
+    const rawSignal = this.rawMutationSignal(signal);
+    throwIfAborted(rawSignal);
     const session = this.requireTurnSessionForLease(lease);
     await this.runTurnSessionOperation(
       session,
       lease,
-      () => session.dispatchEnterKeyDown(effectiveSignal),
-      effectiveSignal,
+      () => rawSignal ? session.dispatchEnterKeyDown(rawSignal) : session.dispatchEnterKeyDown(),
+      rawSignal,
     );
   }
 
@@ -519,14 +518,14 @@ export class CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
+    const rawSignal = this.rawMutationSignal(signal);
+    throwIfAborted(rawSignal);
     const session = this.requireTurnSessionForLease(lease);
     await this.runTurnSessionOperation(
       session,
       lease,
-      () => session.dispatchEnterKeyUp(effectiveSignal),
-      effectiveSignal,
+      () => rawSignal ? session.dispatchEnterKeyUp(rawSignal) : session.dispatchEnterKeyUp(),
+      rawSignal,
     );
   }
 
@@ -538,8 +537,6 @@ export class CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
     const session = this.requireTurnSessionForLease(lease);
     if (typeof session.clickTurnSendButton !== "function") {
       throw new CdpDisconnectedError("The connected CDP session does not support Project turn submission.");
@@ -552,9 +549,9 @@ export class CdpSessionManager {
         backendDOMNodeId,
         formBackendDOMNodeId,
         expectedText,
-        effectiveSignal,
+        signal,
       ),
-      effectiveSignal,
+      signal,
     );
   }
 
@@ -565,8 +562,6 @@ export class CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
     const session = this.requireTurnSessionForLease(lease);
     if (typeof session.clickExistingTurnSendButton !== "function") {
       throw new CdpDisconnectedError("The connected CDP session does not support existing-thread submission.");
@@ -578,9 +573,9 @@ export class CdpSessionManager {
         conversationLocator,
         backendDOMNodeId,
         expectedText,
-        effectiveSignal,
+        signal,
       ),
-      effectiveSignal,
+      signal,
     );
   }
 
@@ -601,8 +596,6 @@ export class CdpSessionManager {
     signal?: AbortSignal,
     onMutationAttempted?: () => void,
   ): Promise<ProjectLocator> {
-    const effectiveSignal = mutationAuthoritySignal(signal);
-    throwIfAborted(effectiveSignal);
     const session = this.requireSessionForLease(lease);
     if (!isProjectUiTransportSession(session)) {
       throw new CdpDisconnectedError("The connected CDP session does not support project creation.");
@@ -610,8 +603,8 @@ export class CdpSessionManager {
     return await this.runReadinessSessionOperation(
       session,
       lease,
-      () => session.createProjectThroughUi(name, effectiveSignal, onMutationAttempted),
-      effectiveSignal,
+      () => session.createProjectThroughUi(name, signal, onMutationAttempted),
+      signal,
     );
   }
 

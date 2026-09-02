@@ -5,7 +5,7 @@ import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import { RuntimeGenerationChangedError } from "../domain/errors.js";
 import { RouteExpectation } from "../readiness/types.js";
 import { RuntimeProvenanceGuard } from "../runtime/BoundRuntimeProvenanceGuard.js";
-import { currentOperationSignal, throwIfAborted } from "../utils/timeout.js";
+import { throwIfAborted } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { assertTargetDebuggerEndpoint } from "./CdpEndpointBinding.js";
 import {
@@ -20,19 +20,14 @@ import {
   CdpTransportSession,
 } from "./CdpTransport.js";
 
-function authoritySignal(signal?: AbortSignal): AbortSignal | undefined {
-  return currentOperationSignal() ?? signal;
-}
-
 async function assertGuardCurrent(
   guard: RuntimeProvenanceGuard,
   lease: RuntimeLease,
   signal?: AbortSignal,
 ): Promise<void> {
-  const effectiveSignal = authoritySignal(signal);
-  throwIfAborted(effectiveSignal);
-  await guard.assertCurrent(lease, effectiveSignal);
-  throwIfAborted(effectiveSignal);
+  throwIfAborted(signal);
+  await guard.assertCurrent(lease, signal);
+  throwIfAborted(signal);
 }
 
 class GuardedDiscovery implements CdpTargetDiscoveryLike {
@@ -106,6 +101,7 @@ class GuardedTransport implements CdpTransport {
 }
 
 export class BoundCdpSessionManager extends CdpSessionManager {
+  public readonly boundMutationCancellation = true as const;
   private immutableLease: RuntimeLease | null = null;
 
   public constructor(
@@ -132,25 +128,28 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     getLease = () => this.requireImmutableLease();
   }
 
+  protected override rawMutationSignal(signal?: AbortSignal): AbortSignal | undefined {
+    return signal;
+  }
+
   public async bindExistingRuntime(lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
-    const effectiveSignal = authoritySignal(signal);
-    throwIfAborted(effectiveSignal);
+    throwIfAborted(signal);
     if (this.immutableLease === null) {
       this.immutableLease = lease;
-      await this.provenanceGuard.bind(lease, effectiveSignal);
-      throwIfAborted(effectiveSignal);
+      await this.provenanceGuard.bind(lease, signal);
+      throwIfAborted(signal);
     } else if (!sameRuntimeLease(this.immutableLease, lease)) {
       throw new RuntimeGenerationChangedError();
     }
-    await this.connect(effectiveSignal);
+    await this.connect(signal);
   }
 
   public override async connect(signal?: AbortSignal): Promise<void> {
     const lease = this.requireImmutableLease();
-    const effectiveSignal = await this.guardCurrent(signal);
+    await this.guardCurrent(signal);
     try {
-      await super.connect(effectiveSignal);
-      await this.guardCurrent(effectiveSignal);
+      await super.connect(signal);
+      await this.guardCurrent(signal);
       super.assertCurrentRuntime();
     } catch (error) {
       await super.disconnect().catch(() => undefined);
@@ -171,13 +170,13 @@ export class BoundCdpSessionManager extends CdpSessionManager {
   }
 
   public override async navigate(url: string, signal?: AbortSignal): Promise<void> {
-    const effectiveSignal = await this.guardBeforeMutation(signal);
-    await super.navigate(url, effectiveSignal);
+    await this.guardBeforeMutation(signal);
+    await super.navigate(url, signal);
   }
 
   public override async reload(signal?: AbortSignal): Promise<void> {
-    const effectiveSignal = await this.guardBeforeMutation(signal);
-    await super.reload(effectiveSignal);
+    await this.guardBeforeMutation(signal);
+    await super.reload(signal);
   }
 
   public override async navigateAndWaitForLoadSettlement(
@@ -185,8 +184,8 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     expectedRoute: RouteExpectation,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = await this.guardBeforeMutation(signal);
-    await super.navigateAndWaitForLoadSettlement(url, expectedRoute, effectiveSignal);
+    await this.guardBeforeMutation(signal);
+    await super.navigateAndWaitForLoadSettlement(url, expectedRoute, signal);
   }
 
   public override async focusBackendNode(
@@ -194,8 +193,8 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = await this.guardExpectedLease(lease, signal);
-    await super.focusBackendNode(backendDOMNodeId, lease, effectiveSignal);
+    await this.guardExpectedLease(lease, signal);
+    await super.focusBackendNode(backendDOMNodeId, lease, signal);
   }
 
   public override async insertText(
@@ -203,8 +202,8 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = await this.guardExpectedLease(lease, signal);
-    await super.insertText(text, lease, effectiveSignal);
+    await this.guardExpectedLease(lease, signal);
+    await super.insertText(text, lease, signal);
   }
 
   public override async insertTextIntoProjectComposer(
@@ -214,13 +213,13 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<number> {
-    const effectiveSignal = await this.guardExpectedLease(lease, signal);
+    await this.guardExpectedLease(lease, signal);
     return await super.insertTextIntoProjectComposer(
       text,
       projectLocator,
       backendDOMNodeId,
       lease,
-      effectiveSignal,
+      signal,
     );
   }
 
@@ -228,16 +227,16 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = await this.guardExpectedLease(lease, signal);
-    await super.dispatchEnterKeyDown(lease, effectiveSignal);
+    await this.guardExpectedLease(lease, signal);
+    await super.dispatchEnterKeyDown(lease, signal);
   }
 
   public override async dispatchEnterKeyUp(
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = await this.guardExpectedLease(lease, signal);
-    await super.dispatchEnterKeyUp(lease, effectiveSignal);
+    await this.guardExpectedLease(lease, signal);
+    await super.dispatchEnterKeyUp(lease, signal);
   }
 
   public override async clickTurnSendButton(
@@ -248,14 +247,14 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = await this.guardExpectedLease(lease, signal);
+    await this.guardExpectedLease(lease, signal);
     await super.clickTurnSendButton(
       projectLocator,
       backendDOMNodeId,
       formBackendDOMNodeId,
       expectedText,
       lease,
-      effectiveSignal,
+      signal,
     );
   }
 
@@ -266,13 +265,13 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
-    const effectiveSignal = await this.guardExpectedLease(lease, signal);
+    await this.guardExpectedLease(lease, signal);
     await super.clickExistingTurnSendButton(
       conversationLocator,
       backendDOMNodeId,
       expectedText,
       lease,
-      effectiveSignal,
+      signal,
     );
   }
 
@@ -282,8 +281,8 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     signal?: AbortSignal,
     onMutationAttempted?: () => void,
   ): Promise<ProjectLocator> {
-    const effectiveSignal = await this.guardExpectedLease(lease, signal);
-    return await super.createProjectThroughUi(name, lease, effectiveSignal, onMutationAttempted);
+    await this.guardExpectedLease(lease, signal);
+    return await super.createProjectThroughUi(name, lease, signal, onMutationAttempted);
   }
 
   private requireImmutableLease(): RuntimeLease {
@@ -293,26 +292,19 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     return this.immutableLease;
   }
 
-  private async guardCurrent(signal?: AbortSignal): Promise<AbortSignal | undefined> {
-    const effectiveSignal = authoritySignal(signal);
-    await assertGuardCurrent(this.provenanceGuard, this.requireImmutableLease(), effectiveSignal);
-    return effectiveSignal;
+  private async guardCurrent(signal?: AbortSignal): Promise<void> {
+    await assertGuardCurrent(this.provenanceGuard, this.requireImmutableLease(), signal);
   }
 
-  private async guardBeforeMutation(signal?: AbortSignal): Promise<AbortSignal | undefined> {
-    return await this.guardCurrent(signal);
+  private async guardBeforeMutation(signal?: AbortSignal): Promise<void> {
+    await this.guardCurrent(signal);
   }
 
-  private async guardExpectedLease(
-    lease: RuntimeLease,
-    signal?: AbortSignal,
-  ): Promise<AbortSignal | undefined> {
+  private async guardExpectedLease(lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
     const expected = this.requireImmutableLease();
     if (!sameRuntimeLease(expected, lease)) {
       throw new RuntimeGenerationChangedError();
     }
-    const effectiveSignal = authoritySignal(signal);
-    await assertGuardCurrent(this.provenanceGuard, expected, effectiveSignal);
-    return effectiveSignal;
+    await assertGuardCurrent(this.provenanceGuard, expected, signal);
   }
 }

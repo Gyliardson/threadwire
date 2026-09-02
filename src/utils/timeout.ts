@@ -1,22 +1,8 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { OperationAbortedError, OperationTimeoutError } from "../domain/errors.js";
 
 export interface TimeoutOptions {
   readonly signal?: AbortSignal;
   readonly message?: string;
-}
-
-const operationSignalStorage = new AsyncLocalStorage<AbortSignal | null>();
-
-export function currentOperationSignal(): AbortSignal | undefined {
-  return operationSignalStorage.getStore() ?? undefined;
-}
-
-export function runWithOperationSignal<T>(
-  signal: AbortSignal | undefined,
-  operation: () => T,
-): T {
-  return operationSignalStorage.run(signal ?? null, operation);
 }
 
 function abortedError(signal: AbortSignal): Error {
@@ -73,34 +59,24 @@ export async function withTimeout<T>(
     throw new RangeError("Timeout must be a positive finite number.");
   }
 
-  const parentSignal = options.signal ?? currentOperationSignal();
-  throwIfAborted(parentSignal);
+  throwIfAborted(options.signal);
 
   const controller = new AbortController();
   const timeoutError = new OperationTimeoutError(options.message);
   const timer = setTimeout(() => controller.abort(timeoutError), timeoutMs);
 
   const onParentAbort = (): void => {
+    const parent = options.signal;
     controller.abort(
-      new OperationAbortedError(
-        undefined,
-        parentSignal?.reason === undefined ? undefined : { cause: parentSignal.reason },
-      ),
+      new OperationAbortedError(undefined, parent?.reason === undefined ? undefined : { cause: parent.reason }),
     );
   };
 
-  if (parentSignal) {
-    parentSignal.addEventListener("abort", onParentAbort, { once: true });
-    if (parentSignal.aborted) {
-      onParentAbort();
-    }
+  if (options.signal) {
+    options.signal.addEventListener("abort", onParentAbort, { once: true });
   }
 
   const abortPromise = new Promise<never>((_, reject) => {
-    if (controller.signal.aborted) {
-      reject(abortedError(controller.signal));
-      return;
-    }
     controller.signal.addEventListener(
       "abort",
       () => reject(abortedError(controller.signal)),
@@ -109,14 +85,12 @@ export async function withTimeout<T>(
   });
 
   try {
-    const operationPromise = Promise.resolve().then(() =>
-      runWithOperationSignal(controller.signal, () => operation(controller.signal)),
-    );
+    const operationPromise = Promise.resolve().then(() => operation(controller.signal));
     return await Promise.race([operationPromise, abortPromise]);
   } finally {
     clearTimeout(timer);
-    if (parentSignal) {
-      parentSignal.removeEventListener("abort", onParentAbort);
+    if (options.signal) {
+      options.signal.removeEventListener("abort", onParentAbort);
     }
   }
 }

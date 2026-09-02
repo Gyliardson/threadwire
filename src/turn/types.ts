@@ -42,6 +42,7 @@ export interface TurnComposerPreflightPort {
 }
 
 export interface TurnCdpPort {
+  readonly boundMutationCancellation?: true;
   getTurnComposerState(
     expectedRoute: RouteExpectation,
     lease: RuntimeLease,
@@ -68,7 +69,7 @@ export interface TurnCdpPort {
   ): readonly NormalizedResponseStreamEvent[];
   discardTurnResponse?(handle: CdpTurnObservationHandle, lease: RuntimeLease): void;
   releaseTurnObservation(handle: CdpTurnObservationHandle): void;
-  insertText(text: string, lease: RuntimeLease): Promise<void>;
+  insertText(text: string, lease: RuntimeLease, signal?: AbortSignal): Promise<void>;
   insertTextIntoProjectComposer?(
     text: string,
     projectLocator: ProjectLocator,
@@ -76,8 +77,8 @@ export interface TurnCdpPort {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<number>;
-  dispatchEnterKeyDown(lease: RuntimeLease): Promise<void>;
-  dispatchEnterKeyUp(lease: RuntimeLease): Promise<void>;
+  dispatchEnterKeyDown(lease: RuntimeLease, signal?: AbortSignal): Promise<void>;
+  dispatchEnterKeyUp(lease: RuntimeLease, signal?: AbortSignal): Promise<void>;
   clickTurnSendButton?(
     projectLocator: ProjectLocator,
     backendDOMNodeId: number,

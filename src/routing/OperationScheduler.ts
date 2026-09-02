@@ -1,6 +1,6 @@
 import { RuntimeLease, RuntimeLeaseSource, sameRuntimeLease } from "../domain/RuntimeGeneration.js";
 import { OperationAbortedError, TurnStateUncertainError } from "../domain/errors.js";
-import { runWithOperationSignal, throwIfAborted } from "../utils/timeout.js";
+import { throwIfAborted } from "../utils/timeout.js";
 
 export type MutationOperationKind = "ROUTE" | "TURN" | "PROJECT";
 export type MutationOperation<T> = (
@@ -69,10 +69,7 @@ export class OperationScheduler {
             throwIfAborted(options.signal);
             this.runtime.assertRuntimeLeaseCurrent(entry.lease);
             this.assertMutationStateSafeForLease(entry.lease);
-            const result = await runWithOperationSignal(
-              options.signal,
-              () => operation(options.signal, entry.lease),
-            );
+            const result = await operation(options.signal, entry.lease);
             entry.settled = true;
             resolve(result);
           } catch (error) {

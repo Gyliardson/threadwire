@@ -121,6 +121,16 @@ function responseErrorForFailure(failure: CdpResponseStreamFailureKind | null): 
   return new ResponseStreamFailedError();
 }
 
+function mutationTimeoutOptions(
+  cdp: TurnCdpPort,
+  signal: AbortSignal | undefined,
+  message: string,
+): Readonly<{ signal?: AbortSignal; message: string }> {
+  return cdp.boundMutationCancellation === true && signal
+    ? { signal, message }
+    : { message };
+}
+
 export class TurnExecutor {
   private readonly pendingProjectCompletions = new WeakMap<TurnResult, PendingProjectCompletion>();
   private readonly commandTimeoutMs: number;
@@ -331,19 +341,27 @@ export class TurnExecutor {
             async (commandSignal) => await this.cdp.insertTextIntoProjectComposer!.call(
               this.cdp,
               text,
-                target.projectLocator,
-                projectComposerBackendDOMNodeId!,
-                lease,
+              target.projectLocator,
+              projectComposerBackendDOMNodeId!,
+              lease,
               commandSignal,
             ),
             this.commandTimeoutMs,
-            { message: "Timed out waiting for the Project input command." },
+            mutationTimeoutOptions(
+              this.cdp,
+              signal,
+              "Timed out waiting for the Project input command.",
+            ),
           );
         } else {
           await withTimeout(
-            async () => await this.cdp.insertText(text, lease),
+            async (commandSignal) => await this.cdp.insertText(text, lease, commandSignal),
             this.commandTimeoutMs,
-            { message: "Timed out waiting for the CDP input command." },
+            mutationTimeoutOptions(
+              this.cdp,
+              signal,
+              "Timed out waiting for the CDP input command.",
+            ),
           );
         }
       } catch (error) {
@@ -383,7 +401,11 @@ export class TurnExecutor {
                 commandSignal,
               ),
             this.commandTimeoutMs,
-            { message: "Timed out waiting for the Project turn send control." },
+            mutationTimeoutOptions(
+              this.cdp,
+              signal,
+              "Timed out waiting for the Project turn send control.",
+            ),
           );
         } catch (error) {
           if (error instanceof RuntimeGenerationChangedError) {
@@ -405,7 +427,11 @@ export class TurnExecutor {
                 commandSignal,
               ),
             this.commandTimeoutMs,
-            { message: "Timed out waiting for the existing-thread send control." },
+            mutationTimeoutOptions(
+              this.cdp,
+              signal,
+              "Timed out waiting for the existing-thread send control.",
+            ),
           );
         } catch (error) {
           this.rethrowPostCommitCommand(error, lease);
@@ -414,9 +440,9 @@ export class TurnExecutor {
         let keyDownAccepted = false;
         try {
           await withTimeout(
-            async () => await this.cdp.dispatchEnterKeyDown(lease),
+            async (commandSignal) => await this.cdp.dispatchEnterKeyDown(lease, commandSignal),
             this.commandTimeoutMs,
-            { message: "Timed out waiting for Enter keyDown." },
+            mutationTimeoutOptions(this.cdp, signal, "Timed out waiting for Enter keyDown."),
           );
           keyDownAccepted = true;
         } catch (error) {
@@ -426,9 +452,9 @@ export class TurnExecutor {
         if (keyDownAccepted) {
           try {
             await withTimeout(
-              async () => await this.cdp.dispatchEnterKeyUp(lease),
+              async (commandSignal) => await this.cdp.dispatchEnterKeyUp(lease, commandSignal),
               this.commandTimeoutMs,
-              { message: "Timed out waiting for Enter keyUp." },
+              mutationTimeoutOptions(this.cdp, signal, "Timed out waiting for Enter keyUp."),
             );
           } catch (error) {
             this.rethrowPostCommitCommand(error, lease);
