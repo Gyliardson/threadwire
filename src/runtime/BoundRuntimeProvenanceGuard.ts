@@ -6,6 +6,7 @@ export interface ObservedRuntimeLeaseSource extends RuntimeLeaseSource {
 }
 
 export interface RuntimeProvenanceGuard {
+  bind(expectedLease: RuntimeLease, signal?: AbortSignal): Promise<void>;
   assertCurrent(expectedLease: RuntimeLease, signal?: AbortSignal): Promise<void>;
 }
 
@@ -15,9 +16,15 @@ export class BoundRuntimeProvenanceGuard implements RuntimeProvenanceGuard {
     private readonly endpoint: CdpEndpointProvenanceSource,
   ) {}
 
+  public async bind(expectedLease: RuntimeLease, signal?: AbortSignal): Promise<void> {
+    await this.runtime.assertRuntimeLeaseCurrentObserved(expectedLease, signal);
+    await this.endpoint.bindOwnedEndpoint(expectedLease, signal);
+    await this.runtime.assertRuntimeLeaseCurrentObserved(expectedLease, signal);
+  }
+
   public async assertCurrent(expectedLease: RuntimeLease, signal?: AbortSignal): Promise<void> {
     await this.runtime.assertRuntimeLeaseCurrentObserved(expectedLease, signal);
-    await this.endpoint.assertOwnedByRuntime(expectedLease, signal);
+    await this.endpoint.assertOwnedEndpointCurrent(expectedLease, signal);
     await this.runtime.assertRuntimeLeaseCurrentObserved(expectedLease, signal);
   }
 }

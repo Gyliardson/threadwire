@@ -4,11 +4,14 @@ import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.
 import { NormalizedResponseStreamEvent } from "../response/types.js";
 import { CdpTargetInfo } from "./types.js";
 
+export type CdpBeforeMutationHook = (signal?: AbortSignal) => Promise<void>;
+
 export interface CdpTransportConnectOptions {
   readonly host: string;
   readonly port: number;
   readonly target: CdpTargetInfo;
   readonly signal?: AbortSignal;
+  readonly beforeMutation?: CdpBeforeMutationHook;
 }
 
 declare const cdpTurnObservationBrand: unique symbol;

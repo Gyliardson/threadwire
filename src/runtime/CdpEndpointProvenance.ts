@@ -1,5 +1,9 @@
 import { ControllerConfig } from "../config/ControllerConfig.js";
-import { RuntimeLease, sameRuntimeIdentity } from "../domain/RuntimeGeneration.js";
+import {
+  RuntimeIdentity,
+  RuntimeLease,
+  sameRuntimeIdentity,
+} from "../domain/RuntimeGeneration.js";
 import {
   OperationAbortedError,
   RuntimeProvenanceUnverifiedError,
@@ -15,71 +19,115 @@ $hostAddress = [string]$env:THREADWIRE_CDP_HOST
 $port = [int]$env:THREADWIRE_CDP_PORT
 $expectedPid = [int]$env:THREADWIRE_CLASSIC_PID
 $expectedCreationTime = [string]$env:THREADWIRE_CLASSIC_CREATION_TIME
-$listeners = @(Get-NetTCPConnection -State Listen -LocalAddress $hostAddress -LocalPort $port -ErrorAction Stop)
-if ($listeners.Count -ne 1) {
-  throw 'Configured CDP listener ownership is not unique.'
+
+function Get-ConfiguredListenerSnapshot {
+  $listeners = @(Get-NetTCPConnection -State Listen -LocalAddress $hostAddress -LocalPort $port -ErrorAction Stop)
+  if ($listeners.Count -ne 1) {
+    throw 'Configured CDP listener ownership is not unique.'
+  }
+  $listener = $listeners[0]
+  $ownerPid = [int]$listener.OwningProcess
+  if ($ownerPid -le 0) {
+    throw 'Configured CDP listener owner is invalid.'
+  }
+  return [pscustomobject]@{
+    listenerCount = [int]$listeners.Count
+    localAddress = [string]$listener.LocalAddress
+    localPort = [int]$listener.LocalPort
+    ownerPid = $ownerPid
+  }
 }
-$listener = $listeners[0]
-$ownerPid = [int]$listener.OwningProcess
-if ($ownerPid -le 0) {
-  throw 'Configured CDP listener owner is invalid.'
-}
-$chain = @()
-$seen = @{}
-$currentPid = $ownerPid
-for ($depth = 0; $depth -lt ${MAX_ANCESTRY_DEPTH}; $depth++) {
-  if ($seen.ContainsKey($currentPid)) {
-    throw 'Process ancestry contains a cycle.'
-  }
-  $seen[$currentPid] = $true
-  $processMatches = @(Get-CimInstance Win32_Process -Filter "ProcessId = $currentPid" -ErrorAction Stop)
-  if ($processMatches.Count -ne 1) {
-    throw 'Process ancestry could not be observed uniquely.'
-  }
-  $process = $processMatches[0]
-  $creationTime = $process.CreationDate.ToUniversalTime().ToString('O')
-  $chain += [pscustomobject]@{
-    pid = [int]$process.ProcessId
-    parentPid = [int]$process.ParentProcessId
-    creationTime = $creationTime
-  }
-  if ([int]$process.ProcessId -eq $expectedPid) {
-    if ($creationTime -ne $expectedCreationTime) {
-      throw 'Admitted runtime identity no longer matches.'
+
+function Get-AncestrySnapshot([int]$ownerPid) {
+  $chain = @()
+  $seen = @{}
+  $currentPid = $ownerPid
+  for ($depth = 0; $depth -lt ${MAX_ANCESTRY_DEPTH}; $depth++) {
+    if ($seen.ContainsKey($currentPid)) {
+      throw 'Process ancestry contains a cycle.'
     }
-    break
+    $seen[$currentPid] = $true
+    $processMatches = @(Get-CimInstance Win32_Process -Filter "ProcessId = $currentPid" -ErrorAction Stop)
+    if ($processMatches.Count -ne 1) {
+      throw 'Process ancestry could not be observed uniquely.'
+    }
+    $process = $processMatches[0]
+    $creationTime = $process.CreationDate.ToUniversalTime().ToString('O')
+    $chain += [pscustomobject]@{
+      pid = [int]$process.ProcessId
+      parentPid = [int]$process.ParentProcessId
+      creationTime = $creationTime
+    }
+    if ([int]$process.ProcessId -eq $expectedPid) {
+      if ($creationTime -ne $expectedCreationTime) {
+        throw 'Admitted runtime identity no longer matches.'
+      }
+      return $chain
+    }
+    $parentPid = [int]$process.ParentProcessId
+    if ($parentPid -le 0) {
+      throw 'Listener owner is outside the admitted runtime ancestry.'
+    }
+    $currentPid = $parentPid
   }
-  $parentPid = [int]$process.ParentProcessId
-  if ($parentPid -le 0) {
-    throw 'Listener owner is outside the admitted runtime ancestry.'
-  }
-  $currentPid = $parentPid
-}
-if ($chain.Count -eq 0 -or [int]$chain[-1].pid -ne $expectedPid) {
   throw 'Process ancestry exceeded the bounded inspection depth.'
 }
-[pscustomobject]@{
-  listenerCount = [int]$listeners.Count
-  localAddress = [string]$listener.LocalAddress
-  localPort = [int]$listener.LocalPort
-  ownerPid = $ownerPid
-  chain = @($chain)
-} | ConvertTo-Json -Depth 4 -Compress
-`;
 
-interface ObservedProcessIdentity {
-  readonly pid: number;
-  readonly parentPid: number;
-  readonly creationTime: string;
+$listenerA = Get-ConfiguredListenerSnapshot
+$chainA = @(Get-AncestrySnapshot $listenerA.ownerPid)
+$listenerB = Get-ConfiguredListenerSnapshot
+if (
+  [int]$listenerB.listenerCount -ne [int]$listenerA.listenerCount -or
+  [string]$listenerB.localAddress -ne [string]$listenerA.localAddress -or
+  [int]$listenerB.localPort -ne [int]$listenerA.localPort -or
+  [int]$listenerB.ownerPid -ne [int]$listenerA.ownerPid
+) {
+  throw 'Configured CDP listener changed during provenance observation.'
+}
+$chainB = @(Get-AncestrySnapshot $listenerB.ownerPid)
+if ($chainA.Count -ne $chainB.Count) {
+  throw 'Process ancestry changed during provenance observation.'
+}
+for ($index = 0; $index -lt $chainA.Count; $index++) {
+  if (
+    [int]$chainA[$index].pid -ne [int]$chainB[$index].pid -or
+    [int]$chainA[$index].parentPid -ne [int]$chainB[$index].parentPid -or
+    [string]$chainA[$index].creationTime -ne [string]$chainB[$index].creationTime
+  ) {
+    throw 'Process identity changed during provenance observation.'
+  }
 }
 
-interface ListenerProvenanceObservation {
+[pscustomobject]@{
+  listenerA = $listenerA
+  chainA = @($chainA)
+  listenerB = $listenerB
+  chainB = @($chainB)
+} | ConvertTo-Json -Depth 5 -Compress
+`;
+
+interface ObservedProcessIdentity extends RuntimeIdentity {
+  readonly parentPid: number;
+}
+
+interface ListenerSnapshot {
   readonly listenerCount: number;
   readonly localAddress: string;
   readonly localPort: number;
   readonly ownerPid: number;
-  readonly chain: readonly ObservedProcessIdentity[];
 }
+
+export interface ListenerProvenanceObservation {
+  readonly listenerA: ListenerSnapshot;
+  readonly chainA: readonly ObservedProcessIdentity[];
+  readonly listenerB: ListenerSnapshot;
+  readonly chainB: readonly ObservedProcessIdentity[];
+  readonly ownerIdentity: RuntimeIdentity;
+}
+
+export type ListenerEndpointBinding = Readonly<{
+  ownerIdentity: RuntimeIdentity;
+}>;
 
 type CdpEndpointConfig = Pick<ControllerConfig, "cdpHost" | "cdpPort">;
 
@@ -114,6 +162,84 @@ function parseProcess(value: unknown): ObservedProcessIdentity {
   return { pid, parentPid, creationTime };
 }
 
+function parseListenerSnapshot(
+  value: unknown,
+  expectedEndpoint: CdpEndpointConfig,
+): ListenerSnapshot {
+  if (!isRecord(value)) {
+    throw new RuntimeProvenanceUnverifiedError();
+  }
+  const listenerCount = value.listenerCount;
+  const localAddress = value.localAddress;
+  const localPort = value.localPort;
+  const ownerPid = parsePositivePid(value.ownerPid);
+  if (
+    listenerCount !== 1 ||
+    localAddress !== expectedEndpoint.cdpHost ||
+    localPort !== expectedEndpoint.cdpPort
+  ) {
+    throw new RuntimeProvenanceUnverifiedError();
+  }
+  return { listenerCount, localAddress, localPort, ownerPid };
+}
+
+function parseAncestry(
+  value: unknown,
+  ownerPid: number,
+  expectedLease: RuntimeLease,
+): readonly ObservedProcessIdentity[] {
+  if (!Array.isArray(value)) {
+    throw new RuntimeProvenanceUnverifiedError();
+  }
+  const chain = value.map(parseProcess);
+  if (chain.length === 0 || chain.length > MAX_ANCESTRY_DEPTH || chain[0]!.pid !== ownerPid) {
+    throw new RuntimeProvenanceUnverifiedError();
+  }
+
+  const seenPids = new Set<number>();
+  for (const process of chain) {
+    if (seenPids.has(process.pid)) {
+      throw new RuntimeProvenanceUnverifiedError();
+    }
+    seenPids.add(process.pid);
+  }
+
+  for (let index = 0; index < chain.length - 1; index += 1) {
+    const child = chain[index]!;
+    const parent = chain[index + 1]!;
+    if (child.parentPid !== parent.pid || parent.creationTime >= child.creationTime) {
+      throw new RuntimeProvenanceUnverifiedError();
+    }
+  }
+
+  const root = chain[chain.length - 1]!;
+  if (!sameRuntimeIdentity(root, expectedLease.identity)) {
+    throw new RuntimeProvenanceUnverifiedError();
+  }
+  return chain;
+}
+
+function sameObservedProcess(
+  left: ObservedProcessIdentity,
+  right: ObservedProcessIdentity,
+): boolean {
+  return (
+    left.pid === right.pid &&
+    left.parentPid === right.parentPid &&
+    left.creationTime === right.creationTime
+  );
+}
+
+function sameAncestry(
+  left: readonly ObservedProcessIdentity[],
+  right: readonly ObservedProcessIdentity[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((process, index) => sameObservedProcess(process, right[index]!))
+  );
+}
+
 export function parseListenerProvenanceOutput(
   output: string,
   expectedEndpoint: CdpEndpointConfig,
@@ -125,53 +251,75 @@ export function parseListenerProvenanceOutput(
   } catch (error) {
     throw new RuntimeProvenanceUnverifiedError(undefined, { cause: error });
   }
-  if (!isRecord(parsed) || !Array.isArray(parsed.chain)) {
+  if (!isRecord(parsed)) {
     throw new RuntimeProvenanceUnverifiedError();
   }
 
-  const listenerCount = parsed.listenerCount;
-  const localAddress = parsed.localAddress;
-  const localPort = parsed.localPort;
-  if (
-    listenerCount !== 1 ||
-    localAddress !== expectedEndpoint.cdpHost ||
-    localPort !== expectedEndpoint.cdpPort
-  ) {
+  const listenerA = parseListenerSnapshot(parsed.listenerA, expectedEndpoint);
+  const listenerB = parseListenerSnapshot(parsed.listenerB, expectedEndpoint);
+  if (listenerA.ownerPid !== listenerB.ownerPid) {
     throw new RuntimeProvenanceUnverifiedError();
   }
 
-  const ownerPid = parsePositivePid(parsed.ownerPid);
-  const chain = parsed.chain.map(parseProcess);
-  if (chain.length === 0 || chain.length > MAX_ANCESTRY_DEPTH || chain[0]!.pid !== ownerPid) {
-    throw new RuntimeProvenanceUnverifiedError();
-  }
-  for (let index = 0; index < chain.length - 1; index += 1) {
-    const child = chain[index]!;
-    const parent = chain[index + 1]!;
-    if (child.parentPid !== parent.pid || parent.creationTime > child.creationTime) {
-      throw new RuntimeProvenanceUnverifiedError();
-    }
-  }
-
-  const root = chain[chain.length - 1]!;
-  if (!sameRuntimeIdentity({ pid: root.pid, creationTime: root.creationTime }, expectedLease.identity)) {
+  const chainA = parseAncestry(parsed.chainA, listenerA.ownerPid, expectedLease);
+  const chainB = parseAncestry(parsed.chainB, listenerB.ownerPid, expectedLease);
+  if (!sameAncestry(chainA, chainB)) {
     throw new RuntimeProvenanceUnverifiedError();
   }
 
-  return { listenerCount, localAddress, localPort, ownerPid, chain };
+  return {
+    listenerA,
+    chainA,
+    listenerB,
+    chainB,
+    ownerIdentity: {
+      pid: chainB[0]!.pid,
+      creationTime: chainB[0]!.creationTime,
+    },
+  };
 }
 
 export interface CdpEndpointProvenanceSource {
-  assertOwnedByRuntime(expectedLease: RuntimeLease, signal?: AbortSignal): Promise<void>;
+  bindOwnedEndpoint(expectedLease: RuntimeLease, signal?: AbortSignal): Promise<void>;
+  assertOwnedEndpointCurrent(expectedLease: RuntimeLease, signal?: AbortSignal): Promise<void>;
 }
 
 export class WindowsCdpEndpointProvenance implements CdpEndpointProvenanceSource {
+  private binding: ListenerEndpointBinding | null = null;
+
   public constructor(
     private readonly config: ControllerConfig,
     private readonly runner: CommandRunner = new NodeCommandRunner(),
   ) {}
 
-  public async assertOwnedByRuntime(expectedLease: RuntimeLease, signal?: AbortSignal): Promise<void> {
+  public async bindOwnedEndpoint(expectedLease: RuntimeLease, signal?: AbortSignal): Promise<void> {
+    if (this.binding !== null) {
+      throw new RuntimeProvenanceUnverifiedError();
+    }
+    const observation = await this.observe(expectedLease, signal);
+    this.binding = Object.freeze({
+      ownerIdentity: Object.freeze({ ...observation.ownerIdentity }),
+    });
+  }
+
+  public async assertOwnedEndpointCurrent(
+    expectedLease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const binding = this.binding;
+    if (binding === null) {
+      throw new RuntimeProvenanceUnverifiedError();
+    }
+    const observation = await this.observe(expectedLease, signal);
+    if (!sameRuntimeIdentity(observation.ownerIdentity, binding.ownerIdentity)) {
+      throw new RuntimeProvenanceUnverifiedError();
+    }
+  }
+
+  private async observe(
+    expectedLease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<ListenerProvenanceObservation> {
     try {
       const result = await this.runner.run(
         "powershell.exe",
@@ -187,7 +335,7 @@ export class WindowsCdpEndpointProvenance implements CdpEndpointProvenanceSource
           },
         },
       );
-      parseListenerProvenanceOutput(result.stdout.trim(), this.config, expectedLease);
+      return parseListenerProvenanceOutput(result.stdout.trim(), this.config, expectedLease);
     } catch (error) {
       if (error instanceof OperationAbortedError || error instanceof RuntimeProvenanceUnverifiedError) {
         throw error;

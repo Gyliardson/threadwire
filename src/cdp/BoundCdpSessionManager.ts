@@ -47,7 +47,12 @@ class GuardedTransport implements CdpTransport {
   public async connect(options: CdpTransportConnectOptions): Promise<CdpTransportSession> {
     const lease = this.getLease();
     await this.guard.assertCurrent(lease, options.signal);
-    const session = await this.inner.connect(options);
+    const session = await this.inner.connect({
+      ...options,
+      beforeMutation: async (mutationSignal) => {
+        await this.guard.assertCurrent(lease, mutationSignal);
+      },
+    });
     try {
       await this.guard.assertCurrent(lease, options.signal);
     } catch (error) {
@@ -114,6 +119,7 @@ export class BoundCdpSessionManager extends CdpSessionManager {
   public async bindExistingRuntime(lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
     if (this.immutableLease === null) {
       this.immutableLease = lease;
+      await this.provenanceGuard.bind(lease, signal);
     } else if (!sameRuntimeLease(this.immutableLease, lease)) {
       throw new RuntimeGenerationChangedError();
     }

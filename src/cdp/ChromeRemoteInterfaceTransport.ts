@@ -3,6 +3,7 @@ import { OperationAbortedError } from "../domain/errors.js";
 import { CdpTransport, CdpTransportConnectOptions, CdpTransportSession } from "./CdpTransport.js";
 import { isCriClient } from "./ChromeRemoteInterfaceHelpers.js";
 import { ChromeRemoteInterfaceSession } from "./ChromeRemoteInterfaceSession.js";
+import { MutationGuardedChromeRemoteInterfaceSession } from "./MutationGuardedChromeRemoteInterfaceSession.js";
 
 export type CriClient = Awaited<ReturnType<typeof CDP>>;
 
@@ -19,6 +20,15 @@ async function closeLateClient(promise: Promise<unknown>): Promise<void> {
   } catch {
     // The caller already observed the failed/aborted attach.
   }
+}
+
+function createSession(
+  client: CriClient,
+  options: CdpTransportConnectOptions,
+): CdpTransportSession {
+  return options.beforeMutation
+    ? new MutationGuardedChromeRemoteInterfaceSession(client, options.beforeMutation)
+    : new ChromeRemoteInterfaceSession(client);
 }
 
 export class ChromeRemoteInterfaceTransport implements CdpTransport {
@@ -46,7 +56,7 @@ export class ChromeRemoteInterfaceTransport implements CdpTransport {
       if (!isCriClient(client)) {
         throw new TypeError("chrome-remote-interface returned an invalid client.");
       }
-      return new ChromeRemoteInterfaceSession(client);
+      return createSession(client, options);
     }
 
     if (signal.aborted) {
@@ -82,7 +92,7 @@ export class ChromeRemoteInterfaceTransport implements CdpTransport {
             reject(new TypeError("chrome-remote-interface returned an invalid client."));
             return;
           }
-          resolve(new ChromeRemoteInterfaceSession(client));
+          resolve(createSession(client, options));
         },
         (error: unknown) => {
           if (settled) {
