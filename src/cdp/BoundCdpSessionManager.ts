@@ -145,7 +145,6 @@ export class BoundCdpSessionManager extends CdpSessionManager {
   }
 
   public override async connect(signal?: AbortSignal): Promise<void> {
-    const lease = this.requireImmutableLease();
     await this.guardCurrent(signal);
     try {
       await super.connect(signal);
