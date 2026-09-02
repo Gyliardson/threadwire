@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
 import { ProjectLocator, ProjectName } from "../domain/ProjectIdentity.js";
 import { RouteExpectation } from "../readiness/types.js";
+import { throwIfAborted } from "../utils/timeout.js";
 import { CdpBeforeMutationHook } from "./CdpTransport.js";
 import type { CriClient } from "./ChromeRemoteInterfaceTransport.js";
 import { ChromeRemoteInterfaceSession } from "./ChromeRemoteInterfaceSession.js";
@@ -68,7 +69,10 @@ function guardDomain<T extends object>(
       return async (...args: unknown[]) => {
         const scope = storage.getStore();
         if (shouldGuard(scope, domainName, property)) {
-          await beforeMutation(scope?.signal);
+          const signal = scope?.signal;
+          throwIfAborted(signal);
+          await beforeMutation(signal);
+          throwIfAborted(signal);
         }
         return await Reflect.apply(value, target, args);
       };
@@ -107,12 +111,18 @@ export class MutationGuardedChromeRemoteInterfaceSession extends ChromeRemoteInt
     this.mutationScope = mutationScope;
   }
 
-  public override async navigate(url: string): Promise<void> {
-    await this.withMutationScope({ pageNavigate: true }, () => super.navigate(url));
+  public override async navigate(url: string, signal?: AbortSignal): Promise<void> {
+    await this.withMutationScope(
+      { pageNavigate: true, ...(signal ? { signal } : {}) },
+      () => super.navigate(url),
+    );
   }
 
-  public override async reload(): Promise<void> {
-    await this.withMutationScope({ pageReload: true }, () => super.reload());
+  public override async reload(signal?: AbortSignal): Promise<void> {
+    await this.withMutationScope(
+      { pageReload: true, ...(signal ? { signal } : {}) },
+      () => super.reload(),
+    );
   }
 
   public override async navigateAndWaitForLoadSettlement(
@@ -126,16 +136,19 @@ export class MutationGuardedChromeRemoteInterfaceSession extends ChromeRemoteInt
     );
   }
 
-  public override async focusBackendNode(backendDOMNodeId: number): Promise<void> {
+  public override async focusBackendNode(
+    backendDOMNodeId: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     await this.withMutationScope(
-      { domFocus: true },
+      { domFocus: true, ...(signal ? { signal } : {}) },
       () => super.focusBackendNode(backendDOMNodeId),
     );
   }
 
-  public override async insertText(text: string): Promise<void> {
+  public override async insertText(text: string, signal?: AbortSignal): Promise<void> {
     await this.withMutationScope(
-      { inputInsertText: true },
+      { inputInsertText: true, ...(signal ? { signal } : {}) },
       () => super.insertText(text),
     );
   }
@@ -152,16 +165,16 @@ export class MutationGuardedChromeRemoteInterfaceSession extends ChromeRemoteInt
     );
   }
 
-  public override async dispatchEnterKeyDown(): Promise<void> {
+  public override async dispatchEnterKeyDown(signal?: AbortSignal): Promise<void> {
     await this.withMutationScope(
-      { inputDispatchKeyEvent: true },
+      { inputDispatchKeyEvent: true, ...(signal ? { signal } : {}) },
       () => super.dispatchEnterKeyDown(),
     );
   }
 
-  public override async dispatchEnterKeyUp(): Promise<void> {
+  public override async dispatchEnterKeyUp(signal?: AbortSignal): Promise<void> {
     await this.withMutationScope(
-      { inputDispatchKeyEvent: true },
+      { inputDispatchKeyEvent: true, ...(signal ? { signal } : {}) },
       () => super.dispatchEnterKeyUp(),
     );
   }

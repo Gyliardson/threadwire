@@ -16,12 +16,17 @@ import {
   CdpReadinessFailedError,
   OperationAbortedError,
   RuntimeGenerationChangedError,
+  RuntimeProvenanceUnverifiedError,
   ResponseStreamUnavailableError,
   ThreadwireError,
 } from "../domain/errors.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { NormalizedResponseStreamEvent } from "../response/types.js";
-import { throwIfAborted, withTimeout } from "../utils/timeout.js";
+import {
+  currentOperationSignal,
+  throwIfAborted,
+  withTimeout,
+} from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { CdpTargetDiscovery, FindPrimaryTargetOptions } from "./CdpTargetDiscovery.js";
 import {
@@ -100,6 +105,10 @@ function sanitizedNavigationCause(error: unknown): Error {
     return new CdpNavigationFailedError();
   }
   return new Error("CDP navigation failed without retained low-level metadata.");
+}
+
+function mutationAuthoritySignal(signal?: AbortSignal): AbortSignal | undefined {
+  return currentOperationSignal() ?? signal;
 }
 
 export class CdpSessionManager {
@@ -188,7 +197,11 @@ export class CdpSessionManager {
         this.runtime.assertRuntimeLeaseCurrent(lease);
       } catch (error) {
         await session.close().catch(() => undefined);
-        if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+        if (
+          error instanceof RuntimeGenerationChangedError ||
+          error instanceof RuntimeProvenanceUnverifiedError ||
+          error instanceof OperationAbortedError
+        ) {
           throw error;
         }
         throw new CdpReadinessFailedError(undefined, { cause: error });
@@ -210,7 +223,11 @@ export class CdpSessionManager {
       });
     } catch (error) {
       this.currentState = "FAILED";
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+      if (
+        error instanceof RuntimeGenerationChangedError ||
+        error instanceof RuntimeProvenanceUnverifiedError ||
+        error instanceof OperationAbortedError
+      ) {
         throw error;
       }
       if (error instanceof ThreadwireError && error.code.startsWith("CDP_") && error.code !== "CDP_ATTACH_FAILED") {
@@ -242,12 +259,17 @@ export class CdpSessionManager {
 
   public async navigate(url: string, signal?: AbortSignal): Promise<void> {
     this.assertCurrentRuntime();
-    throwIfAborted(signal);
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.session!;
     try {
-      await session.navigate(url);
+      await session.navigate(url, effectiveSignal);
     } catch (error) {
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+      if (
+        error instanceof RuntimeGenerationChangedError ||
+        error instanceof RuntimeProvenanceUnverifiedError ||
+        error instanceof OperationAbortedError
+      ) {
         throw error;
       }
       throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
@@ -256,12 +278,17 @@ export class CdpSessionManager {
 
   public async reload(signal?: AbortSignal): Promise<void> {
     this.assertCurrentRuntime();
-    throwIfAborted(signal);
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.session!;
     try {
-      await session.reload();
+      await session.reload(effectiveSignal);
     } catch (error) {
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+      if (
+        error instanceof RuntimeGenerationChangedError ||
+        error instanceof RuntimeProvenanceUnverifiedError ||
+        error instanceof OperationAbortedError
+      ) {
         throw error;
       }
       throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
@@ -291,7 +318,11 @@ export class CdpSessionManager {
       );
       this.assertCurrentRuntime();
     } catch (error) {
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+      if (
+        error instanceof RuntimeGenerationChangedError ||
+        error instanceof RuntimeProvenanceUnverifiedError ||
+        error instanceof OperationAbortedError
+      ) {
         throw error;
       }
       throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
@@ -326,17 +357,18 @@ export class CdpSessionManager {
       throw new CdpReadinessFailedError();
     }
 
-    throwIfAborted(signal);
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.requireSessionForLease(lease);
     try {
       await this.runReadinessSessionOperation(
         session,
         lease,
-        () => session.focusBackendNode(backendDOMNodeId),
-        signal,
+        () => session.focusBackendNode(backendDOMNodeId, effectiveSignal),
+        effectiveSignal,
       );
     } catch (error) {
-      this.rethrowReadinessLifecycleError(error, session, lease, signal);
+      this.rethrowReadinessLifecycleError(error, session, lease, effectiveSignal);
     }
   }
 
@@ -426,9 +458,20 @@ export class CdpSessionManager {
     }
   }
 
-  public async insertText(text: string, lease: RuntimeLease): Promise<void> {
+  public async insertText(
+    text: string,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.requireTurnSessionForLease(lease);
-    await this.runTurnSessionOperation(session, lease, () => session.insertText(text));
+    await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => session.insertText(text, effectiveSignal),
+      effectiveSignal,
+    );
   }
 
   public async insertTextIntoProjectComposer(
@@ -438,6 +481,8 @@ export class CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<number> {
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.requireTurnSessionForLease(lease);
     if (typeof session.insertTextIntoProjectComposer !== "function") {
       throw new CdpDisconnectedError("The connected CDP session does not support Project turn input.");
@@ -445,19 +490,44 @@ export class CdpSessionManager {
     return await this.runReadinessSessionOperation(
       session,
       lease,
-      () => session.insertTextIntoProjectComposer!(text, projectLocator, backendDOMNodeId, signal),
-      signal,
+      () => session.insertTextIntoProjectComposer!(
+        text,
+        projectLocator,
+        backendDOMNodeId,
+        effectiveSignal,
+      ),
+      effectiveSignal,
     );
   }
 
-  public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
+  public async dispatchEnterKeyDown(
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.requireTurnSessionForLease(lease);
-    await this.runTurnSessionOperation(session, lease, () => session.dispatchEnterKeyDown());
+    await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => session.dispatchEnterKeyDown(effectiveSignal),
+      effectiveSignal,
+    );
   }
 
-  public async dispatchEnterKeyUp(lease: RuntimeLease): Promise<void> {
+  public async dispatchEnterKeyUp(
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.requireTurnSessionForLease(lease);
-    await this.runTurnSessionOperation(session, lease, () => session.dispatchEnterKeyUp());
+    await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => session.dispatchEnterKeyUp(effectiveSignal),
+      effectiveSignal,
+    );
   }
 
   public async clickTurnSendButton(
@@ -468,6 +538,8 @@ export class CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.requireTurnSessionForLease(lease);
     if (typeof session.clickTurnSendButton !== "function") {
       throw new CdpDisconnectedError("The connected CDP session does not support Project turn submission.");
@@ -480,9 +552,9 @@ export class CdpSessionManager {
         backendDOMNodeId,
         formBackendDOMNodeId,
         expectedText,
-        signal,
+        effectiveSignal,
       ),
-      signal,
+      effectiveSignal,
     );
   }
 
@@ -493,6 +565,8 @@ export class CdpSessionManager {
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<void> {
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.requireTurnSessionForLease(lease);
     if (typeof session.clickExistingTurnSendButton !== "function") {
       throw new CdpDisconnectedError("The connected CDP session does not support existing-thread submission.");
@@ -504,9 +578,9 @@ export class CdpSessionManager {
         conversationLocator,
         backendDOMNodeId,
         expectedText,
-        signal,
+        effectiveSignal,
       ),
-      signal,
+      effectiveSignal,
     );
   }
 
@@ -527,6 +601,8 @@ export class CdpSessionManager {
     signal?: AbortSignal,
     onMutationAttempted?: () => void,
   ): Promise<ProjectLocator> {
+    const effectiveSignal = mutationAuthoritySignal(signal);
+    throwIfAborted(effectiveSignal);
     const session = this.requireSessionForLease(lease);
     if (!isProjectUiTransportSession(session)) {
       throw new CdpDisconnectedError("The connected CDP session does not support project creation.");
@@ -534,8 +610,8 @@ export class CdpSessionManager {
     return await this.runReadinessSessionOperation(
       session,
       lease,
-      () => session.createProjectThroughUi(name, signal, onMutationAttempted),
-      signal,
+      () => session.createProjectThroughUi(name, effectiveSignal, onMutationAttempted),
+      effectiveSignal,
     );
   }
 
@@ -588,10 +664,13 @@ export class CdpSessionManager {
     session: CdpTurnTransportSession,
     lease: RuntimeLease,
     operation: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
     this.assertSessionForLeaseCurrent(session, lease);
+    throwIfAborted(signal);
     try {
       const result = await operation();
+      throwIfAborted(signal);
       this.assertSessionForLeaseCurrent(session, lease);
       return result;
     } catch (error) {
@@ -667,6 +746,7 @@ export class CdpSessionManager {
 
     if (
       error instanceof RuntimeGenerationChangedError ||
+      error instanceof RuntimeProvenanceUnverifiedError ||
       error instanceof OperationAbortedError ||
       error instanceof CdpDisconnectedError ||
       error instanceof CdpReadinessFailedError
