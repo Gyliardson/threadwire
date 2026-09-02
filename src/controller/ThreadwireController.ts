@@ -1,8 +1,15 @@
+import { BoundCdpSessionManager } from "../cdp/BoundCdpSessionManager.js";
 import { CdpSessionManager } from "../cdp/CdpSessionManager.js";
-import { ControllerConfig } from "../config/ControllerConfig.js";
+import { ClassicPolicy, ControllerConfig } from "../config/ControllerConfig.js";
+import { ProjectHandle, ProjectLocator } from "../domain/ProjectIdentity.js";
+import { RuntimeLease } from "../domain/RuntimeGeneration.js";
 import { CdpConnectionState } from "../domain/RuntimeState.js";
 import { ThreadHandle } from "../domain/ThreadIdentity.js";
-import { ProjectHandle, ProjectLocator } from "../domain/ProjectIdentity.js";
+import {
+  RequiredExistingRuntimeError,
+  RuntimeProvenanceUnverifiedError,
+  RuntimeRecoveryForbiddenError,
+} from "../domain/errors.js";
 import { ProjectCreator } from "../project/ProjectCreator.js";
 import { ProjectRegistry } from "../project/ProjectRegistry.js";
 import { ReadinessController } from "../readiness/ReadinessController.js";
@@ -10,6 +17,8 @@ import { ResponseStreamEvent } from "../response/types.js";
 import { ConversationRouter } from "../routing/ConversationRouter.js";
 import { OperationScheduler } from "../routing/OperationScheduler.js";
 import { ThreadRegistry } from "../routing/ThreadRegistry.js";
+import { BoundRuntimeProvenanceGuard } from "../runtime/BoundRuntimeProvenanceGuard.js";
+import { WindowsCdpEndpointProvenance } from "../runtime/CdpEndpointProvenance.js";
 import { ClassicSupervisor } from "../runtime/ClassicSupervisor.js";
 import { TurnExecutor } from "../turn/TurnExecutor.js";
 import { TurnResponseEventListener, TurnResult, TurnTarget } from "../turn/types.js";
@@ -43,6 +52,7 @@ export interface ControllerHealth {
 export interface RuntimeControllerPort {
   inspect(signal?: AbortSignal): Promise<Readonly<{ isRunning: boolean }>>;
   ensureStarted(signal?: AbortSignal): Promise<unknown>;
+  requireExisting?(signal?: AbortSignal): Promise<RuntimeLease>;
   restart?(signal?: AbortSignal): Promise<unknown>;
 }
 
@@ -51,6 +61,8 @@ export interface CdpControllerPort {
   connect(signal?: AbortSignal): Promise<void>;
   disconnect(): Promise<void>;
   assertCurrentRuntime(): void;
+  bindExistingRuntime?(lease: RuntimeLease, signal?: AbortSignal): Promise<void>;
+  assertBoundRuntimeCurrent?(lease: RuntimeLease, signal?: AbortSignal): Promise<void>;
 }
 
 export interface ThreadRegistryControllerPort {
@@ -98,6 +110,7 @@ export interface ThreadwireControllerDependencies {
 export interface ThreadwireControllerOptions {
   readonly maxOutstandingTurns?: number;
   readonly provisionalThreadWaitTimeoutMs?: number;
+  readonly classicPolicy?: ClassicPolicy;
 }
 
 export const DEFAULT_PROVISIONAL_THREAD_WAIT_TIMEOUT_MS = 15_000;
@@ -110,8 +123,11 @@ interface PendingCompletionBarrier {
 export class ThreadwireController {
   private readonly turnQueue: ControllerTurnQueue;
   private readonly provisionalThreadWaitTimeoutMs: number;
+  private readonly classicPolicy: ClassicPolicy;
   private pendingCompletionBarrier: PendingCompletionBarrier | null = null;
   private readonly pendingCompletionResults = new WeakSet<TurnResult>();
+  private boundRuntimeLease: RuntimeLease | null = null;
+  private boundAdmission: Promise<void> | null = null;
 
   public constructor(
     private readonly dependencies: ThreadwireControllerDependencies,
@@ -122,6 +138,7 @@ export class ThreadwireController {
     );
     this.provisionalThreadWaitTimeoutMs =
       options.provisionalThreadWaitTimeoutMs ?? DEFAULT_PROVISIONAL_THREAD_WAIT_TIMEOUT_MS;
+    this.classicPolicy = options.classicPolicy ?? "MANAGED";
     if (
       !Number.isFinite(this.provisionalThreadWaitTimeoutMs) ||
       this.provisionalThreadWaitTimeoutMs <= 0
@@ -130,7 +147,22 @@ export class ThreadwireController {
     }
   }
 
+  public async initialize(signal?: AbortSignal): Promise<void> {
+    if (this.classicPolicy === "MANAGED") {
+      return;
+    }
+    if (this.boundAdmission === null) {
+      this.boundAdmission = this.admitBoundRuntime(signal);
+    }
+    await this.boundAdmission;
+  }
+
   public async health(signal?: AbortSignal): Promise<ControllerHealth> {
+    if (this.classicPolicy === "BOUND_EXISTING") {
+      await this.initialize(signal);
+      await this.assertBoundRuntimeCurrent(signal);
+      return Object.freeze({ classic: "RUNNING", cdp: this.dependencies.cdp.state });
+    }
     const runtime = await this.dependencies.runtime.inspect(signal);
     return Object.freeze({
       classic: runtime.isRunning ? "RUNNING" : "STOPPED",
@@ -170,9 +202,7 @@ export class ThreadwireController {
           );
         }
         await this.awaitPendingCompletion(signal);
-        await this.dependencies.runtime.ensureStarted(signal);
-        await this.dependencies.cdp.connect(signal);
-        this.dependencies.cdp.assertCurrentRuntime();
+        await this.prepareRuntime(signal);
 
         let target: TurnTarget;
         if (request.target.kind === "FRESH") {
@@ -186,6 +216,7 @@ export class ThreadwireController {
           target = { kind: "PROJECT", projectLocator: projectLocator! };
         }
 
+        await this.assertBoundRuntimeCurrent(signal);
         const turnResult = await this.dependencies.executor.executeStreaming(
           target,
           request.prompt,
@@ -220,9 +251,8 @@ export class ThreadwireController {
     return this.turnQueue.schedule(
       async () => {
         await this.awaitPendingCompletion(signal);
-        await this.dependencies.runtime.ensureStarted(signal);
-        await this.dependencies.cdp.connect(signal);
-        this.dependencies.cdp.assertCurrentRuntime();
+        await this.prepareRuntime(signal);
+        await this.assertBoundRuntimeCurrent(signal);
         return await this.dependencies.projectCreator.create(request.name, signal);
       },
       signal,
@@ -234,16 +264,14 @@ export class ThreadwireController {
       async () => {
         await this.awaitPendingCompletion(signal);
         throwIfAborted(signal);
+        if (this.classicPolicy === "BOUND_EXISTING") {
+          throw new RuntimeRecoveryForbiddenError();
+        }
         const restart = this.dependencies.runtime.restart;
         if (restart === undefined) {
           throw new Error("Runtime recovery is unavailable.");
         }
 
-        // The request signal may cancel while recovery is still queued or before the
-        // destructive lifecycle starts. Once CDP disconnect begins, however, the
-        // runtime replacement must reach a terminal safe state even if the client
-        // disappears; otherwise the controller queue could admit a new mutation
-        // while Classic is only partially restarted.
         await this.dependencies.cdp.disconnect();
         await restart.call(this.dependencies.runtime);
         await this.dependencies.cdp.connect();
@@ -259,6 +287,47 @@ export class ThreadwireController {
 
   public async close(): Promise<void> {
     await this.dependencies.cdp.disconnect();
+  }
+
+  private async admitBoundRuntime(signal?: AbortSignal): Promise<void> {
+    const requireExisting = this.dependencies.runtime.requireExisting;
+    const bindExistingRuntime = this.dependencies.cdp.bindExistingRuntime;
+    const assertBoundRuntimeCurrent = this.dependencies.cdp.assertBoundRuntimeCurrent;
+    if (
+      requireExisting === undefined ||
+      bindExistingRuntime === undefined ||
+      assertBoundRuntimeCurrent === undefined
+    ) {
+      throw new RuntimeProvenanceUnverifiedError();
+    }
+    const lease = await requireExisting.call(this.dependencies.runtime, signal);
+    this.boundRuntimeLease = lease;
+    await bindExistingRuntime.call(this.dependencies.cdp, lease, signal);
+    await assertBoundRuntimeCurrent.call(this.dependencies.cdp, lease, signal);
+  }
+
+  private async prepareRuntime(signal?: AbortSignal): Promise<void> {
+    if (this.classicPolicy === "MANAGED") {
+      await this.dependencies.runtime.ensureStarted(signal);
+      await this.dependencies.cdp.connect(signal);
+      this.dependencies.cdp.assertCurrentRuntime();
+      return;
+    }
+    await this.initialize(signal);
+    await this.dependencies.cdp.connect(signal);
+    await this.assertBoundRuntimeCurrent(signal);
+  }
+
+  private async assertBoundRuntimeCurrent(signal?: AbortSignal): Promise<void> {
+    if (this.classicPolicy === "MANAGED") {
+      return;
+    }
+    const lease = this.boundRuntimeLease;
+    const assertBoundRuntimeCurrent = this.dependencies.cdp.assertBoundRuntimeCurrent;
+    if (lease === null || assertBoundRuntimeCurrent === undefined) {
+      throw new RequiredExistingRuntimeError();
+    }
+    await assertBoundRuntimeCurrent.call(this.dependencies.cdp, lease, signal);
   }
 
   private installCompletionBarrier(result: TurnResult): void {
@@ -290,9 +359,7 @@ export class ThreadwireController {
     }
     const committed = await withTimeout(
       async (waitSignal) => {
-        const onAbort = (): void => {
-          // Allow the barrier to settle naturally; the timeout/abort will race.
-        };
+        const onAbort = (): void => {};
         waitSignal.addEventListener("abort", onAbort, { once: true });
         try {
           return await barrier.promise;
@@ -319,10 +386,20 @@ export function createThreadwireController(
   config: ControllerConfig,
   options: ThreadwireControllerOptions = {},
 ): ThreadwireController {
+  const classicPolicy = config.classicPolicy ?? "MANAGED";
   const supervisor = new ClassicSupervisor(config);
   const registry = new ThreadRegistry();
   const scheduler = new OperationScheduler(supervisor);
-  const cdp = new CdpSessionManager(config, supervisor);
+  const cdp = classicPolicy === "BOUND_EXISTING"
+    ? new BoundCdpSessionManager(
+        config,
+        supervisor,
+        new BoundRuntimeProvenanceGuard(
+          supervisor,
+          new WindowsCdpEndpointProvenance(config),
+        ),
+      )
+    : new CdpSessionManager(config, supervisor);
   const readiness = new ReadinessController(cdp);
   const router = new ConversationRouter(registry, scheduler, cdp, readiness);
   const executor = new TurnExecutor(registry, scheduler, readiness, cdp);
@@ -331,6 +408,6 @@ export function createThreadwireController(
 
   return new ThreadwireController(
     { runtime: supervisor, cdp, registry, projectRegistry, router, executor, projectCreator },
-    options,
+    { ...options, classicPolicy },
   );
 }
