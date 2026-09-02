@@ -9,6 +9,10 @@ export type ThreadwireErrorCode =
   | "PROCESS_EXIT_TIMEOUT"
   | "NEW_PROCESS_NOT_OBSERVED"
   | "RUNTIME_NOT_OBSERVED"
+  | "RUNTIME_REQUIRED_EXISTING"
+  | "RUNTIME_GENERATION_CHANGED"
+  | "RUNTIME_PROVENANCE_UNVERIFIED"
+  | "RUNTIME_RECOVERY_FORBIDDEN"
   | "CDP_ENDPOINT_UNAVAILABLE"
   | "CDP_ENDPOINT_TIMEOUT"
   | "CDP_TARGET_LIST_MALFORMED"
@@ -18,7 +22,6 @@ export type ThreadwireErrorCode =
   | "CDP_DISCONNECTED"
   | "CDP_NAVIGATION_FAILED"
   | "CDP_READINESS_FAILED"
-  | "RUNTIME_GENERATION_CHANGED"
   | "OPERATION_TIMEOUT"
   | "OPERATION_ABORTED"
   | "CONVERSATION_LOCATOR_INVALID"
@@ -120,6 +123,34 @@ export class RuntimeNotObservedError extends ThreadwireError {
   }
 }
 
+export class RequiredExistingRuntimeError extends ThreadwireError {
+  constructor(message: string = "A pre-existing ChatGPT Classic runtime is required.", options?: ErrorOptions) {
+    super(message, "RUNTIME_REQUIRED_EXISTING", options);
+    this.name = "RequiredExistingRuntimeError";
+  }
+}
+
+export class RuntimeGenerationChangedError extends ThreadwireError {
+  constructor(message: string = "The ChatGPT Classic runtime generation changed during the operation.", options?: ErrorOptions) {
+    super(message, "RUNTIME_GENERATION_CHANGED", options);
+    this.name = "RuntimeGenerationChangedError";
+  }
+}
+
+export class RuntimeProvenanceUnverifiedError extends ThreadwireError {
+  constructor(message: string = "The bound runtime provenance could not be verified.", options?: ErrorOptions) {
+    super(message, "RUNTIME_PROVENANCE_UNVERIFIED", options);
+    this.name = "RuntimeProvenanceUnverifiedError";
+  }
+}
+
+export class RuntimeRecoveryForbiddenError extends ThreadwireError {
+  constructor(message: string = "Runtime recovery is forbidden for the bound-existing runtime policy.", options?: ErrorOptions) {
+    super(message, "RUNTIME_RECOVERY_FORBIDDEN", options);
+    this.name = "RuntimeRecoveryForbiddenError";
+  }
+}
+
 export class CdpEndpointUnavailableError extends ThreadwireError {
   constructor(message: string = "The CDP localhost endpoint is unavailable.", options?: ErrorOptions) {
     super(message, "CDP_ENDPOINT_UNAVAILABLE", options);
@@ -180,13 +211,6 @@ export class CdpReadinessFailedError extends ThreadwireError {
   constructor(message: string = "CDP readiness observation failed.", options?: ErrorOptions) {
     super(message, "CDP_READINESS_FAILED", options);
     this.name = "CdpReadinessFailedError";
-  }
-}
-
-export class RuntimeGenerationChangedError extends ThreadwireError {
-  constructor(message: string = "The ChatGPT Classic runtime generation changed during the operation.", options?: ErrorOptions) {
-    super(message, "RUNTIME_GENERATION_CHANGED", options);
-    this.name = "RuntimeGenerationChangedError";
   }
 }
 
