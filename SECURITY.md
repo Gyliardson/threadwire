@@ -32,9 +32,10 @@ The following properties are intended to hold:
 - Mutating WebContents operations are serialized in the MVP.
 - Navigation, switching, and reload do not occur while a conversational request is active.
 - A full Classic process replacement advances `runtimeGeneration`; stale work must be rejected.
-- `THREADWIRE_CLASSIC_POLICY=BOUND_EXISTING` is an operator/startup policy only. It requires a pre-existing Classic runtime, binds one immutable runtime lease for the server instance, forbids automatic Classic launch/restart/recovery/replacement, and fails closed if live process or configured localhost CDP provenance can no longer be established.
+- `THREADWIRE_CLASSIC_POLICY=BOUND_EXISTING` is an operator/startup policy only. It requires a pre-existing Classic runtime, binds one immutable runtime lease and one listener-owner PID-plus-creation-time identity for the server admission epoch, forbids automatic Classic launch/restart/recovery/replacement, and fails closed when those discrete observations no longer establish the admitted provenance.
 - Bound-runtime process identity, listener ownership, process ancestry, target identifiers, and debugger endpoints are private internal metadata and must not be logged or serialized through the public API.
-- CDP listener ownership in bound mode requires fresh OS observation of exactly the configured localhost listener and a current process-identity/ancestry chain rooted at the admitted Classic main identity; executable names and PID alone are not authority.
+- CDP listener provenance in bound mode uses repeated discrete Windows listener/process observations: exactly the configured localhost listener must remain owned by the same admitted owner process generation, with a strictly ordered current ancestry chain rooted at the admitted Classic main identity. Executable names, process names, parent PID alone, and PID alone are not authority.
+- Bound mutation guards are placed immediately before the raw CDP mutation commands that Threadwire controls, after any preceding asynchronous observation/polling in the same operation where practical. This narrows the race window but does not make the Windows/CDP observations atomic.
 - Input-command acceptance, write observation, conversation creation, and response completion are distinct states and must not be conflated.
 - Raw response bodies remain memory-only by default unless an explicit future design changes that policy.
 - Unit tests must not mutate the real ChatGPT process. Destructive acceptance must remain explicitly gated.
@@ -50,7 +51,7 @@ Examples of security-relevant findings include:
 - extraction, persistence, logging, or outward exposure of protected session/authentication material;
 - a protection bypass or replay mechanism introduced into Threadwire;
 - stale-runtime work executing after a full Classic process replacement;
-- a bound-existing server silently adopting a new Classic generation or accepting an unproven/foreign CDP listener;
+- a bound-existing server silently adopting a new Classic generation or accepting an unproven/foreign/replaced CDP listener generation;
 - mutation interleaving that violates the active-turn/navigation or scheduler boundaries;
 - conversation-handle/locator isolation failures that expose account-linked metadata to the wrong caller;
 - command/process invocation paths that permit untrusted input to alter executable or shell behavior;
@@ -88,4 +89,4 @@ Do not include real credentials, cookies, tokens, protected headers, proof artif
 
 ## Known limitations
 
-Threadwire is still an MVP. Repository unit tests prove only the exact code paths they exercise. The `BOUND_EXISTING` source/tests establish a fail-closed design and controlled Windows provenance fixture, but the actual ChatGPT Classic process-tree/CDP-listener topology remains acceptance-pending until a separate non-mutating Windows/Classic proof succeeds on the exact candidate SHA. Bounded acceptance samples must not be generalized into universal reliability or timing claims.
+Threadwire is still an MVP. Repository tests prove only the exact code paths and controlled fixtures they exercise. The `BOUND_EXISTING` source/tests implement a fail-closed policy under a documented discrete-observation model; they do not provide cryptographic binding or eliminate the race interval after the final OS provenance check and before a raw CDP mutation. The actual ChatGPT Classic process-tree/CDP-listener topology remains acceptance-pending until a separate non-mutating Windows/Classic proof succeeds on the exact candidate SHA. Native HELYX M2 is not accepted by these source/tests alone, and bounded acceptance samples must not be generalized into universal Windows support, reliability, or timing claims.
