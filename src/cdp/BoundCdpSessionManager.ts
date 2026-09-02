@@ -123,9 +123,14 @@ export class BoundCdpSessionManager extends CdpSessionManager {
   public override async connect(signal?: AbortSignal): Promise<void> {
     const lease = this.requireImmutableLease();
     await this.provenanceGuard.assertCurrent(lease, signal);
-    await super.connect(signal);
-    await this.provenanceGuard.assertCurrent(lease, signal);
-    super.assertCurrentRuntime();
+    try {
+      await super.connect(signal);
+      await this.provenanceGuard.assertCurrent(lease, signal);
+      super.assertCurrentRuntime();
+    } catch (error) {
+      await super.disconnect().catch(() => undefined);
+      throw error;
+    }
   }
 
   public async assertBoundRuntimeCurrent(
