@@ -91,9 +91,16 @@ export async function withTimeout<T>(
 
   if (parentSignal) {
     parentSignal.addEventListener("abort", onParentAbort, { once: true });
+    if (parentSignal.aborted) {
+      onParentAbort();
+    }
   }
 
   const abortPromise = new Promise<never>((_, reject) => {
+    if (controller.signal.aborted) {
+      reject(abortedError(controller.signal));
+      return;
+    }
     controller.signal.addEventListener(
       "abort",
       () => reject(abortedError(controller.signal)),
