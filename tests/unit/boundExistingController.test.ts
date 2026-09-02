@@ -6,7 +6,7 @@ import {
   ThreadwireController,
   ThreadwireControllerDependencies,
 } from "../../src/controller/ThreadwireController.js";
-import { RuntimeGeneration, RuntimeLease } from "../../src/domain/RuntimeGeneration.js";
+import { RuntimeGenerationTracker, RuntimeLease } from "../../src/domain/RuntimeGeneration.js";
 import { CdpConnectionState } from "../../src/domain/RuntimeState.js";
 import { ThreadHandle } from "../../src/domain/ThreadIdentity.js";
 import {
@@ -15,13 +15,12 @@ import {
 } from "../../src/domain/errors.js";
 
 function lease(): RuntimeLease {
-  return Object.freeze({
-    generation: 1 as RuntimeGeneration,
-    identity: Object.freeze({
-      pid: 100,
-      creationTime: "2026-09-02T12:00:00.0000000Z",
-    }),
+  const tracker = new RuntimeGenerationTracker();
+  tracker.observe({
+    pid: 100,
+    creationTime: "2026-09-02T12:00:00.0000000Z",
   });
+  return tracker.getCurrentRuntimeLease();
 }
 
 class FakeRuntime implements RuntimeControllerPort {

@@ -147,7 +147,7 @@ async function stopOwnedChild(child: ChildProcess): Promise<void> {
 }
 
 test(
-  "Windows fixture proves owned listener ancestry through the production provenance seam",
+  "Windows fixture binds and revalidates owned listener ancestry through the production provenance seam",
   { skip: WINDOWS_ONLY },
   async (t) => {
     const listener = await spawnListener();
@@ -159,7 +159,8 @@ test(
       classicPolicy: "BOUND_EXISTING",
     });
 
-    await provenance.assertOwnedByRuntime(expected);
+    await provenance.bindOwnedEndpoint(expected);
+    await provenance.assertOwnedEndpointCurrent(expected);
   },
 );
 
@@ -182,14 +183,14 @@ test(
     });
 
     await assert.rejects(
-      provenance.assertOwnedByRuntime(expected),
+      provenance.bindOwnedEndpoint(expected),
       RuntimeProvenanceUnverifiedError,
     );
   },
 );
 
 test(
-  "Windows fixture rejects listener-owner exit after a previously valid proof",
+  "Windows fixture rejects listener-owner exit after an admitted binding",
   { skip: WINDOWS_ONLY },
   async () => {
     const listener = await spawnListener();
@@ -200,10 +201,10 @@ test(
       classicPolicy: "BOUND_EXISTING",
     });
 
-    await provenance.assertOwnedByRuntime(expected);
+    await provenance.bindOwnedEndpoint(expected);
     await stopOwnedChild(listener.child);
     await assert.rejects(
-      provenance.assertOwnedByRuntime(expected),
+      provenance.assertOwnedEndpointCurrent(expected),
       RuntimeProvenanceUnverifiedError,
     );
   },
@@ -221,7 +222,7 @@ test("Windows fixture rejects admitted PID identity mismatch", { skip: WINDOWS_O
   });
 
   await assert.rejects(
-    provenance.assertOwnedByRuntime(tracker.getCurrentRuntimeLease()),
+    provenance.bindOwnedEndpoint(tracker.getCurrentRuntimeLease()),
     RuntimeProvenanceUnverifiedError,
   );
 });
