@@ -16,6 +16,7 @@ import {
   CdpReadinessFailedError,
   OperationAbortedError,
   RuntimeGenerationChangedError,
+  RuntimeProvenanceUnverifiedError,
   ResponseStreamUnavailableError,
   ThreadwireError,
 } from "../domain/errors.js";
@@ -38,6 +39,7 @@ import {
   CdpTurnObservationSnapshot,
   CdpTurnTransportSession,
 } from "./CdpTransport.js";
+import { CdpTargetInfo } from "./types.js";
 
 const DEFAULT_ATTACH_TIMEOUT_MS = 5000;
 const DEFAULT_NAVIGATION_SETTLEMENT_TIMEOUT_MS = 15000;
@@ -137,6 +139,46 @@ export class CdpSessionManager {
     return this.selectedTargetId;
   }
 
+  protected rawMutationSignal(_signal?: AbortSignal): AbortSignal | undefined {
+    return undefined;
+  }
+
+  protected async attachTransport(
+    target: CdpTargetInfo,
+    signal?: AbortSignal,
+  ): Promise<CdpTransportSession> {
+    return await withTimeout(
+      async (attachSignal) =>
+        await this.transport.connect({
+          host: this.config.cdpHost,
+          port: this.config.cdpPort,
+          target,
+          ...(attachSignal ? { signal: attachSignal } : {}),
+        }),
+      this.attachTimeoutMs,
+      signal
+        ? { signal, message: "Timed out attaching to the selected CDP target." }
+        : { message: "Timed out attaching to the selected CDP target." },
+    );
+  }
+
+  protected async initializeReadinessObservation(
+    session: CdpTransportSession,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await withTimeout(
+      async (readinessSignal) => {
+        throwIfAborted(readinessSignal);
+        await session.initializeReadinessObservation();
+        throwIfAborted(readinessSignal);
+      },
+      this.attachTimeoutMs,
+      signal
+        ? { signal, message: "Timed out initializing CDP readiness observation." }
+        : { message: "Timed out initializing CDP readiness observation." },
+    );
+  }
+
   public async connect(signal?: AbortSignal): Promise<void> {
     const lease = this.runtime.getCurrentRuntimeLease();
     if (this.currentState === "CONNECTED" && this.boundLease && sameRuntimeLease(this.boundLease, lease)) {
@@ -158,37 +200,19 @@ export class CdpSessionManager {
       this.runtime.assertRuntimeLeaseCurrent(lease);
       this.currentState = "ATTACHING";
 
-      const session = await withTimeout(
-        async (attachSignal) =>
-          await this.transport.connect({
-            host: this.config.cdpHost,
-            port: this.config.cdpPort,
-            target,
-            ...(attachSignal ? { signal: attachSignal } : {}),
-          }),
-        this.attachTimeoutMs,
-        signal
-          ? { signal, message: "Timed out attaching to the selected CDP target." }
-          : { message: "Timed out attaching to the selected CDP target." },
-      );
+      const session = await this.attachTransport(target, signal);
 
       try {
         this.runtime.assertRuntimeLeaseCurrent(lease);
-        await withTimeout(
-          async (readinessSignal) => {
-            throwIfAborted(readinessSignal);
-            await session.initializeReadinessObservation();
-            throwIfAborted(readinessSignal);
-          },
-          this.attachTimeoutMs,
-          signal
-            ? { signal, message: "Timed out initializing CDP readiness observation." }
-            : { message: "Timed out initializing CDP readiness observation." },
-        );
+        await this.initializeReadinessObservation(session, signal);
         this.runtime.assertRuntimeLeaseCurrent(lease);
       } catch (error) {
         await session.close().catch(() => undefined);
-        if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+        if (
+          error instanceof RuntimeGenerationChangedError ||
+          error instanceof RuntimeProvenanceUnverifiedError ||
+          error instanceof OperationAbortedError
+        ) {
           throw error;
         }
         throw new CdpReadinessFailedError(undefined, { cause: error });
@@ -210,7 +234,11 @@ export class CdpSessionManager {
       });
     } catch (error) {
       this.currentState = "FAILED";
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+      if (
+        error instanceof RuntimeGenerationChangedError ||
+        error instanceof RuntimeProvenanceUnverifiedError ||
+        error instanceof OperationAbortedError
+      ) {
         throw error;
       }
       if (error instanceof ThreadwireError && error.code.startsWith("CDP_") && error.code !== "CDP_ATTACH_FAILED") {
@@ -244,10 +272,19 @@ export class CdpSessionManager {
     this.assertCurrentRuntime();
     throwIfAborted(signal);
     const session = this.session!;
+    const rawSignal = this.rawMutationSignal(signal);
     try {
-      await session.navigate(url);
+      if (rawSignal) {
+        await session.navigate(url, rawSignal);
+      } else {
+        await session.navigate(url);
+      }
     } catch (error) {
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+      if (
+        error instanceof RuntimeGenerationChangedError ||
+        error instanceof RuntimeProvenanceUnverifiedError ||
+        error instanceof OperationAbortedError
+      ) {
         throw error;
       }
       throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
@@ -258,10 +295,19 @@ export class CdpSessionManager {
     this.assertCurrentRuntime();
     throwIfAborted(signal);
     const session = this.session!;
+    const rawSignal = this.rawMutationSignal(signal);
     try {
-      await session.reload();
+      if (rawSignal) {
+        await session.reload(rawSignal);
+      } else {
+        await session.reload();
+      }
     } catch (error) {
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+      if (
+        error instanceof RuntimeGenerationChangedError ||
+        error instanceof RuntimeProvenanceUnverifiedError ||
+        error instanceof OperationAbortedError
+      ) {
         throw error;
       }
       throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
@@ -291,7 +337,11 @@ export class CdpSessionManager {
       );
       this.assertCurrentRuntime();
     } catch (error) {
-      if (error instanceof RuntimeGenerationChangedError || error instanceof OperationAbortedError) {
+      if (
+        error instanceof RuntimeGenerationChangedError ||
+        error instanceof RuntimeProvenanceUnverifiedError ||
+        error instanceof OperationAbortedError
+      ) {
         throw error;
       }
       throw new CdpNavigationFailedError(undefined, { cause: sanitizedNavigationCause(error) });
@@ -328,11 +378,14 @@ export class CdpSessionManager {
 
     throwIfAborted(signal);
     const session = this.requireSessionForLease(lease);
+    const rawSignal = this.rawMutationSignal(signal);
     try {
       await this.runReadinessSessionOperation(
         session,
         lease,
-        () => session.focusBackendNode(backendDOMNodeId),
+        () => rawSignal
+          ? session.focusBackendNode(backendDOMNodeId, rawSignal)
+          : session.focusBackendNode(backendDOMNodeId),
         signal,
       );
     } catch (error) {
@@ -426,9 +479,20 @@ export class CdpSessionManager {
     }
   }
 
-  public async insertText(text: string, lease: RuntimeLease): Promise<void> {
+  public async insertText(
+    text: string,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const rawSignal = this.rawMutationSignal(signal);
+    throwIfAborted(rawSignal);
     const session = this.requireTurnSessionForLease(lease);
-    await this.runTurnSessionOperation(session, lease, () => session.insertText(text));
+    await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => rawSignal ? session.insertText(text, rawSignal) : session.insertText(text),
+      rawSignal,
+    );
   }
 
   public async insertTextIntoProjectComposer(
@@ -450,14 +514,34 @@ export class CdpSessionManager {
     );
   }
 
-  public async dispatchEnterKeyDown(lease: RuntimeLease): Promise<void> {
+  public async dispatchEnterKeyDown(
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const rawSignal = this.rawMutationSignal(signal);
+    throwIfAborted(rawSignal);
     const session = this.requireTurnSessionForLease(lease);
-    await this.runTurnSessionOperation(session, lease, () => session.dispatchEnterKeyDown());
+    await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => rawSignal ? session.dispatchEnterKeyDown(rawSignal) : session.dispatchEnterKeyDown(),
+      rawSignal,
+    );
   }
 
-  public async dispatchEnterKeyUp(lease: RuntimeLease): Promise<void> {
+  public async dispatchEnterKeyUp(
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const rawSignal = this.rawMutationSignal(signal);
+    throwIfAborted(rawSignal);
     const session = this.requireTurnSessionForLease(lease);
-    await this.runTurnSessionOperation(session, lease, () => session.dispatchEnterKeyUp());
+    await this.runTurnSessionOperation(
+      session,
+      lease,
+      () => rawSignal ? session.dispatchEnterKeyUp(rawSignal) : session.dispatchEnterKeyUp(),
+      rawSignal,
+    );
   }
 
   public async clickTurnSendButton(
@@ -588,10 +672,13 @@ export class CdpSessionManager {
     session: CdpTurnTransportSession,
     lease: RuntimeLease,
     operation: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
     this.assertSessionForLeaseCurrent(session, lease);
+    throwIfAborted(signal);
     try {
       const result = await operation();
+      throwIfAborted(signal);
       this.assertSessionForLeaseCurrent(session, lease);
       return result;
     } catch (error) {
@@ -667,6 +754,7 @@ export class CdpSessionManager {
 
     if (
       error instanceof RuntimeGenerationChangedError ||
+      error instanceof RuntimeProvenanceUnverifiedError ||
       error instanceof OperationAbortedError ||
       error instanceof CdpDisconnectedError ||
       error instanceof CdpReadinessFailedError

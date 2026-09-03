@@ -9,6 +9,7 @@ assertApiConfigCompatible(apiConfig, controllerConfig);
 
 const controller = createThreadwireController(controllerConfig);
 const server = createThreadwireHttpServer(apiConfig, controller);
+await controller.initialize();
 await server.start();
 
 console.log(`Threadwire API listening on http://${apiConfig.apiHost}:${apiConfig.apiPort}`);

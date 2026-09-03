@@ -4,11 +4,14 @@ import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.
 import { NormalizedResponseStreamEvent } from "../response/types.js";
 import { CdpTargetInfo } from "./types.js";
 
+export type CdpBeforeMutationHook = (signal?: AbortSignal) => Promise<void>;
+
 export interface CdpTransportConnectOptions {
   readonly host: string;
   readonly port: number;
   readonly target: CdpTargetInfo;
   readonly signal?: AbortSignal;
+  readonly beforeMutation?: CdpBeforeMutationHook;
 }
 
 declare const cdpTurnObservationBrand: unique symbol;
@@ -68,10 +71,10 @@ export interface CdpTransportSession {
   close(): Promise<void>;
   onDisconnect(listener: () => void): () => void;
   initializeReadinessObservation(): Promise<void>;
-  navigate(url: string): Promise<void>;
-  reload(): Promise<void>;
+  navigate(url: string, signal?: AbortSignal): Promise<void>;
+  reload(signal?: AbortSignal): Promise<void>;
   getReadinessSnapshot(expectedRoute: RouteExpectation): Promise<ExistingReadinessSnapshot>;
-  focusBackendNode(backendDOMNodeId: number): Promise<void>;
+  focusBackendNode(backendDOMNodeId: number, signal?: AbortSignal): Promise<void>;
 }
 
 export interface CdpNavigationSettlementTransportSession extends CdpTransportSession {
@@ -87,15 +90,15 @@ export interface CdpTurnTransportSession extends CdpTransportSession {
   armTurnObservation(options?: CdpTurnObservationOptions): CdpTurnObservationHandle;
   getTurnObservation(handle: CdpTurnObservationHandle): CdpTurnObservationSnapshot;
   releaseTurnObservation(handle: CdpTurnObservationHandle): void;
-  insertText(text: string): Promise<void>;
+  insertText(text: string, signal?: AbortSignal): Promise<void>;
   insertTextIntoProjectComposer?(
     text: string,
     projectLocator: ProjectLocator,
     backendDOMNodeId: number,
     signal?: AbortSignal,
   ): Promise<number>;
-  dispatchEnterKeyDown(): Promise<void>;
-  dispatchEnterKeyUp(): Promise<void>;
+  dispatchEnterKeyDown(signal?: AbortSignal): Promise<void>;
+  dispatchEnterKeyUp(signal?: AbortSignal): Promise<void>;
   clickTurnSendButton?(
     projectLocator: ProjectLocator,
     backendDOMNodeId: number,

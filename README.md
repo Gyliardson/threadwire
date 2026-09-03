@@ -75,6 +75,20 @@ THREADWIRE_CDP_PORT=9223
 
 `THREADWIRE_CDP_HOST` must be exactly `127.0.0.1`. The port is configurable and defaults to `9223`.
 
+Classic lifecycle policy is an operator/startup setting and is not selectable by turn requests or model output:
+
+```text
+THREADWIRE_CLASSIC_POLICY=MANAGED
+```
+
+`THREADWIRE_CLASSIC_POLICY` accepts exactly `MANAGED` or `BOUND_EXISTING` and defaults to `MANAGED` when absent.
+
+- `MANAGED` preserves the existing Threadwire lifecycle behavior, including controlled auto-start and explicit runtime recovery.
+- `BOUND_EXISTING` requires one already-running valid ChatGPT Classic runtime before the HTTP server starts listening. The Threadwire server binds to that single admitted runtime generation for its lifetime, does not auto-start, stop, restart, recover, or silently adopt a replacement Classic, and fails closed if the bound process or configured localhost CDP endpoint provenance can no longer be proven.
+- The `/v1/turns` request schema is unchanged in either policy. Runtime leases, process identities, listener ownership, target identifiers, and debugger URLs remain private implementation state.
+
+The source candidate includes deterministic process/listener provenance fixtures. Actual ChatGPT Classic process/CDP topology remains an acceptance-pending Windows environment fact and must be proven separately on the exact candidate before this mode is accepted for native use.
+
 The M8 HTTP API is also localhost-only:
 
 ```text
@@ -106,7 +120,7 @@ Returns only safe controller state:
 }
 ```
 
-`classic` is `RUNNING` or `STOPPED`. `cdp` uses Threadwire's CDP connection state. Process IDs, runtime generations, target metadata, conversation locators, and debugger URLs are not exposed.
+`classic` is `RUNNING` or `STOPPED`. `cdp` uses Threadwire's CDP connection state. In `BOUND_EXISTING`, health revalidates the bound runtime and configured CDP endpoint provenance; unverifiable provenance fails instead of reporting a healthy binding. Process IDs, runtime generations, target metadata, conversation locators, and debugger URLs are not exposed.
 
 ### `GET /v1/threads`
 

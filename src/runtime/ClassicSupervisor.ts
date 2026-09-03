@@ -16,6 +16,8 @@ import {
   OperationAbortedError,
   OperationTimeoutError,
   ProcessExitTimeoutError,
+  RequiredExistingRuntimeError,
+  RuntimeGenerationChangedError,
 } from "../domain/errors.js";
 import { delay, throwIfAborted, withTimeout } from "../utils/timeout.js";
 import {
@@ -138,6 +140,42 @@ export class ClassicSupervisor implements RuntimeLeaseSource {
       mainProcess: mainProcess ? processObservation(mainProcess) : null,
       processes: processes.map(processObservation),
     };
+  }
+
+  public requireExisting(signal?: AbortSignal): Promise<RuntimeLease> {
+    return this.runLifecycle(async () => {
+      throwIfAborted(signal);
+      const processes = await this.inspector.getClassicProcesses(signal);
+      const mainProcess = selectUniqueMainProcess(processes);
+      if (mainProcess === null) {
+        this.tracker.observe(null);
+        throw new RequiredExistingRuntimeError();
+      }
+      this.tracker.observe(runtimeIdentity(mainProcess));
+      return this.tracker.getCurrentRuntimeLease();
+    }, signal);
+  }
+
+  public async assertRuntimeLeaseCurrentObserved(
+    expectedLease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
+    const processes = await this.inspector.getClassicProcesses(signal);
+    const mainProcess = selectUniqueMainProcess(processes);
+    if (mainProcess === null) {
+      this.tracker.observe(null);
+      throw new RuntimeGenerationChangedError();
+    }
+
+    const observedIdentity = runtimeIdentity(mainProcess);
+    if (!sameRuntimeIdentity(observedIdentity, expectedLease.identity)) {
+      this.tracker.observe(observedIdentity);
+      throw new RuntimeGenerationChangedError();
+    }
+
+    this.tracker.observe(observedIdentity);
+    this.tracker.assertRuntimeLeaseCurrent(expectedLease);
   }
 
   public ensureStarted(signal?: AbortSignal): Promise<RuntimeGeneration> {
