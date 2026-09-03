@@ -2,10 +2,14 @@ import { ControllerConfig } from "../config/ControllerConfig.js";
 import { ProjectLocator, ProjectName } from "../domain/ProjectIdentity.js";
 import { RuntimeLease, RuntimeLeaseSource, sameRuntimeLease } from "../domain/RuntimeGeneration.js";
 import { ConversationLocator } from "../domain/ThreadIdentity.js";
-import { RuntimeGenerationChangedError } from "../domain/errors.js";
+import {
+  OperationTimeoutError,
+  RuntimeGenerationChangedError,
+  RuntimeProvenanceUnverifiedError,
+} from "../domain/errors.js";
 import { RouteExpectation } from "../readiness/types.js";
 import { RuntimeProvenanceGuard } from "../runtime/BoundRuntimeProvenanceGuard.js";
-import { throwIfAborted } from "../utils/timeout.js";
+import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
 import { assertTargetDebuggerEndpoint } from "./CdpEndpointBinding.js";
 import {
@@ -19,15 +23,68 @@ import {
   CdpTransportConnectOptions,
   CdpTransportSession,
 } from "./CdpTransport.js";
+import { CdpTargetInfo } from "./types.js";
 
-async function assertGuardCurrent(
-  guard: RuntimeProvenanceGuard,
-  lease: RuntimeLease,
-  signal?: AbortSignal,
-): Promise<void> {
-  throwIfAborted(signal);
-  await guard.assertCurrent(lease, signal);
-  throwIfAborted(signal);
+const DEFAULT_BOUND_PROVENANCE_TIMEOUT_MS = 5000;
+
+class GuardOperationTimeoutError extends Error {
+  public constructor(public readonly timeout: OperationTimeoutError) {
+    super(timeout.message);
+    this.name = "GuardOperationTimeoutError";
+  }
+}
+
+interface BoundCdpSessionManagerOptions extends CdpSessionManagerOptions {
+  readonly provenanceTimeoutMs?: number;
+}
+
+class BoundedProvenanceOperations {
+  public constructor(
+    private readonly guard: RuntimeProvenanceGuard,
+    private readonly timeoutMs: number,
+  ) {}
+
+  public async bind(lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
+    await this.run((operationSignal) => this.guard.bind(lease, operationSignal), signal);
+  }
+
+  public async assertCurrent(lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
+    await this.run((operationSignal) => this.guard.assertCurrent(lease, operationSignal), signal);
+  }
+
+  private async run(
+    operation: (signal: AbortSignal) => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    try {
+      await withTimeout(
+        async (operationSignal) => {
+          throwIfAborted(operationSignal);
+          try {
+            await operation(operationSignal);
+          } catch (error) {
+            if (error instanceof OperationTimeoutError && !operationSignal.aborted) {
+              throw new GuardOperationTimeoutError(error);
+            }
+            throw error;
+          }
+          throwIfAborted(operationSignal);
+        },
+        this.timeoutMs,
+        signal
+          ? { signal, message: "Timed out verifying bound runtime provenance." }
+          : { message: "Timed out verifying bound runtime provenance." },
+      );
+    } catch (error) {
+      if (error instanceof GuardOperationTimeoutError) {
+        throw error.timeout;
+      }
+      if (error instanceof OperationTimeoutError) {
+        throw new RuntimeProvenanceUnverifiedError(undefined, { cause: error });
+      }
+      throw error;
+    }
+  }
 }
 
 class GuardedDiscovery implements CdpTargetDiscoveryLike {
@@ -35,15 +92,15 @@ class GuardedDiscovery implements CdpTargetDiscoveryLike {
     private readonly inner: CdpTargetDiscoveryLike,
     private readonly config: ControllerConfig,
     private readonly getLease: () => RuntimeLease,
-    private readonly guard: RuntimeProvenanceGuard,
+    private readonly provenance: BoundedProvenanceOperations,
   ) {}
 
   public async findPrimaryTarget(options: FindPrimaryTargetOptions = {}) {
     const lease = this.getLease();
-    await assertGuardCurrent(this.guard, lease, options.signal);
+    await this.provenance.assertCurrent(lease, options.signal);
     const target = await this.inner.findPrimaryTarget(options);
     assertTargetDebuggerEndpoint(target, this.config);
-    await assertGuardCurrent(this.guard, lease, options.signal);
+    await this.provenance.assertCurrent(lease, options.signal);
     return target;
   }
 }
@@ -52,49 +109,15 @@ class GuardedTransport implements CdpTransport {
   public constructor(
     private readonly inner: CdpTransport,
     private readonly getLease: () => RuntimeLease,
-    private readonly guard: RuntimeProvenanceGuard,
+    private readonly provenance: BoundedProvenanceOperations,
   ) {}
 
   public async connect(options: CdpTransportConnectOptions): Promise<CdpTransportSession> {
     const lease = this.getLease();
-    await assertGuardCurrent(this.guard, lease, options.signal);
-    const session = await this.inner.connect({
+    return await this.inner.connect({
       ...options,
       beforeMutation: async (mutationSignal) => {
-        await assertGuardCurrent(this.guard, lease, mutationSignal);
-      },
-    });
-    try {
-      await assertGuardCurrent(this.guard, lease, options.signal);
-    } catch (error) {
-      await session.close().catch(() => undefined);
-      throw error;
-    }
-    return this.wrapReadiness(session, lease, options.signal);
-  }
-
-  private wrapReadiness(
-    session: CdpTransportSession,
-    lease: RuntimeLease,
-    signal?: AbortSignal,
-  ): CdpTransportSession {
-    const guard = this.guard;
-    return new Proxy(session, {
-      get(target, property) {
-        if (property === "initializeReadinessObservation") {
-          return async () => {
-            await assertGuardCurrent(guard, lease, signal);
-            try {
-              await target.initializeReadinessObservation();
-              await assertGuardCurrent(guard, lease, signal);
-            } catch (error) {
-              await target.close().catch(() => undefined);
-              throw error;
-            }
-          };
-        }
-        const value = Reflect.get(target, property, target);
-        return typeof value === "function" ? value.bind(target) : value;
+        await this.provenance.assertCurrent(lease, mutationSignal);
       },
     });
   }
@@ -103,28 +126,35 @@ class GuardedTransport implements CdpTransport {
 export class BoundCdpSessionManager extends CdpSessionManager {
   public readonly boundMutationCancellation = true as const;
   private immutableLease: RuntimeLease | null = null;
+  private readonly provenance: BoundedProvenanceOperations;
 
   public constructor(
     config: ControllerConfig,
     runtime: RuntimeLeaseSource,
-    private readonly provenanceGuard: RuntimeProvenanceGuard,
-    options: CdpSessionManagerOptions = {},
+    provenanceGuard: RuntimeProvenanceGuard,
+    options: BoundCdpSessionManagerOptions = {},
   ) {
+    const {
+      provenanceTimeoutMs = DEFAULT_BOUND_PROVENANCE_TIMEOUT_MS,
+      ...baseOptions
+    } = options;
+    const provenance = new BoundedProvenanceOperations(provenanceGuard, provenanceTimeoutMs);
     let getLease: () => RuntimeLease = () => {
       throw new RuntimeGenerationChangedError();
     };
     const discovery = new GuardedDiscovery(
-      options.discovery ?? new CdpTargetDiscovery(config),
+      baseOptions.discovery ?? new CdpTargetDiscovery(config),
       config,
       () => getLease(),
-      provenanceGuard,
+      provenance,
     );
     const transport = new GuardedTransport(
-      options.transport ?? new ChromeRemoteInterfaceTransport(),
+      baseOptions.transport ?? new ChromeRemoteInterfaceTransport(),
       () => getLease(),
-      provenanceGuard,
+      provenance,
     );
-    super(config, runtime, { ...options, discovery, transport });
+    super(config, runtime, { ...baseOptions, discovery, transport });
+    this.provenance = provenance;
     getLease = () => this.requireImmutableLease();
   }
 
@@ -132,11 +162,37 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     return signal;
   }
 
+  protected override async attachTransport(
+    target: CdpTargetInfo,
+    signal?: AbortSignal,
+  ): Promise<CdpTransportSession> {
+    const lease = this.requireImmutableLease();
+    await this.provenance.assertCurrent(lease, signal);
+    const session = await super.attachTransport(target, signal);
+    try {
+      await this.provenance.assertCurrent(lease, signal);
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
+    return session;
+  }
+
+  protected override async initializeReadinessObservation(
+    session: CdpTransportSession,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const lease = this.requireImmutableLease();
+    await this.provenance.assertCurrent(lease, signal);
+    await super.initializeReadinessObservation(session, signal);
+    await this.provenance.assertCurrent(lease, signal);
+  }
+
   public async bindExistingRuntime(lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal);
     if (this.immutableLease === null) {
       this.immutableLease = lease;
-      await this.provenanceGuard.bind(lease, signal);
+      await this.provenance.bind(lease, signal);
       throwIfAborted(signal);
     } else if (!sameRuntimeLease(this.immutableLease, lease)) {
       throw new RuntimeGenerationChangedError();
@@ -292,7 +348,7 @@ export class BoundCdpSessionManager extends CdpSessionManager {
   }
 
   private async guardCurrent(signal?: AbortSignal): Promise<void> {
-    await assertGuardCurrent(this.provenanceGuard, this.requireImmutableLease(), signal);
+    await this.provenance.assertCurrent(this.requireImmutableLease(), signal);
   }
 
   private async guardBeforeMutation(signal?: AbortSignal): Promise<void> {
@@ -304,6 +360,6 @@ export class BoundCdpSessionManager extends CdpSessionManager {
     if (!sameRuntimeLease(expected, lease)) {
       throw new RuntimeGenerationChangedError();
     }
-    await assertGuardCurrent(this.provenanceGuard, expected, signal);
+    await this.provenance.assertCurrent(expected, signal);
   }
 }

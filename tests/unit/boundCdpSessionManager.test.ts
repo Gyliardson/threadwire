@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BoundCdpSessionManager } from "../../src/cdp/BoundCdpSessionManager.js";
-import { CdpTargetDiscoveryLike } from "../../src/cdp/CdpSessionManager.js";
+import {
+  CdpSessionManager,
+  CdpTargetDiscoveryLike,
+} from "../../src/cdp/CdpSessionManager.js";
 import {
   CdpBeforeMutationHook,
   CdpTransport,
@@ -20,10 +23,14 @@ import {
 } from "../../src/domain/RuntimeGeneration.js";
 import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
 import {
+  CdpAttachFailedError,
+  CdpReadinessFailedError,
+  OperationAbortedError,
   RuntimeGenerationChangedError,
   RuntimeProvenanceUnverifiedError,
 } from "../../src/domain/errors.js";
 import { RuntimeProvenanceGuard } from "../../src/runtime/BoundRuntimeProvenanceGuard.js";
+import { delay } from "../../src/utils/timeout.js";
 
 const config = {
   cdpHost: "127.0.0.1" as const,
@@ -46,6 +53,19 @@ const PROJECT_LOCATOR = createProjectLocator(
   "https://chatgpt.com/g/g-p-00000000000000000000000000000002/project",
 );
 const CONVERSATION_LOCATOR = createConversationLocator("https://chatgpt.com/c/synthetic-thread");
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolver) => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
+}
 
 function lease(pid = INITIAL_IDENTITY.pid, creationTime = INITIAL_IDENTITY.creationTime): RuntimeLease {
   const tracker = new RuntimeGenerationTracker();
@@ -97,6 +117,58 @@ class ToggleGuard implements RuntimeProvenanceGuard {
   }
 }
 
+class ScriptedGuard implements RuntimeProvenanceGuard {
+  public calls = 0;
+  public bindCalls = 0;
+  public observedAbort = false;
+  public readonly events: string[];
+  public onBind: ((signal?: AbortSignal) => Promise<void>) | null = null;
+  public onAssert: ((call: number, signal?: AbortSignal) => Promise<void>) | null = null;
+
+  public constructor(events: string[] = []) {
+    this.events = events;
+  }
+
+  public async bind(_lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
+    this.bindCalls += 1;
+    this.events.push("bind:start");
+    try {
+      await this.onBind?.(signal);
+    } finally {
+      this.events.push("bind:end");
+    }
+  }
+
+  public async assertCurrent(_lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
+    this.calls += 1;
+    const call = this.calls;
+    this.events.push(`guard:${call}:start`);
+    try {
+      await this.onAssert?.(call, signal);
+    } finally {
+      this.events.push(`guard:${call}:end`);
+    }
+  }
+
+  public hangUntilAbort(signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((_resolve, reject) => {
+      if (!signal) {
+        reject(new Error("expected provenance operation signal"));
+        return;
+      }
+      const onAbort = (): void => {
+        this.observedAbort = true;
+        reject(signal.reason ?? new Error("aborted"));
+      };
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+}
+
 class FakeDiscovery implements CdpTargetDiscoveryLike {
   public calls = 0;
   public onFind: (() => void) | null = null;
@@ -111,6 +183,7 @@ class FakeDiscovery implements CdpTargetDiscoveryLike {
 class FakeSession implements CdpTransportSession {
   public closes = 0;
   public readinessCalls = 0;
+  public readinessDelayMs = 0;
   public navigateCalls = 0;
   public insertCalls = 0;
   public projectInsertCalls = 0;
@@ -121,10 +194,14 @@ class FakeSession implements CdpTransportSession {
   public onCompositeObservation: (() => void) | null = null;
   private disconnectListener: (() => void) | null = null;
 
-  public constructor(private readonly beforeMutation?: CdpBeforeMutationHook) {}
+  public constructor(
+    private readonly beforeMutation?: CdpBeforeMutationHook,
+    private readonly events: string[] = [],
+  ) {}
 
   public async close(): Promise<void> {
     this.closes += 1;
+    this.events.push("session:close");
   }
 
   public onDisconnect(listener: () => void): () => void {
@@ -140,7 +217,12 @@ class FakeSession implements CdpTransportSession {
 
   public async initializeReadinessObservation(): Promise<void> {
     this.readinessCalls += 1;
+    this.events.push("readiness:start");
     this.onReadiness?.();
+    if (this.readinessDelayMs > 0) {
+      await delay(this.readinessDelayMs);
+    }
+    this.events.push("readiness:end");
   }
 
   public async navigate(): Promise<void> {
@@ -221,14 +303,38 @@ class FakeSession implements CdpTransportSession {
 
 class FakeTransport implements CdpTransport {
   public calls = 0;
+  public connectDelayMs = 0;
+  public readinessDelayMs = 0;
+  public observedAbort = false;
   public readonly sessions: FakeSession[] = [];
+  public readonly events: string[];
+  public onConnectStart: (() => void) | null = null;
   public onConnect: ((session: FakeSession) => void) | null = null;
+
+  public constructor(events: string[] = []) {
+    this.events = events;
+  }
 
   public async connect(options: CdpTransportConnectOptions): Promise<CdpTransportSession> {
     this.calls += 1;
-    const session = new FakeSession(options.beforeMutation);
+    this.events.push("transport:start");
+    this.onConnectStart?.();
+    const onAbort = (): void => {
+      this.observedAbort = true;
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      if (this.connectDelayMs > 0) {
+        await delay(this.connectDelayMs, options.signal);
+      }
+    } finally {
+      options.signal?.removeEventListener("abort", onAbort);
+    }
+    const session = new FakeSession(options.beforeMutation, this.events);
+    session.readinessDelayMs = this.readinessDelayMs;
     this.sessions.push(session);
     this.onConnect?.(session);
+    this.events.push("transport:return");
     return session;
   }
 }
@@ -244,6 +350,25 @@ function fixture() {
     attachTimeoutMs: 100,
   });
   return { runtime, guard, discovery, transport, manager };
+}
+
+function scriptedFixture(options: {
+  readonly attachTimeoutMs?: number;
+  readonly provenanceTimeoutMs?: number;
+  readonly events?: string[];
+} = {}) {
+  const runtime = new StaticRuntime();
+  const events = options.events ?? [];
+  const guard = new ScriptedGuard(events);
+  const discovery = new FakeDiscovery();
+  const transport = new FakeTransport(events);
+  const manager = new BoundCdpSessionManager(config, runtime, guard, {
+    discovery,
+    transport,
+    attachTimeoutMs: options.attachTimeoutMs ?? 100,
+    provenanceTimeoutMs: options.provenanceTimeoutMs ?? 100,
+  });
+  return { runtime, guard, discovery, transport, manager, events };
 }
 
 test("bound CDP explicitly binds provenance once before initial connection", async () => {
@@ -413,6 +538,209 @@ test("bound CDP raw pre-mutation hook blocks Project and existing send after asy
       assert.equal(session.existingSendCalls, 0);
     }
   }
+});
+
+test("T1 empirical regression keeps attach pre/post provenance outside the transport clock", async () => {
+  const f = scriptedFixture({ attachTimeoutMs: 50, provenanceTimeoutMs: 100 });
+  f.transport.connectDelayMs = 25;
+  f.guard.onAssert = async (call, signal) => {
+    if (call === 4) await delay(10, signal);
+    if (call === 5) await delay(30, signal);
+  };
+
+  await f.manager.bindExistingRuntime(f.runtime.current);
+
+  assert.equal(f.manager.state, "CONNECTED");
+  assert.equal(f.transport.calls, 1);
+  assert.equal(f.transport.sessions.length, 1);
+});
+
+test("T2 true inner transport timeout retains attach failure and abort semantics", async () => {
+  const f = scriptedFixture({ attachTimeoutMs: 20, provenanceTimeoutMs: 100 });
+  f.transport.connectDelayMs = 80;
+
+  await assert.rejects(
+    f.manager.bindExistingRuntime(f.runtime.current),
+    (error: unknown) => error instanceof CdpAttachFailedError && error.code === "CDP_ATTACH_FAILED",
+  );
+
+  assert.equal(f.transport.observedAbort, true);
+  assert.equal(f.transport.sessions.length, 0);
+  assert.equal(f.manager.targetId, null);
+});
+
+test("T3 post-attach provenance failure closes the candidate before it can be stored", async () => {
+  const f = scriptedFixture();
+  f.guard.onAssert = async (call) => {
+    if (call === 5) throw new RuntimeProvenanceUnverifiedError();
+  };
+
+  await assert.rejects(
+    f.manager.bindExistingRuntime(f.runtime.current),
+    RuntimeProvenanceUnverifiedError,
+  );
+
+  assert.equal(f.transport.sessions[0]?.closes, 1);
+  assert.equal(f.manager.targetId, null);
+  assert.equal(f.manager.state, "DISCONNECTED");
+});
+
+test("T4 pre-attach provenance failure prevents the inner transport call", async () => {
+  const f = scriptedFixture();
+  f.guard.onAssert = async (call) => {
+    if (call === 4) throw new RuntimeProvenanceUnverifiedError();
+  };
+
+  await assert.rejects(
+    f.manager.bindExistingRuntime(f.runtime.current),
+    RuntimeProvenanceUnverifiedError,
+  );
+  assert.equal(f.transport.calls, 0);
+});
+
+test("T5 MANAGED keeps independent attach/readiness clocks and stable error mapping", async () => {
+  const runtime = new StaticRuntime();
+  const discovery = new FakeDiscovery();
+  const transport = new FakeTransport();
+  transport.connectDelayMs = 35;
+  transport.readinessDelayMs = 35;
+  const manager = new CdpSessionManager(config, runtime, {
+    discovery,
+    transport,
+    attachTimeoutMs: 50,
+  });
+
+  await manager.connect();
+  assert.equal(manager.state, "CONNECTED");
+  assert.equal(transport.sessions[0]?.readinessCalls, 1);
+
+  const timeoutTransport = new FakeTransport();
+  timeoutTransport.connectDelayMs = 80;
+  const timeoutManager = new CdpSessionManager(config, new StaticRuntime(), {
+    discovery: new FakeDiscovery(),
+    transport: timeoutTransport,
+    attachTimeoutMs: 20,
+  });
+  await assert.rejects(
+    timeoutManager.connect(),
+    (error: unknown) => error instanceof CdpAttachFailedError && error.code === "CDP_ATTACH_FAILED",
+  );
+
+  const readinessTransport = new FakeTransport();
+  readinessTransport.readinessDelayMs = 80;
+  const readinessManager = new CdpSessionManager(config, new StaticRuntime(), {
+    discovery: new FakeDiscovery(),
+    transport: readinessTransport,
+    attachTimeoutMs: 20,
+  });
+  await assert.rejects(
+    readinessManager.connect(),
+    (error: unknown) => error instanceof CdpReadinessFailedError && error.code === "CDP_READINESS_FAILED",
+  );
+});
+
+test("T6 parent abort during inner attach propagates and no session escapes", async () => {
+  const f = scriptedFixture({ attachTimeoutMs: 500, provenanceTimeoutMs: 100 });
+  const started = deferred<void>();
+  f.transport.connectDelayMs = 200;
+  f.transport.onConnectStart = () => started.resolve();
+  const controller = new AbortController();
+
+  const connecting = f.manager.bindExistingRuntime(f.runtime.current, controller.signal);
+  await started.promise;
+  controller.abort(new Error("synthetic parent cancellation"));
+
+  await assert.rejects(connecting, OperationAbortedError);
+  assert.equal(f.transport.observedAbort, true);
+  assert.equal(f.transport.sessions.length, 0);
+  assert.equal(f.manager.targetId, null);
+});
+
+test("T7 readiness pre/post provenance has independent deadlines around the original readiness clock", async () => {
+  const events: string[] = [];
+  const f = scriptedFixture({ attachTimeoutMs: 50, provenanceTimeoutMs: 100, events });
+  f.transport.readinessDelayMs = 25;
+  f.guard.onAssert = async (call, signal) => {
+    if (call === 6) await delay(10, signal);
+    if (call === 7) await delay(30, signal);
+  };
+
+  await f.manager.bindExistingRuntime(f.runtime.current);
+
+  assert.equal(f.manager.state, "CONNECTED");
+  assert.ok(events.indexOf("guard:5:end") < events.indexOf("guard:6:start"));
+  assert.ok(events.indexOf("guard:6:end") < events.indexOf("readiness:start"));
+  assert.ok(events.indexOf("readiness:end") < events.indexOf("guard:7:start"));
+});
+
+test("T8 pre-attach hanging provenance aborts its child observer and fails closed", async () => {
+  const f = scriptedFixture({ attachTimeoutMs: 100, provenanceTimeoutMs: 20 });
+  f.guard.onAssert = async (call, signal) => {
+    if (call === 4) await f.guard.hangUntilAbort(signal);
+  };
+
+  await assert.rejects(
+    f.manager.bindExistingRuntime(f.runtime.current),
+    (error: unknown) =>
+      error instanceof RuntimeProvenanceUnverifiedError &&
+      error.code === "RUNTIME_PROVENANCE_UNVERIFIED",
+  );
+
+  assert.equal(f.guard.observedAbort, true);
+  assert.equal(f.transport.calls, 0);
+  assert.equal(f.guard.calls, 4);
+});
+
+test("T8 post-attach hanging provenance closes the candidate and does not retry", async () => {
+  const f = scriptedFixture({ attachTimeoutMs: 100, provenanceTimeoutMs: 20 });
+  f.guard.onAssert = async (call, signal) => {
+    if (call === 5) await f.guard.hangUntilAbort(signal);
+  };
+
+  await assert.rejects(
+    f.manager.bindExistingRuntime(f.runtime.current),
+    (error: unknown) =>
+      error instanceof RuntimeProvenanceUnverifiedError &&
+      error.code === "RUNTIME_PROVENANCE_UNVERIFIED",
+  );
+
+  assert.equal(f.guard.observedAbort, true);
+  assert.equal(f.guard.calls, 5);
+  assert.equal(f.transport.calls, 1);
+  assert.equal(f.transport.sessions[0]?.closes, 1);
+  assert.equal(f.manager.targetId, null);
+});
+
+test("bound admission bind itself uses the private provenance deadline", async () => {
+  const f = scriptedFixture({ provenanceTimeoutMs: 20 });
+  f.guard.onBind = async (signal) => await f.guard.hangUntilAbort(signal);
+
+  await assert.rejects(
+    f.manager.bindExistingRuntime(f.runtime.current),
+    RuntimeProvenanceUnverifiedError,
+  );
+  assert.equal(f.guard.observedAbort, true);
+  assert.equal(f.guard.bindCalls, 1);
+  assert.equal(f.transport.calls, 0);
+});
+
+test("bounded raw mutation provenance timeout prevents the mutation", async () => {
+  const f = scriptedFixture({ provenanceTimeoutMs: 20 });
+  const admitted = f.runtime.current;
+  await f.manager.bindExistingRuntime(admitted);
+  const session = f.transport.sessions[0]!;
+  const rawGuardCall = f.guard.calls + 2;
+  f.guard.observedAbort = false;
+  f.guard.onAssert = async (call, signal) => {
+    if (call === rawGuardCall) await f.guard.hangUntilAbort(signal);
+  };
+
+  await assert.rejects(
+    f.manager.insertText("synthetic", admitted),
+    RuntimeProvenanceUnverifiedError,
+  );
+  assert.equal(f.guard.observedAbort, true);
+  assert.equal(session.insertCalls, 0);
 });
 
 test("test helper constructs branded leases only through RuntimeGenerationTracker", () => {

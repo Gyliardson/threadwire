@@ -3,6 +3,8 @@ import test from "node:test";
 import { ChromeRemoteInterfaceTransport } from "../../src/cdp/ChromeRemoteInterfaceTransport.js";
 import { CdpTargetInfo } from "../../src/cdp/types.js";
 import { createConversationLocator } from "../../src/domain/ThreadIdentity.js";
+import { OperationAbortedError, OperationTimeoutError } from "../../src/domain/errors.js";
+import { withTimeout } from "../../src/utils/timeout.js";
 
 const target: CdpTargetInfo = {
   id: "target-1", title: "ChatGPT", type: "page", description: "",
@@ -227,4 +229,57 @@ test("disconnect clears readiness request tracking/listeners and closes the obse
   assert.equal(client.networkListenerCount(), 0);
   await assert.rejects(() => session.getReadinessSnapshot({ kind: "THREAD", locator: expected }));
   await assert.rejects(() => session.initializeReadinessObservation());
+});
+
+test("timed transport attach closes a valid CRI client that resolves late", async () => {
+  let resolveClient!: (client: FakeCriClient) => void;
+  const clientPromise = new Promise<FakeCriClient>((resolve) => {
+    resolveClient = resolve;
+  });
+  const transport = new ChromeRemoteInterfaceTransport({
+    connect: async () => await clientPromise,
+  });
+  const connecting = withTimeout(
+    (signal) => transport.connect({
+      host: "127.0.0.1",
+      port: 9223,
+      target,
+      signal,
+    }),
+    20,
+  );
+
+  await assert.rejects(connecting, OperationTimeoutError);
+
+  const lateClient = new FakeCriClient();
+  resolveClient(lateClient);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(lateClient.closeCalls, 1);
+});
+
+test("parent-aborted transport attach closes a valid CRI client that resolves late", async () => {
+  let resolveClient!: (client: FakeCriClient) => void;
+  const clientPromise = new Promise<FakeCriClient>((resolve) => {
+    resolveClient = resolve;
+  });
+  const transport = new ChromeRemoteInterfaceTransport({
+    connect: async () => await clientPromise,
+  });
+  const controller = new AbortController();
+  const connecting = transport.connect({
+    host: "127.0.0.1",
+    port: 9223,
+    target,
+    signal: controller.signal,
+  });
+
+  controller.abort(new Error("synthetic parent cancellation"));
+  await assert.rejects(connecting, OperationAbortedError);
+
+  const lateClient = new FakeCriClient();
+  resolveClient(lateClient);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(lateClient.closeCalls, 1);
 });

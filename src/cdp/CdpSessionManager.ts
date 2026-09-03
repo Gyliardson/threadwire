@@ -39,6 +39,7 @@ import {
   CdpTurnObservationSnapshot,
   CdpTurnTransportSession,
 } from "./CdpTransport.js";
+import { CdpTargetInfo } from "./types.js";
 
 const DEFAULT_ATTACH_TIMEOUT_MS = 5000;
 const DEFAULT_NAVIGATION_SETTLEMENT_TIMEOUT_MS = 15000;
@@ -142,6 +143,42 @@ export class CdpSessionManager {
     return undefined;
   }
 
+  protected async attachTransport(
+    target: CdpTargetInfo,
+    signal?: AbortSignal,
+  ): Promise<CdpTransportSession> {
+    return await withTimeout(
+      async (attachSignal) =>
+        await this.transport.connect({
+          host: this.config.cdpHost,
+          port: this.config.cdpPort,
+          target,
+          ...(attachSignal ? { signal: attachSignal } : {}),
+        }),
+      this.attachTimeoutMs,
+      signal
+        ? { signal, message: "Timed out attaching to the selected CDP target." }
+        : { message: "Timed out attaching to the selected CDP target." },
+    );
+  }
+
+  protected async initializeReadinessObservation(
+    session: CdpTransportSession,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await withTimeout(
+      async (readinessSignal) => {
+        throwIfAborted(readinessSignal);
+        await session.initializeReadinessObservation();
+        throwIfAborted(readinessSignal);
+      },
+      this.attachTimeoutMs,
+      signal
+        ? { signal, message: "Timed out initializing CDP readiness observation." }
+        : { message: "Timed out initializing CDP readiness observation." },
+    );
+  }
+
   public async connect(signal?: AbortSignal): Promise<void> {
     const lease = this.runtime.getCurrentRuntimeLease();
     if (this.currentState === "CONNECTED" && this.boundLease && sameRuntimeLease(this.boundLease, lease)) {
@@ -163,33 +200,11 @@ export class CdpSessionManager {
       this.runtime.assertRuntimeLeaseCurrent(lease);
       this.currentState = "ATTACHING";
 
-      const session = await withTimeout(
-        async (attachSignal) =>
-          await this.transport.connect({
-            host: this.config.cdpHost,
-            port: this.config.cdpPort,
-            target,
-            ...(attachSignal ? { signal: attachSignal } : {}),
-          }),
-        this.attachTimeoutMs,
-        signal
-          ? { signal, message: "Timed out attaching to the selected CDP target." }
-          : { message: "Timed out attaching to the selected CDP target." },
-      );
+      const session = await this.attachTransport(target, signal);
 
       try {
         this.runtime.assertRuntimeLeaseCurrent(lease);
-        await withTimeout(
-          async (readinessSignal) => {
-            throwIfAborted(readinessSignal);
-            await session.initializeReadinessObservation();
-            throwIfAborted(readinessSignal);
-          },
-          this.attachTimeoutMs,
-          signal
-            ? { signal, message: "Timed out initializing CDP readiness observation." }
-            : { message: "Timed out initializing CDP readiness observation." },
-        );
+        await this.initializeReadinessObservation(session, signal);
         this.runtime.assertRuntimeLeaseCurrent(lease);
       } catch (error) {
         await session.close().catch(() => undefined);
