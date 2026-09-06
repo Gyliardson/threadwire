@@ -28,10 +28,7 @@ export const M2_PUBLIC_CDP_DIAGNOSTIC_ENV = "THREADWIRE_M2_PUBLIC_CDP_DIAGNOSTIC
 export const M2_PUBLIC_CDP_DIAGNOSTIC_PREFIX = "THREADWIRE_M2_PUBLIC_CDP_DIAGNOSTIC_V1";
 export const M2_PUBLIC_CDP_DIAGNOSTIC_SCHEMA = "M2_PUBLIC_CDP_DIAGNOSTIC_V1" as const;
 
-export type M2PrepareCdpMode =
-  | "NOT_OBSERVED"
-  | "EXISTING_SESSION"
-  | "CONNECT_OR_RECONNECT";
+export type M2PrepareCdpMode = "EXISTING_SESSION" | "CONNECT_OR_RECONNECT";
 
 export type M2CdpDiagnosticStage =
   | "CDP_PREPARE_CONNECT"
@@ -116,7 +113,7 @@ function isRelevantPrepareFailure(error: unknown): boolean {
 }
 
 export class M2PublicCdpReadinessDiagnostic {
-  private prepareCdpMode: M2PrepareCdpMode = "NOT_OBSERVED";
+  private prepareCdpMode: M2PrepareCdpMode | null = null;
 
   public constructor(private readonly sink: M2PublicCdpReadinessDiagnosticSink) {}
 
@@ -125,11 +122,16 @@ export class M2PublicCdpReadinessDiagnostic {
   }
 
   public recordFailure(stage: M2CdpDiagnosticStage, error: unknown): void {
+    const prepareCdpMode = this.prepareCdpMode;
+    if (prepareCdpMode === null) {
+      return;
+    }
+
     const classified = classifyFailure(stage, error);
     const event = Object.freeze({
       schema: M2_PUBLIC_CDP_DIAGNOSTIC_SCHEMA,
       operation: "PUBLIC_CDP_READINESS_RCA" as const,
-      prepareCdpMode: this.prepareCdpMode,
+      prepareCdpMode,
       stage: classified.stage,
       errorClass: classified.errorClass,
       outcome: "FAILURE" as const,
@@ -158,15 +160,6 @@ export function createM2PublicCdpReadinessDiagnosticFromEnvironment(
   });
 }
 
-function existingSessionBranch(cdp: CdpSessionManager): boolean {
-  try {
-    cdp.assertCurrentRuntime();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>(
   cdp: T,
   diagnostic: M2PublicCdpReadinessDiagnostic,
@@ -177,12 +170,24 @@ export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>
     get(target, property) {
       if (property === "connect") {
         return async (signal?: AbortSignal): Promise<void> => {
-          diagnostic.observePrepareMode(
-            existingSessionBranch(target) ? "EXISTING_SESSION" : "CONNECT_OR_RECONNECT",
-          );
+          const stateBefore = target.state;
+          const generationBefore = target.boundGeneration;
           try {
             await target.connect(signal);
+            const reusedExisting =
+              stateBefore === "CONNECTED" &&
+              generationBefore !== null &&
+              target.boundGeneration === generationBefore;
+            diagnostic.observePrepareMode(
+              reusedExisting ? "EXISTING_SESSION" : "CONNECT_OR_RECONNECT",
+            );
           } catch (error) {
+            const readinessInitializationReached = error instanceof CdpReadinessFailedError;
+            diagnostic.observePrepareMode(
+              readinessInitializationReached || stateBefore !== "CONNECTED"
+                ? "CONNECT_OR_RECONNECT"
+                : "EXISTING_SESSION",
+            );
             if (isRelevantPrepareFailure(error)) {
               diagnostic.recordFailure("CDP_PREPARE_CONNECT", error);
             }
