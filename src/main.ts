@@ -1,13 +1,13 @@
 import { assertApiConfigCompatible, loadApiConfig } from "./api/ApiConfig.js";
 import { createThreadwireHttpServer } from "./api/ThreadwireHttpServer.js";
 import { loadConfig } from "./config/ControllerConfig.js";
-import { createThreadwireController } from "./controller/ThreadwireController.js";
+import { createThreadwireControllerWithM2PublicCdpDiagnostic } from "./diagnostics/M2PublicCdpReadinessDiagnostic.js";
 
 const controllerConfig = loadConfig();
 const apiConfig = loadApiConfig();
 assertApiConfigCompatible(apiConfig, controllerConfig);
 
-const controller = createThreadwireController(controllerConfig);
+const controller = createThreadwireControllerWithM2PublicCdpDiagnostic(controllerConfig);
 const server = createThreadwireHttpServer(apiConfig, controller);
 await controller.initialize();
 await server.start();
