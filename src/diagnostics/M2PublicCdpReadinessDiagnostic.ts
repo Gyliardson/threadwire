@@ -4,12 +4,11 @@ import { ControllerConfig } from "../config/ControllerConfig.js";
 import {
   ThreadwireController,
   ThreadwireControllerOptions,
+  createThreadwireController,
 } from "../controller/ThreadwireController.js";
 import {
   CdpDisconnectedError,
   CdpReadinessFailedError,
-  OperationAbortedError,
-  RuntimeGenerationChangedError,
   RuntimeProvenanceUnverifiedError,
 } from "../domain/errors.js";
 import { ProjectCreator } from "../project/ProjectCreator.js";
@@ -28,24 +27,20 @@ export const M2_PUBLIC_CDP_DIAGNOSTIC_ENV = "THREADWIRE_M2_PUBLIC_CDP_DIAGNOSTIC
 export const M2_PUBLIC_CDP_DIAGNOSTIC_PREFIX = "THREADWIRE_M2_PUBLIC_CDP_DIAGNOSTIC_V1";
 export const M2_PUBLIC_CDP_DIAGNOSTIC_SCHEMA = "M2_PUBLIC_CDP_DIAGNOSTIC_V1" as const;
 
-export type M2PrepareCdpMode = "EXISTING_SESSION" | "CONNECT_OR_RECONNECT";
+export type M2PrepareCdpMode = "REUSED_CONNECTED" | "RECONNECT_ATTEMPTED";
 
 export type M2CdpDiagnosticStage =
-  | "CDP_PREPARE_CONNECT"
-  | "CDP_PREPARE_READINESS_INIT"
+  | "RECONNECT_READINESS_INIT"
   | "FRESH_READINESS_SNAPSHOT"
   | "FRESH_READINESS_FOCUS"
   | "BOUND_RUNTIME_CURRENTNESS";
 
 export type M2CdpDiagnosticErrorClass =
-  | "SESSION_UNAVAILABLE"
   | "READINESS_INITIALIZATION_FAILED"
   | "READINESS_OBSERVATION_FAILED"
   | "FOCUS_FAILED"
-  | "PROVENANCE_UNVERIFIED"
-  | "RUNTIME_REPLACED"
-  | "ABORTED"
-  | "UNEXPECTED_INTERNAL";
+  | "SESSION_UNAVAILABLE"
+  | "PROVENANCE_UNVERIFIED";
 
 export interface M2PublicCdpReadinessDiagnosticEvent {
   readonly schema: typeof M2_PUBLIC_CDP_DIAGNOSTIC_SCHEMA;
@@ -68,48 +63,35 @@ interface ClassifiedFailure {
 function classifyFailure(
   stage: M2CdpDiagnosticStage,
   error: unknown,
-): ClassifiedFailure {
+): ClassifiedFailure | null {
   if (error instanceof RuntimeProvenanceUnverifiedError) {
     return {
       stage: "BOUND_RUNTIME_CURRENTNESS",
       errorClass: "PROVENANCE_UNVERIFIED",
     };
   }
-  if (error instanceof RuntimeGenerationChangedError) {
-    return {
-      stage: "BOUND_RUNTIME_CURRENTNESS",
-      errorClass: "RUNTIME_REPLACED",
-    };
-  }
-  if (error instanceof OperationAbortedError) {
-    return { stage, errorClass: "ABORTED" };
-  }
+
   if (error instanceof CdpDisconnectedError) {
-    return { stage, errorClass: "SESSION_UNAVAILABLE" };
+    if (stage === "FRESH_READINESS_SNAPSHOT" || stage === "FRESH_READINESS_FOCUS") {
+      return { stage, errorClass: "SESSION_UNAVAILABLE" };
+    }
+    return null;
   }
-  if (error instanceof CdpReadinessFailedError) {
-    if (stage === "CDP_PREPARE_CONNECT" || stage === "CDP_PREPARE_READINESS_INIT") {
-      return {
-        stage: "CDP_PREPARE_READINESS_INIT",
-        errorClass: "READINESS_INITIALIZATION_FAILED",
-      };
-    }
-    if (stage === "FRESH_READINESS_FOCUS") {
-      return { stage, errorClass: "FOCUS_FAILED" };
-    }
+
+  if (!(error instanceof CdpReadinessFailedError)) {
+    return null;
+  }
+
+  if (stage === "RECONNECT_READINESS_INIT") {
+    return { stage, errorClass: "READINESS_INITIALIZATION_FAILED" };
+  }
+  if (stage === "FRESH_READINESS_SNAPSHOT") {
     return { stage, errorClass: "READINESS_OBSERVATION_FAILED" };
   }
-  return { stage, errorClass: "UNEXPECTED_INTERNAL" };
-}
-
-function isRelevantPrepareFailure(error: unknown): boolean {
-  return (
-    error instanceof CdpReadinessFailedError ||
-    error instanceof CdpDisconnectedError ||
-    error instanceof RuntimeProvenanceUnverifiedError ||
-    error instanceof RuntimeGenerationChangedError ||
-    error instanceof OperationAbortedError
-  );
+  if (stage === "FRESH_READINESS_FOCUS") {
+    return { stage, errorClass: "FOCUS_FAILED" };
+  }
+  return null;
 }
 
 export class M2PublicCdpReadinessDiagnostic {
@@ -128,6 +110,10 @@ export class M2PublicCdpReadinessDiagnostic {
     }
 
     const classified = classifyFailure(stage, error);
+    if (classified === null) {
+      return;
+    }
+
     const event = Object.freeze({
       schema: M2_PUBLIC_CDP_DIAGNOSTIC_SCHEMA,
       operation: "PUBLIC_CDP_READINESS_RCA" as const,
@@ -164,7 +150,7 @@ export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>
   cdp: T,
   diagnostic: M2PublicCdpReadinessDiagnostic,
 ): T {
-  let freshReadinessOperation = false;
+  let freshSnapshotArmedForFocus = false;
 
   return new Proxy(cdp, {
     get(target, property) {
@@ -174,22 +160,21 @@ export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>
           const generationBefore = target.boundGeneration;
           try {
             await target.connect(signal);
-            const reusedExisting =
+            const reusedConnected =
               stateBefore === "CONNECTED" &&
               generationBefore !== null &&
+              target.state === "CONNECTED" &&
               target.boundGeneration === generationBefore;
             diagnostic.observePrepareMode(
-              reusedExisting ? "EXISTING_SESSION" : "CONNECT_OR_RECONNECT",
+              reusedConnected ? "REUSED_CONNECTED" : "RECONNECT_ATTEMPTED",
             );
           } catch (error) {
-            const readinessInitializationReached = error instanceof CdpReadinessFailedError;
-            diagnostic.observePrepareMode(
-              readinessInitializationReached || stateBefore !== "CONNECTED"
-                ? "CONNECT_OR_RECONNECT"
-                : "EXISTING_SESSION",
-            );
-            if (isRelevantPrepareFailure(error)) {
-              diagnostic.recordFailure("CDP_PREPARE_CONNECT", error);
+            if (error instanceof CdpReadinessFailedError) {
+              // CdpSessionManager.connect() creates this class only after entering
+              // replacement/attach readiness initialization; attach failures use a
+              // different public class and are intentionally not diagnosed here.
+              diagnostic.observePrepareMode("RECONNECT_ATTEMPTED");
+              diagnostic.recordFailure("RECONNECT_READINESS_INIT", error);
             }
             throw error;
           }
@@ -203,9 +188,11 @@ export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>
           signal?: AbortSignal,
         ): Promise<ExistingReadinessSnapshot> => {
           const isFresh = expectedRoute.kind === "FRESH_ROOT";
-          freshReadinessOperation = isFresh;
+          freshSnapshotArmedForFocus = false;
           try {
-            return await target.getReadinessSnapshot(expectedRoute, lease, signal);
+            const snapshot = await target.getReadinessSnapshot(expectedRoute, lease, signal);
+            freshSnapshotArmedForFocus = isFresh;
+            return snapshot;
           } catch (error) {
             if (isFresh) {
               diagnostic.recordFailure("FRESH_READINESS_SNAPSHOT", error);
@@ -221,10 +208,12 @@ export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>
           lease: Parameters<CdpSessionManager["focusBackendNode"]>[1],
           signal?: AbortSignal,
         ): Promise<void> => {
+          const isFreshFocus = freshSnapshotArmedForFocus;
+          freshSnapshotArmedForFocus = false;
           try {
             await target.focusBackendNode(backendDOMNodeId, lease, signal);
           } catch (error) {
-            if (freshReadinessOperation) {
+            if (isFreshFocus) {
               diagnostic.recordFailure("FRESH_READINESS_FOCUS", error);
             }
             throw error;
@@ -268,4 +257,33 @@ export function createM2PublicCdpDiagnosticThreadwireController(
     { runtime: supervisor, cdp, registry, projectRegistry, router, executor, projectCreator },
     { ...options, classicPolicy },
   );
+}
+
+export interface M2PublicCdpDiagnosticControllerFactories {
+  readonly createNormal: (
+    config: ControllerConfig,
+    options?: ThreadwireControllerOptions,
+  ) => ThreadwireController;
+  readonly createDiagnostic: (
+    config: ControllerConfig,
+    diagnostic: M2PublicCdpReadinessDiagnostic,
+    options?: ThreadwireControllerOptions,
+  ) => ThreadwireController;
+}
+
+const DEFAULT_CONTROLLER_FACTORIES: M2PublicCdpDiagnosticControllerFactories = Object.freeze({
+  createNormal: createThreadwireController,
+  createDiagnostic: createM2PublicCdpDiagnosticThreadwireController,
+});
+
+export function createThreadwireControllerWithM2PublicCdpDiagnostic(
+  config: ControllerConfig,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+  factories: M2PublicCdpDiagnosticControllerFactories = DEFAULT_CONTROLLER_FACTORIES,
+): ThreadwireController {
+  const diagnostic = createM2PublicCdpReadinessDiagnosticFromEnvironment(environment);
+  if (diagnostic === null) {
+    return factories.createNormal(config);
+  }
+  return factories.createDiagnostic(config, diagnostic);
 }
