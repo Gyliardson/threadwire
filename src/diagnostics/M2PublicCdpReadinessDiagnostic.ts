@@ -1,11 +1,13 @@
 import { BoundCdpSessionManager } from "../cdp/BoundCdpSessionManager.js";
 import { CdpSessionManager } from "../cdp/CdpSessionManager.js";
+import { CdpTransportSession } from "../cdp/CdpTransport.js";
 import { ControllerConfig } from "../config/ControllerConfig.js";
 import {
   ThreadwireController,
   ThreadwireControllerOptions,
   createThreadwireController,
 } from "../controller/ThreadwireController.js";
+import { RuntimeLease, sameRuntimeLease } from "../domain/RuntimeGeneration.js";
 import {
   CdpDisconnectedError,
   CdpReadinessFailedError,
@@ -60,6 +62,18 @@ interface ClassifiedFailure {
   readonly errorClass: M2CdpDiagnosticErrorClass;
 }
 
+interface ReplacementPreparationBoundary {
+  initializeReadinessObservation(
+    session: CdpTransportSession,
+    signal?: AbortSignal,
+  ): Promise<void>;
+}
+
+interface FreshFocusArm {
+  readonly lease: RuntimeLease;
+  readonly backendDOMNodeId: number;
+}
+
 function classifyFailure(
   stage: M2CdpDiagnosticStage,
   error: unknown,
@@ -92,6 +106,22 @@ function classifyFailure(
     return { stage, errorClass: "FOCUS_FAILED" };
   }
   return null;
+}
+
+function installReplacementPreparationTracker(cdp: CdpSessionManager): () => number {
+  let sequence = 0;
+  const boundary = cdp as unknown as ReplacementPreparationBoundary;
+  const initializeReadinessObservation = boundary.initializeReadinessObservation.bind(cdp);
+
+  boundary.initializeReadinessObservation = async (
+    session: CdpTransportSession,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    sequence += 1;
+    await initializeReadinessObservation(session, signal);
+  };
+
+  return () => sequence;
 }
 
 export class M2PublicCdpReadinessDiagnostic {
@@ -150,29 +180,26 @@ export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>
   cdp: T,
   diagnostic: M2PublicCdpReadinessDiagnostic,
 ): T {
-  let freshSnapshotArmedForFocus = false;
+  const replacementPreparationSequence = installReplacementPreparationTracker(cdp);
+  let freshFocusArm: FreshFocusArm | null = null;
 
   return new Proxy(cdp, {
     get(target, property) {
       if (property === "connect") {
         return async (signal?: AbortSignal): Promise<void> => {
-          const stateBefore = target.state;
-          const generationBefore = target.boundGeneration;
+          const sequenceBefore = replacementPreparationSequence();
           try {
             await target.connect(signal);
-            const reusedConnected =
-              stateBefore === "CONNECTED" &&
-              generationBefore !== null &&
-              target.state === "CONNECTED" &&
-              target.boundGeneration === generationBefore;
             diagnostic.observePrepareMode(
-              reusedConnected ? "REUSED_CONNECTED" : "RECONNECT_ATTEMPTED",
+              replacementPreparationSequence() === sequenceBefore
+                ? "REUSED_CONNECTED"
+                : "RECONNECT_ATTEMPTED",
             );
           } catch (error) {
-            if (error instanceof CdpReadinessFailedError) {
-              // CdpSessionManager.connect() creates this class only after entering
-              // replacement/attach readiness initialization; attach failures use a
-              // different public class and are intentionally not diagnosed here.
+            if (
+              replacementPreparationSequence() !== sequenceBefore &&
+              error instanceof CdpReadinessFailedError
+            ) {
               diagnostic.observePrepareMode("RECONNECT_ATTEMPTED");
               diagnostic.recordFailure("RECONNECT_READINESS_INIT", error);
             }
@@ -188,10 +215,18 @@ export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>
           signal?: AbortSignal,
         ): Promise<ExistingReadinessSnapshot> => {
           const isFresh = expectedRoute.kind === "FRESH_ROOT";
-          freshSnapshotArmedForFocus = false;
+          freshFocusArm = null;
           try {
             const snapshot = await target.getReadinessSnapshot(expectedRoute, lease, signal);
-            freshSnapshotArmedForFocus = isFresh;
+            const composer = snapshot.eligibleEditables.length === 1
+              ? snapshot.eligibleEditables[0]
+              : undefined;
+            if (isFresh && composer !== undefined) {
+              freshFocusArm = Object.freeze({
+                lease,
+                backendDOMNodeId: composer.backendDOMNodeId,
+              });
+            }
             return snapshot;
           } catch (error) {
             if (isFresh) {
@@ -208,8 +243,12 @@ export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>
           lease: Parameters<CdpSessionManager["focusBackendNode"]>[1],
           signal?: AbortSignal,
         ): Promise<void> => {
-          const isFreshFocus = freshSnapshotArmedForFocus;
-          freshSnapshotArmedForFocus = false;
+          const arm = freshFocusArm;
+          freshFocusArm = null;
+          const isFreshFocus =
+            arm !== null &&
+            arm.backendDOMNodeId === backendDOMNodeId &&
+            sameRuntimeLease(arm.lease, lease);
           try {
             await target.focusBackendNode(backendDOMNodeId, lease, signal);
           } catch (error) {
