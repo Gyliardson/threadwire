@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { serializePublicError } from "../../src/api/PublicError.js";
 import { CdpSessionManager, CdpTargetDiscoveryLike } from "../../src/cdp/CdpSessionManager.js";
 import {
   CdpTransport,
@@ -25,7 +26,6 @@ import {
   RuntimeGenerationTracker,
   RuntimeLease,
 } from "../../src/domain/RuntimeGeneration.js";
-import { serializePublicError } from "../../src/api/PublicError.js";
 import { FreshReadinessPolicy } from "../../src/readiness/FreshReadinessPolicy.js";
 import {
   ReadinessController,
@@ -63,12 +63,9 @@ class FakeSession implements CdpTransportSession {
   public readinessFailure: Error | null = null;
   public focusFailure: Error | null = null;
   public initializeCalls = 0;
-  public closeCalls = 0;
   private readonly listeners = new Set<() => void>();
 
-  public async close(): Promise<void> {
-    this.closeCalls += 1;
-  }
+  public async close(): Promise<void> {}
 
   public onDisconnect(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -135,14 +132,16 @@ function createWrappedManager(events: M2PublicCdpReadinessDiagnosticEvent[]) {
   return {
     runtime,
     transport,
-    manager,
     wrapped: wrapM2PublicCdpReadinessDiagnostics(manager, diagnostic),
   };
 }
 
-test("diagnostic environment gate is exact, disabled by default, and produces no output", () => {
+test("diagnostic gate is exact and disabled/no-op by default", () => {
   const lines: string[] = [];
-  assert.equal(createM2PublicCdpReadinessDiagnosticFromEnvironment({}, (line) => lines.push(line)), null);
+  assert.equal(
+    createM2PublicCdpReadinessDiagnosticFromEnvironment({}, (line) => lines.push(line)),
+    null,
+  );
   assert.equal(
     createM2PublicCdpReadinessDiagnosticFromEnvironment(
       { THREADWIRE_M2_PUBLIC_CDP_DIAGNOSTIC: "true" },
@@ -153,7 +152,7 @@ test("diagnostic environment gate is exact, disabled by default, and produces no
   assert.deepEqual(lines, []);
 });
 
-test("opt-in emission is one bounded JSON record with no attacker-controlled data fields", () => {
+test("opt-in payload is closed, bounded, and cannot promote hostile error data", () => {
   const lines: string[] = [];
   const diagnostic = createM2PublicCdpReadinessDiagnosticFromEnvironment(
     { THREADWIRE_M2_PUBLIC_CDP_DIAGNOSTIC: "1" },
@@ -162,7 +161,7 @@ test("opt-in emission is one bounded JSON record with no attacker-controlled dat
   assert.ok(diagnostic);
   diagnostic.observePrepareMode("CONNECT_OR_RECONNECT");
   const hostile = new Error(
-    "token=secret-token https://chatgpt.com/c/private-thread target=hostile-target-id-secret <html>secret page</html>",
+    "token=secret-token https://chatgpt.com/c/private-thread target=hostile-target-id-secret <html>page data</html>",
   );
   hostile.stack = `STACK ${hostile.message}`;
   diagnostic.recordFailure("FRESH_READINESS_SNAPSHOT", hostile);
@@ -188,18 +187,17 @@ test("opt-in emission is one bounded JSON record with no attacker-controlled dat
     errorClass: "UNEXPECTED_INTERNAL",
     outcome: "FAILURE",
   });
+
+  const failingSink = new M2PublicCdpReadinessDiagnostic(() => {
+    throw new Error("sink failure");
+  });
+  failingSink.observePrepareMode("EXISTING_SESSION");
+  assert.doesNotThrow(() =>
+    failingSink.recordFailure("FRESH_READINESS_SNAPSHOT", new CdpReadinessFailedError()),
+  );
 });
 
-test("diagnostic sink failure is no-op and cannot replace the product failure", () => {
-  const diagnostic = new M2PublicCdpReadinessDiagnostic(() => {
-    throw new Error("sink failed");
-  });
-  assert.doesNotThrow(() => {
-    diagnostic.recordFailure("FRESH_READINESS_SNAPSHOT", new CdpReadinessFailedError());
-  });
-});
-
-test("existing-session and connect-or-reconnect preparation paths are discriminated by production proxy", async () => {
+test("production proxy discriminates connect/reconnect from an already-usable existing session", async () => {
   const events: M2PublicCdpReadinessDiagnosticEvent[] = [];
   const { runtime, transport, wrapped } = createWrappedManager(events);
 
@@ -220,10 +218,10 @@ test("existing-session and connect-or-reconnect preparation paths are discrimina
     CdpReadinessFailedError,
   );
   assert.equal(events[1]?.prepareCdpMode, "EXISTING_SESSION");
-  assert.equal(transport.sessions[0]!.initializeCalls, 1, "idempotent connect must not reinitialize readiness");
+  assert.equal(transport.sessions[0]!.initializeCalls, 1);
 });
 
-test("reconnect readiness initialization failure emits only the safe init stage/class and preserves error", async () => {
+test("readiness-init failure is the reconnect/init class and preserves the product error", async () => {
   const events: M2PublicCdpReadinessDiagnosticEvent[] = [];
   const { transport, wrapped } = createWrappedManager(events);
   transport.configureSession = (session) => {
@@ -240,6 +238,7 @@ test("reconnect readiness initialization failure emits only the safe init stage/
   }
 
   assert.ok(observed instanceof CdpReadinessFailedError);
+  assert.equal(serializePublicError(observed).error.code, "CDP_READINESS_FAILED");
   assert.deepEqual(events, [
     {
       schema: "M2_PUBLIC_CDP_DIAGNOSTIC_V1",
@@ -253,7 +252,7 @@ test("reconnect readiness initialization failure emits only the safe init stage/
   assert.doesNotMatch(JSON.stringify(events), /secret-token|private-thread|hostile-target-id-secret|raw init/);
 });
 
-test("FRESH snapshot and focus failures remain distinct while preserving CDP readiness public class", async () => {
+test("FRESH snapshot and focus failures are distinct and keep CDP readiness semantics", async () => {
   const events: M2PublicCdpReadinessDiagnosticEvent[] = [];
   const { runtime, transport, wrapped } = createWrappedManager(events);
   await wrapped.connect();
@@ -280,7 +279,6 @@ test("FRESH snapshot and focus failures remain distinct while preserving CDP rea
     ],
   );
   for (const event of events) {
-    assert.equal(serializePublicError(new CdpReadinessFailedError()).error.code, "CDP_READINESS_FAILED");
     assert.equal(Object.hasOwn(event, "message"), false);
     assert.equal(Object.hasOwn(event, "cause"), false);
     assert.equal(Object.hasOwn(event, "stack"), false);
@@ -290,7 +288,10 @@ test("FRESH snapshot and focus failures remain distinct while preserving CDP rea
 
 class ClassifiedFailureManager extends CdpSessionManager {
   public constructor(
-    private readonly failure: RuntimeProvenanceUnverifiedError | RuntimeGenerationChangedError | OperationAbortedError,
+    private readonly failure:
+      | RuntimeProvenanceUnverifiedError
+      | RuntimeGenerationChangedError
+      | OperationAbortedError,
   ) {
     super(config, createRuntime(), {
       discovery: new StaticDiscovery(),
@@ -308,7 +309,7 @@ class ClassifiedFailureManager extends CdpSessionManager {
   }
 }
 
-test("provenance, runtime replacement, and abort classifications are closed and rethrow the same error object", async () => {
+test("provenance/currentness/abort classes are closed and the proxy rethrows the same error object", async () => {
   const cases = [
     {
       failure: new RuntimeProvenanceUnverifiedError("hostile provenance secret-token"),
@@ -329,10 +330,11 @@ test("provenance, runtime replacement, and abort classifications are closed and 
 
   for (const item of cases) {
     const events: M2PublicCdpReadinessDiagnosticEvent[] = [];
-    const raw = new ClassifiedFailureManager(item.failure);
+    const diagnostic = new M2PublicCdpReadinessDiagnostic((event) => events.push(event));
+    diagnostic.observePrepareMode("EXISTING_SESSION");
     const wrapped = wrapM2PublicCdpReadinessDiagnostics(
-      raw,
-      new M2PublicCdpReadinessDiagnostic((event) => events.push(event)),
+      new ClassifiedFailureManager(item.failure),
+      diagnostic,
     );
     let observed: unknown;
     try {
@@ -351,14 +353,11 @@ test("provenance, runtime replacement, and abort classifications are closed and 
 });
 
 class NeverReadyObservation implements ExistingReadinessObservationPort {
-  public snapshotCalls = 0;
-
   public async getReadinessSnapshot(
     _expectedRoute: RouteExpectation,
     _lease: RuntimeLease,
     _signal?: AbortSignal,
   ): Promise<ExistingReadinessSnapshot> {
-    this.snapshotCalls += 1;
     return {
       mainFrame: { frameId: "main", loaderId: "loader", expectedRoute: false },
       eligibleEditables: [],
@@ -373,11 +372,9 @@ class NeverReadyObservation implements ExistingReadinessObservationPort {
   ): Promise<void> {}
 }
 
-test("ordinary FRESH deadline remains FRESH_ROUTE_READINESS_TIMEOUT and emits no CDP-failure diagnostic", async () => {
+test("ordinary FRESH timeout and navigation public error classes are unchanged", async () => {
   const runtime = createRuntime();
   const lease = runtime.getCurrentRuntimeLease();
-  const observation = new NeverReadyObservation();
-  const events: M2PublicCdpReadinessDiagnosticEvent[] = [];
   let fireDeadline: (() => void) | null = null;
   const scheduler: ReadinessDeadlineScheduler = {
     schedule: (callback) => {
@@ -387,7 +384,7 @@ test("ordinary FRESH deadline remains FRESH_ROUTE_READINESS_TIMEOUT and emits no
     cancel: () => undefined,
   };
   const controller = new ReadinessController(
-    observation,
+    new NeverReadyObservation(),
     undefined,
     new FreshReadinessPolicy({
       frameStableObservations: 1,
@@ -404,8 +401,6 @@ test("ordinary FRESH deadline remains FRESH_ROUTE_READINESS_TIMEOUT and emits no
       deadlineScheduler: scheduler,
     },
   );
-  const diagnostic = new M2PublicCdpReadinessDiagnostic((event) => events.push(event));
-  diagnostic.observePrepareMode("EXISTING_SESSION");
 
   let observed: unknown;
   try {
@@ -415,10 +410,7 @@ test("ordinary FRESH deadline remains FRESH_ROUTE_READINESS_TIMEOUT and emits no
   }
   assert.ok(observed instanceof FreshRouteReadinessTimeoutError);
   assert.equal(serializePublicError(observed).error.code, "FRESH_ROUTE_READINESS_TIMEOUT");
-  assert.deepEqual(events, []);
-});
 
-test("navigation and CDP readiness public contracts remain unchanged by diagnostic schema", () => {
   const navigation = serializePublicError(new RouteNavigationFailedError());
   assert.equal(navigation.error.code, "ROUTE_NAVIGATION_FAILED");
   assert.equal(navigation.error.message, "Threadwire operation failed.");
