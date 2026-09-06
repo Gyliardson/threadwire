@@ -221,7 +221,7 @@ export function wrapM2PublicCdpReadinessDiagnostics<T extends CdpSessionManager>
             const composer = snapshot.eligibleEditables.length === 1
               ? snapshot.eligibleEditables[0]
               : undefined;
-            if (isFresh && composer !== undefined) {
+            if (isFresh && snapshot.mainFrame.expectedRoute && composer !== undefined) {
               freshFocusArm = Object.freeze({
                 lease,
                 backendDOMNodeId: composer.backendDOMNodeId,
