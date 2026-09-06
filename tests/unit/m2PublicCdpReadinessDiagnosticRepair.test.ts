@@ -265,7 +265,7 @@ test("FRESH focus attribution is keyed and cleared by unrelated or non-FRESH act
 
   await wrapped.getReadinessSnapshot({ kind: "FRESH_ROOT" }, lease);
   await assert.rejects(() => wrapped.focusBackendNode(202, lease), CdpReadinessFailedError);
-  assert.deepEqual(events, []);
+  assert.equal(events.length, 0);
 
   await wrapped.getReadinessSnapshot({ kind: "FRESH_ROOT" }, lease);
   await wrapped.getReadinessSnapshot(
@@ -276,7 +276,7 @@ test("FRESH focus attribution is keyed and cleared by unrelated or non-FRESH act
     lease,
   );
   await assert.rejects(() => wrapped.focusBackendNode(101, lease), CdpReadinessFailedError);
-  assert.deepEqual(events, []);
+  assert.equal(events.length, 0);
 
   await wrapped.getReadinessSnapshot({ kind: "FRESH_ROOT" }, lease);
   await assert.rejects(() => wrapped.focusBackendNode(101, lease), CdpReadinessFailedError);
