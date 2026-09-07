@@ -217,14 +217,14 @@ test("environment sink is exact opt-in, bounded, fixed-schema, and suppresses al
     ],
   } satisfies RuntimeProvenanceDiagnosticReport;
   sink(passing);
-  assert.deepEqual(lines, []);
+  assert.equal(lines.length, 0);
 
   sink({
     ...passing,
     stages: [
-      passing.stages[0],
-      { ...passing.stages[1], finishElapsedMs: 5000, outcome: "TIMEOUT", errorClass: "OPERATION_TIMEOUT" },
-      { ...passing.stages[2], startElapsedMs: null, finishElapsedMs: null, outcome: "NOT_REACHED" },
+      passing.stages[0]!,
+      { ...passing.stages[1]!, finishElapsedMs: 5000, outcome: "TIMEOUT", errorClass: "OPERATION_TIMEOUT" },
+      { ...passing.stages[2]!, startElapsedMs: null, finishElapsedMs: null, outcome: "NOT_REACHED" },
     ],
   });
   assert.equal(lines.length, 1);
