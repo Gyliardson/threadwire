@@ -69,8 +69,62 @@ interface ProvenanceStage {
   readonly run: () => Promise<void>;
 }
 
+const SAFE_THREADWIRE_ERROR_CODES = new Set<ThreadwireErrorCode>([
+  "CONFIG_INVALID",
+  "PROCESS_INSPECTION_FAILED",
+  "CLASSIC_PROCESS_TOPOLOGY_INVALID",
+  "CLASSIC_INSTALLATION_NOT_FOUND",
+  "CLASSIC_INSTALLATION_QUERY_FAILED",
+  "CLASSIC_START_FAILED",
+  "CLASSIC_STOP_FAILED",
+  "PROCESS_EXIT_TIMEOUT",
+  "NEW_PROCESS_NOT_OBSERVED",
+  "RUNTIME_NOT_OBSERVED",
+  "RUNTIME_REQUIRED_EXISTING",
+  "RUNTIME_GENERATION_CHANGED",
+  "RUNTIME_PROVENANCE_UNVERIFIED",
+  "RUNTIME_RECOVERY_FORBIDDEN",
+  "CDP_ENDPOINT_UNAVAILABLE",
+  "CDP_ENDPOINT_TIMEOUT",
+  "CDP_TARGET_LIST_MALFORMED",
+  "CDP_TARGET_NOT_FOUND",
+  "CDP_TARGET_AMBIGUOUS",
+  "CDP_ATTACH_FAILED",
+  "CDP_DISCONNECTED",
+  "CDP_NAVIGATION_FAILED",
+  "CDP_READINESS_FAILED",
+  "OPERATION_TIMEOUT",
+  "OPERATION_ABORTED",
+  "CONVERSATION_LOCATOR_INVALID",
+  "THREAD_NOT_FOUND",
+  "THREAD_HANDLE_COLLISION",
+  "PROJECT_LOCATOR_INVALID",
+  "PROJECT_NOT_FOUND",
+  "PROJECT_HANDLE_COLLISION",
+  "PROJECT_CREATION_FAILED",
+  "PROJECT_CONVERSATION_NOT_CREATED",
+  "ROUTE_NAVIGATION_FAILED",
+  "EXISTING_ROUTE_READINESS_TIMEOUT",
+  "FRESH_ROUTE_READINESS_TIMEOUT",
+  "TURN_INPUT_FAILED",
+  "TURN_WRITE_FAILED",
+  "FRESH_CONVERSATION_NOT_CREATED",
+  "TURN_STATE_UNCERTAIN",
+  "RESPONSE_STREAM_UNAVAILABLE",
+  "RESPONSE_STREAM_FAILED",
+  "RESPONSE_PARSE_FAILED",
+]);
+
+function isSafeThreadwireErrorCode(value: unknown): value is ThreadwireErrorCode {
+  return typeof value === "string" && SAFE_THREADWIRE_ERROR_CODES.has(value as ThreadwireErrorCode);
+}
+
 function classifyError(error: unknown): RuntimeProvenanceDiagnosticErrorClass {
-  return error instanceof ThreadwireError ? error.code : "UNCLASSIFIED_ERROR";
+  if (!(error instanceof ThreadwireError)) {
+    return "UNCLASSIFIED_ERROR";
+  }
+  const runtimeCode: unknown = error.code;
+  return isSafeThreadwireErrorCode(runtimeCode) ? runtimeCode : "UNCLASSIFIED_ERROR";
 }
 
 function isTimeoutSignal(signal?: AbortSignal): boolean {
