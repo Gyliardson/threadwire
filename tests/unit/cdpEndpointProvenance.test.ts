@@ -105,6 +105,9 @@ test("listener provenance explicitly binds and later accepts the same owner gene
   assert.equal(runner.calls, 2);
   assert.equal(runner.lastFile, "powershell.exe");
   assert.deepEqual(runner.lastArgs?.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
+  const provenanceScript = runner.lastArgs?.[3] ?? "";
+  assert.match(provenanceScript, /GetExtendedTcpTable/);
+  assert.doesNotMatch(provenanceScript, /Get-NetTCPConnection/);
   assert.equal(runner.lastOptions?.env?.THREADWIRE_CDP_HOST, "127.0.0.1");
   assert.equal(runner.lastOptions?.env?.THREADWIRE_CDP_PORT, "9223");
   assert.equal(runner.lastOptions?.env?.THREADWIRE_CLASSIC_PID, "100");

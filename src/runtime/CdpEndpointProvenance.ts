@@ -20,13 +20,133 @@ $port = [int]$env:THREADWIRE_CDP_PORT
 $expectedPid = [int]$env:THREADWIRE_CLASSIC_PID
 $expectedCreationTime = [string]$env:THREADWIRE_CLASSIC_CREATION_TIME
 
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Net;
+using System.Runtime.InteropServices;
+
+public sealed class ThreadwireTcpListenerRow
+{
+    public ThreadwireTcpListenerRow(string localAddress, int localPort, int ownerPid)
+    {
+        LocalAddress = localAddress;
+        LocalPort = localPort;
+        OwnerPid = ownerPid;
+    }
+
+    public string LocalAddress { get; private set; }
+    public int LocalPort { get; private set; }
+    public int OwnerPid { get; private set; }
+}
+
+public static class ThreadwireTcpOwnerTable
+{
+    private const int AddressFamilyInet = 2;
+    private const int OwnerPidListenerTable = 3;
+    private const uint ErrorInsufficientBuffer = 122;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MibTcpRowOwnerPid
+    {
+        public uint State;
+        public uint LocalAddress;
+        public uint LocalPort;
+        public uint RemoteAddress;
+        public uint RemotePort;
+        public uint OwnerPid;
+    }
+
+    [DllImport("iphlpapi.dll", SetLastError = true)]
+    private static extern uint GetExtendedTcpTable(
+        IntPtr table,
+        ref int size,
+        bool order,
+        int addressFamily,
+        int tableClass,
+        uint reserved);
+
+    public static ThreadwireTcpListenerRow[] GetListeners()
+    {
+        int size = 0;
+        uint result = GetExtendedTcpTable(
+            IntPtr.Zero,
+            ref size,
+            false,
+            AddressFamilyInet,
+            OwnerPidListenerTable,
+            0);
+        if (result != 0 && result != ErrorInsufficientBuffer)
+        {
+            throw new Win32Exception((int)result);
+        }
+        if (size < sizeof(int))
+        {
+            throw new InvalidOperationException("TCP owner table size is invalid.");
+        }
+
+        IntPtr buffer = Marshal.AllocHGlobal(size);
+        try
+        {
+            result = GetExtendedTcpTable(
+                buffer,
+                ref size,
+                false,
+                AddressFamilyInet,
+                OwnerPidListenerTable,
+                0);
+            if (result != 0)
+            {
+                throw new Win32Exception((int)result);
+            }
+
+            int count = Marshal.ReadInt32(buffer);
+            int rowSize = Marshal.SizeOf(typeof(MibTcpRowOwnerPid));
+            if (count < 0 || sizeof(int) + ((long)count * rowSize) > size)
+            {
+                throw new InvalidOperationException("TCP owner table contents are invalid.");
+            }
+
+            var listeners = new List<ThreadwireTcpListenerRow>(count);
+            for (int index = 0; index < count; index++)
+            {
+                IntPtr rowPointer = IntPtr.Add(buffer, sizeof(int) + (index * rowSize));
+                var row = (MibTcpRowOwnerPid)Marshal.PtrToStructure(
+                    rowPointer,
+                    typeof(MibTcpRowOwnerPid));
+                int localPort = (int)(((row.LocalPort & 0xffU) << 8) | ((row.LocalPort & 0xff00U) >> 8));
+                byte[] addressBytes = new byte[]
+                {
+                    (byte)(row.LocalAddress & 0xffU),
+                    (byte)((row.LocalAddress >> 8) & 0xffU),
+                    (byte)((row.LocalAddress >> 16) & 0xffU),
+                    (byte)((row.LocalAddress >> 24) & 0xffU)
+                };
+                listeners.Add(new ThreadwireTcpListenerRow(
+                    new IPAddress(addressBytes).ToString(),
+                    localPort,
+                    checked((int)row.OwnerPid)));
+            }
+            return listeners.ToArray();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+}
+'@ -Language CSharp -ErrorAction Stop
+
 function Get-ConfiguredListenerSnapshot {
-  $listeners = @(Get-NetTCPConnection -State Listen -LocalAddress $hostAddress -LocalPort $port -ErrorAction Stop)
+  $listeners = @([ThreadwireTcpOwnerTable]::GetListeners() | Where-Object {
+    $_.LocalAddress -ceq $hostAddress -and $_.LocalPort -eq $port
+  })
   if ($listeners.Count -ne 1) {
     throw 'Configured CDP listener ownership is not unique.'
   }
   $listener = $listeners[0]
-  $ownerPid = [int]$listener.OwningProcess
+  $ownerPid = [int]$listener.OwnerPid
   if ($ownerPid -le 0) {
     throw 'Configured CDP listener owner is invalid.'
   }
