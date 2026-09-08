@@ -27,6 +27,13 @@ screenshots/
 network-dumps/
 research-dumps/
 
+# Local ad-hoc acceptance/research scripts
+check_url.ts
+create_conversation.ts
+create_conversation2.ts
+history.ts
+m4_acceptance.ts
+
 # Browser/authenticated profile material
 profiles/
 profile/
