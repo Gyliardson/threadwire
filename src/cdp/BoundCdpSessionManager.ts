@@ -7,7 +7,7 @@ import {
   RuntimeGenerationChangedError,
   RuntimeProvenanceUnverifiedError,
 } from "../domain/errors.js";
-import { RouteExpectation } from "../readiness/types.js";
+import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { RuntimeProvenanceGuard } from "../runtime/BoundRuntimeProvenanceGuard.js";
 import { throwIfAborted, withTimeout } from "../utils/timeout.js";
 import { ChromeRemoteInterfaceTransport } from "./ChromeRemoteInterfaceTransport.js";
@@ -241,6 +241,11 @@ export class BoundCdpSessionManager extends CdpSessionManager {
   ): Promise<void> {
     await this.guardBeforeMutation(signal);
     await super.navigateAndWaitForLoadSettlement(url, expectedRoute, signal);
+  }
+
+  public override async dismissKnownFreshNotice(snapshot: ExistingReadinessSnapshot, lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
+    await this.guardExpectedLease(lease, signal);
+    await super.dismissKnownFreshNotice(snapshot, lease, signal);
   }
 
   public override async focusBackendNode(

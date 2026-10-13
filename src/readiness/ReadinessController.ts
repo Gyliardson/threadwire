@@ -8,10 +8,12 @@ import {
   OperationAbortedError,
   OperationTimeoutError,
   RuntimeGenerationChangedError,
+  TurnStateUncertainError,
 } from "../domain/errors.js";
 import { delay, throwIfAborted } from "../utils/timeout.js";
 import { ExistingReadinessPolicy } from "./ExistingReadinessPolicy.js";
 import { FreshReadinessPolicy } from "./FreshReadinessPolicy.js";
+import { ReadinessCandidateChangedError } from "../cdp/KnownFreshNotice.js";
 import {
   ExistingReadinessObservationPort,
   ExistingReadinessSnapshot,
@@ -301,6 +303,16 @@ export class ReadinessController {
           lease,
           deadline.signal,
         );
+        if (snapshot.blockingNotice?.kind !== undefined && snapshot.blockingNotice.kind !== "ABSENT") {
+          if (expectedRoute.kind === "FRESH_ROOT" && snapshot.mainFrame.expectedRoute
+            && snapshot.blockingNotice.kind === "KNOWN_FRESH_NOTICE" && this.observation.dismissKnownFreshNotice) {
+            await this.observation.dismissKnownFreshNotice(snapshot, lease, deadline.signal);
+            gate = this.freshPolicy.createGate();
+            continue; // Obtain entirely new observations; never reuse pre-dismissal proof.
+          }
+          await this.sleep(this.pollIntervalMs, deadline.signal);
+          continue; // Unknown/ambiguous/non-FRESH dialogs permit no input.
+        }
         const action = gate.observe(snapshot);
 
         if (action.kind === "READY") {
@@ -308,11 +320,14 @@ export class ReadinessController {
         }
 
         if (action.kind === "FOCUS") {
-          await this.observation.focusBackendNode(
-            action.backendDOMNodeId,
-            lease,
-            deadline.signal,
-          );
+          try {
+            await this.observation.focusBackendNode(action.backendDOMNodeId, lease, deadline.signal);
+          } catch (error) {
+            if (!(error instanceof ReadinessCandidateChangedError)) throw error;
+            // This private discriminator is thrown only BEFORE raw DOM.focus.
+            // A dispatched protocol error is never retried here.
+            gate = expectedRoute.kind === "FRESH_ROOT" ? this.freshPolicy.createGate() : this.existingPolicy.createGate();
+          }
         }
 
         await this.sleep(this.pollIntervalMs, deadline.signal);
@@ -322,6 +337,7 @@ export class ReadinessController {
         error instanceof OperationAbortedError ||
         error instanceof RuntimeGenerationChangedError ||
         error instanceof CdpReadinessFailedError ||
+        error instanceof TurnStateUncertainError ||
         error instanceof OperationTimeoutError
       ) {
         throw error;

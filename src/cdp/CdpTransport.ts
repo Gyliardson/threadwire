@@ -68,6 +68,12 @@ export interface CdpTurnObservationOptions {
 }
 
 export interface CdpTransportSession {
+  dismissKnownFreshNotice?(
+    snapshot: ExistingReadinessSnapshot,
+    consume: () => void,
+    onPossibleInput: () => void,
+    signal?: AbortSignal,
+  ): Promise<void>;
   close(): Promise<void>;
   onDisconnect(listener: () => void): () => void;
   initializeReadinessObservation(): Promise<void>;

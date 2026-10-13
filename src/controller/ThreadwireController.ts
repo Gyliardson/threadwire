@@ -1,5 +1,5 @@
 import { BoundCdpSessionManager } from "../cdp/BoundCdpSessionManager.js";
-import { CdpSessionManager } from "../cdp/CdpSessionManager.js";
+import { CdpSessionManager, CdpSessionManagerOptions } from "../cdp/CdpSessionManager.js";
 import { ClassicPolicy, ControllerConfig } from "../config/ControllerConfig.js";
 import { ProjectHandle, ProjectLocator } from "../domain/ProjectIdentity.js";
 import { RuntimeLease } from "../domain/RuntimeGeneration.js";
@@ -9,10 +9,12 @@ import {
   RequiredExistingRuntimeError,
   RuntimeProvenanceUnverifiedError,
   RuntimeRecoveryForbiddenError,
+  InvalidConfigurationError,
 } from "../domain/errors.js";
 import { ProjectCreator } from "../project/ProjectCreator.js";
 import { ProjectRegistry } from "../project/ProjectRegistry.js";
 import { ReadinessController } from "../readiness/ReadinessController.js";
+import { FreshNoticeBudget } from "../readiness/FreshNoticeBudget.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import { ConversationRouter } from "../routing/ConversationRouter.js";
 import { OperationScheduler } from "../routing/OperationScheduler.js";
@@ -390,6 +392,13 @@ export function createThreadwireController(
   const supervisor = new ClassicSupervisor(config);
   const registry = new ThreadRegistry();
   const scheduler = new OperationScheduler(supervisor);
+  if (config.knownFreshNoticeIntent !== undefined && classicPolicy !== "BOUND_EXISTING") {
+    throw new InvalidConfigurationError("Known FRESH notice authority requires BOUND_EXISTING.");
+  }
+  const cdpOptions: CdpSessionManagerOptions = config.knownFreshNoticeIntent === undefined ? {} : {
+    freshNoticeBudget: new FreshNoticeBudget(config.knownFreshNoticeIntent),
+    onReadinessMutationUncertain: lease => scheduler.markRuntimeMutationStateUncertain(lease),
+  };
   const cdp = classicPolicy === "BOUND_EXISTING"
     ? new BoundCdpSessionManager(
         config,
@@ -398,8 +407,9 @@ export function createThreadwireController(
           supervisor,
           new WindowsCdpEndpointProvenance(config),
         ),
+        cdpOptions,
       )
-    : new CdpSessionManager(config, supervisor);
+    : new CdpSessionManager(config, supervisor, cdpOptions);
   const readiness = new ReadinessController(cdp);
   const router = new ConversationRouter(registry, scheduler, cdp, readiness);
   const executor = new TurnExecutor(registry, scheduler, readiness, cdp);

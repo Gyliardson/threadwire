@@ -28,6 +28,8 @@ import {
   toReadinessEditable,
 } from "./ChromeRemoteInterfaceHelpers.js";
 import { CdpTurnObservationTracker } from "./CdpTurnObservationTracker.js";
+import { CdpReadinessFailedError } from "../domain/errors.js";
+import { NoticeMouseCommand, NoticeMouseGuard, observeBlockingNotice, noticeClickPoint, ReadinessCandidateChangedError } from "./KnownFreshNotice.js";
 
 const MAX_FINAL_RENDERED_TEXT_CHARS = 1_048_576;
 const RENDERED_MESSAGE_SELECTOR =
@@ -61,8 +63,9 @@ export class ChromeRemoteInterfaceSession
   private readonly turnObservation: CdpTurnObservationTracker;
   private responseDataObservationAvailable = false;
   private closed = false;
+  private lastReadinessDocument: Readonly<{ frameId: string; loaderId: string; expectedRoute: RouteExpectation }> | null = null;
 
-  public constructor(private readonly client: CriClient) {
+  public constructor(protected readonly client: CriClient) {
     this.turnObservation = new CdpTurnObservationTracker(
       this.client.Network as unknown as ExperimentalNetworkDomain,
       () => this.responseDataObservationAvailable,
@@ -314,6 +317,8 @@ export class ChromeRemoteInterfaceSession
       .map(toEligibleComposer)
       .filter((target): target is EligibleComposerTarget => target !== null)
       .map(toReadinessEditable);
+    const blockingNotice = observeBlockingNotice(axTree.nodes);
+    this.lastReadinessDocument = Object.freeze({ frameId: mainFrame.id, loaderId: mainFrame.loaderId, expectedRoute });
 
     return Object.freeze({
       mainFrame: Object.freeze({
@@ -322,6 +327,7 @@ export class ChromeRemoteInterfaceSession
         expectedRoute: routeMatchesExpected(mainFrame.url, expectedRoute),
       }),
       eligibleEditables: Object.freeze(eligibleEditables),
+      blockingNotice,
       backendActivity: Object.freeze({
         activeCount: this.activeRelevantRequestIds.size,
         activityEpoch: this.activityEpoch,
@@ -329,11 +335,98 @@ export class ChromeRemoteInterfaceSession
     });
   }
 
-  public async focusBackendNode(backendDOMNodeId: number): Promise<void> {
+  public async focusBackendNode(backendDOMNodeId: number, signal?: AbortSignal): Promise<void> {
     if (this.closed) {
       throw new Error("CDP session is closed.");
     }
+    const document = this.lastReadinessDocument;
+    await this.dispatchComposerFocus(backendDOMNodeId, async () => {
+      const { frameTree } = await this.client.Page.getFrameTree();
+      const { nodes } = await this.client.Accessibility.getFullAXTree({ frameId: frameTree.frame.id });
+      const eligible = nodes.map(toEligibleComposer).filter((n): n is EligibleComposerTarget => n !== null);
+      if (document === null || frameTree.frame.id !== document.frameId || frameTree.frame.loaderId !== document.loaderId
+        || !routeMatchesExpected(frameTree.frame.url, document.expectedRoute)
+        || observeBlockingNotice(nodes).kind !== "ABSENT" || eligible.length !== 1
+        || eligible[0]!.backendDOMNodeId !== backendDOMNodeId) throw new ReadinessCandidateChangedError();
+    }, signal);
+  }
+
+  protected async dispatchComposerFocus(backendDOMNodeId: number, validate: () => Promise<void>, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    await validate();
+    throwIfAborted(signal);
     await this.client.DOM.focus({ backendNodeId: backendDOMNodeId });
+  }
+
+  protected async dispatchNoticeMouse(command: NoticeMouseCommand, guard: NoticeMouseGuard, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    await guard.validate();
+    throwIfAborted(signal);
+    guard.onPossibleInput();
+    await this.client.Input.dispatchMouseEvent(command);
+  }
+
+  public async dismissKnownFreshNotice(
+    snapshot: ExistingReadinessSnapshot,
+    consume: () => void,
+    onPossibleInput: () => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const selected = snapshot.blockingNotice;
+    if (this.closed || !signal || !snapshot.mainFrame.expectedRoute || selected?.kind !== "KNOWN_FRESH_NOTICE") throw new CdpReadinessFailedError();
+    const sameDocument = (frame: { id: string; loaderId: string; url: string }) => {
+      if (frame.id !== snapshot.mainFrame.frameId || frame.loaderId !== snapshot.mainFrame.loaderId
+        || !routeMatchesExpected(frame.url, { kind: "FRESH_ROOT" })) throw new CdpReadinessFailedError();
+    };
+    const readCurrent = async () => {
+      const { frameTree } = await this.client.Page.getFrameTree();
+      sameDocument(frameTree.frame);
+      const { nodes } = await this.client.Accessibility.getFullAXTree({ frameId: frameTree.frame.id });
+      const current = observeBlockingNotice(nodes);
+      if (current.kind !== "KNOWN_FRESH_NOTICE" || current.dialogId !== selected.dialogId
+        || current.closeButtonId !== selected.closeButtonId) throw new CdpReadinessFailedError();
+    };
+    await readCurrent();
+    const { node: button } = await this.client.DOM.describeNode({ backendNodeId: selected.closeButtonId, depth: 3 });
+    if (button.nodeName !== "BUTTON" || button.backendNodeId !== selected.closeButtonId || button.nodeType !== 1) throw new CdpReadinessFailedError();
+    const descendants = new Set<number>();
+    const visit = (node: typeof button) => { descendants.add(node.backendNodeId); for (const child of node.children ?? []) visit(child); };
+    visit(button);
+    const { quads: initialQuads } = await this.client.DOM.getContentQuads({ backendNodeId: selected.closeButtonId });
+    const { cssVisualViewport: initialViewport } = await this.client.Page.getLayoutMetrics();
+    const point = noticeClickPoint(initialQuads, initialViewport.clientWidth, initialViewport.clientHeight);
+    let consumed = false;
+    const validate = async () => {
+      // Executed AFTER potentially slow provenance verification for BOTH events.
+      await readCurrent();
+      const { node: currentButton } = await this.client.DOM.describeNode({ backendNodeId: selected.closeButtonId, depth: 0 });
+      if (currentButton.nodeName !== "BUTTON" || currentButton.backendNodeId !== selected.closeButtonId) throw new CdpReadinessFailedError();
+      const { quads } = await this.client.DOM.getContentQuads({ backendNodeId: selected.closeButtonId });
+      const { cssVisualViewport } = await this.client.Page.getLayoutMetrics();
+      const currentPoint = noticeClickPoint(quads, cssVisualViewport.clientWidth, cssVisualViewport.clientHeight);
+      if (JSON.stringify(quads) !== JSON.stringify(initialQuads) || currentPoint.x !== point.x || currentPoint.y !== point.y) throw new CdpReadinessFailedError();
+      if (!consumed) { consume(); consumed = true; }
+      // Last awaited operation before protocol entry: live hit test on the exact button.
+      const hit = await this.client.DOM.getNodeForLocation({ ...point, includeUserAgentShadowDOM: false, ignorePointerEventsNone: false });
+      if (hit.frameId !== snapshot.mainFrame.frameId || !descendants.has(hit.backendNodeId)) throw new CdpReadinessFailedError();
+    };
+    const guard = { validate, onPossibleInput };
+    await this.dispatchNoticeMouse({ type: "mousePressed", button: "left", clickCount: 1, ...point }, guard, signal);
+    await this.dispatchNoticeMouse({ type: "mouseReleased", button: "left", clickCount: 1, ...point }, guard, signal);
+    while (true) {
+      throwIfAborted(signal);
+      const { frameTree } = await this.client.Page.getFrameTree();
+      sameDocument(frameTree.frame);
+      const { nodes } = await this.client.Accessibility.getFullAXTree({ frameId: frameTree.frame.id });
+      const notice = observeBlockingNotice(nodes);
+      if (notice.kind === "UNKNOWN") throw new CdpReadinessFailedError();
+      if (notice.kind === "ABSENT") {
+        if (nodes.map(toEligibleComposer).filter(n => n !== null).length !== 1) throw new CdpReadinessFailedError();
+        return;
+      }
+      if (notice.dialogId !== selected.dialogId || notice.closeButtonId !== selected.closeButtonId) throw new CdpReadinessFailedError();
+      await delay(100, signal);
+    }
   }
 
   public async getTurnComposerState(

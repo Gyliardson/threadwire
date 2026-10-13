@@ -6,6 +6,7 @@ export interface ControllerConfig {
   readonly cdpHost: "127.0.0.1";
   readonly cdpPort: number;
   readonly classicPolicy?: ClassicPolicy;
+  readonly knownFreshNoticeIntent?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControllerConfig {
@@ -32,5 +33,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ControllerConf
     );
   }
 
-  return { cdpHost, cdpPort, classicPolicy: classicPolicyText };
+  const knownFreshNoticeIntent = env.THREADWIRE_KNOWN_FRESH_NOTICE_INTENT;
+  if (knownFreshNoticeIntent !== undefined &&
+    (classicPolicyText !== "BOUND_EXISTING" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(knownFreshNoticeIntent))) {
+    throw new InvalidConfigurationError("Known FRESH notice authority requires BOUND_EXISTING and a canonical intent UUID.");
+  }
+  return { cdpHost, cdpPort, classicPolicy: classicPolicyText,
+    ...(knownFreshNoticeIntent === undefined ? {} : { knownFreshNoticeIntent }) };
 }

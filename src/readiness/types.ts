@@ -27,6 +27,10 @@ export interface ExistingReadinessSnapshot {
   readonly mainFrame: ReadinessMainFrameState;
   readonly eligibleEditables: readonly ReadinessEditableTarget[];
   readonly backendActivity: ReadinessBackendActivity;
+  readonly blockingNotice?:
+    | Readonly<{ kind: "ABSENT" }>
+    | Readonly<{ kind: "UNKNOWN" }>
+    | Readonly<{ kind: "KNOWN_FRESH_NOTICE"; dialogId: number; closeButtonId: number }>;
 }
 
 export type ReadinessAction =
@@ -39,6 +43,11 @@ export interface ReadinessGate {
 }
 
 export interface ExistingReadinessObservationPort {
+  dismissKnownFreshNotice?(
+    snapshot: ExistingReadinessSnapshot,
+    lease: RuntimeLease,
+    signal?: AbortSignal,
+  ): Promise<void>;
   getReadinessSnapshot(
     expectedRoute: RouteExpectation,
     lease: RuntimeLease,
