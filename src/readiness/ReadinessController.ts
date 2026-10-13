@@ -128,7 +128,7 @@ export class ReadinessController {
     this.freshReadinessProof = null;
     try {
       await this.waitForRoute(
-        this.existingPolicy.createGate(),
+        () => this.existingPolicy.createGate(),
         { kind: "THREAD", locator: expectedLocator },
         lease,
         signal,
@@ -148,7 +148,7 @@ export class ReadinessController {
     this.freshReadinessProof = null;
     try {
       const snapshot = await this.waitForRoute(
-        this.freshPolicy.createGate(),
+        () => this.freshPolicy.createGate(),
         { kind: "FRESH_ROOT" },
         lease,
         signal,
@@ -212,7 +212,7 @@ export class ReadinessController {
     });
     try {
       const snapshot = await this.waitForRoute(
-        this.freshPolicy.createGate(),
+        () => this.freshPolicy.createGate(),
         expectedRoute,
         lease,
         signal,
@@ -242,7 +242,7 @@ export class ReadinessController {
     signal?: AbortSignal,
   ): Promise<void> {
     const snapshot = await this.waitForRoute(
-      this.existingPolicy.createGate(),
+      () => this.existingPolicy.createGate(),
       expectedRoute,
       lease,
       signal,
@@ -269,7 +269,7 @@ export class ReadinessController {
     }
 
     await this.waitForRoute(
-      this.freshPolicy.createGate(),
+      () => this.freshPolicy.createGate(),
       expectedRoute,
       lease,
       signal,
@@ -287,13 +287,15 @@ export class ReadinessController {
   }
 
   private async waitForRoute(
-    gate: ReadinessGate,
+    createGate: () => ReadinessGate,
     expectedRoute: RouteExpectation,
     lease: RuntimeLease,
     signal?: AbortSignal,
   ): Promise<ExistingReadinessSnapshot> {
     throwIfAborted(signal);
     const deadline = createDeadlineSignal(this.timeoutMs, this.deadlineScheduler, signal);
+    let activeGateFactory = createGate;
+    let gate = activeGateFactory();
 
     try {
       while (true) {
@@ -304,10 +306,15 @@ export class ReadinessController {
           deadline.signal,
         );
         if (snapshot.blockingNotice?.kind !== undefined && snapshot.blockingNotice.kind !== "ABSENT") {
+          // A blocking observation invalidates all earlier route/focus/stability
+          // proof. Preserve the policy of this wait, including PROJECT fresh waits.
+          this.freshReadinessProof = null;
+          gate = activeGateFactory();
           if (expectedRoute.kind === "FRESH_ROOT" && snapshot.mainFrame.expectedRoute
             && snapshot.blockingNotice.kind === "KNOWN_FRESH_NOTICE" && this.observation.dismissKnownFreshNotice) {
             await this.observation.dismissKnownFreshNotice(snapshot, lease, deadline.signal);
-            gate = this.freshPolicy.createGate();
+            activeGateFactory = () => this.freshPolicy.createGate();
+            gate = activeGateFactory();
             continue; // Obtain entirely new observations; never reuse pre-dismissal proof.
           }
           await this.sleep(this.pollIntervalMs, deadline.signal);
@@ -326,7 +333,8 @@ export class ReadinessController {
             if (!(error instanceof ReadinessCandidateChangedError)) throw error;
             // This private discriminator is thrown only BEFORE raw DOM.focus.
             // A dispatched protocol error is never retried here.
-            gate = expectedRoute.kind === "FRESH_ROOT" ? this.freshPolicy.createGate() : this.existingPolicy.createGate();
+            this.freshReadinessProof = null;
+            gate = activeGateFactory();
           }
         }
 

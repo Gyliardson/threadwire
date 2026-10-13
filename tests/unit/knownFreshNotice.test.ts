@@ -28,6 +28,7 @@ import { ReadinessController } from "../../src/readiness/ReadinessController.js"
 import { ExistingReadinessPolicy } from "../../src/readiness/ExistingReadinessPolicy.js";
 import { FreshReadinessPolicy } from "../../src/readiness/FreshReadinessPolicy.js";
 import { loadConfig } from "../../src/config/ControllerConfig.js";
+import { createProjectLocator } from "../../src/domain/ProjectIdentity.js";
 
 type AxNode = Awaited<
   ReturnType<CriClient["Accessibility"]["getFullAXTree"]>
@@ -577,5 +578,113 @@ test("notice handling is disabled by default and only canonical intent UUIDs in 
       THREADWIRE_KNOWN_FRESH_NOTICE_INTENT: intent,
     }).knownFreshNoticeIntent,
     intent,
+  );
+});
+
+test("transient unknown dialog invalidates the entire fresh stability window", async () => {
+  const runtime = new RuntimeGenerationTracker();
+  runtime.observe({ pid: 42, creationTime: "A" });
+  let time = 0;
+  let observations = 0;
+  let clearedAt = -1;
+  let inputs = 0;
+  const controller = new ReadinessController(
+    {
+      getReadinessSnapshot: async () => {
+        observations++;
+        const blocked = observations === 3;
+        if (observations === 4) clearedAt = time;
+        return {
+          mainFrame: {
+            frameId: "main",
+            loaderId: "loader",
+            expectedRoute: true,
+          },
+          eligibleEditables: blocked
+            ? []
+            : [{ backendDOMNodeId: 101, focused: true }],
+          backendActivity: { activeCount: 0, activityEpoch: 0 },
+          blockingNotice: {
+            kind: blocked ? ("UNKNOWN" as const) : ("ABSENT" as const),
+          },
+        };
+      },
+      focusBackendNode: async () => {
+        inputs++;
+      },
+      dismissKnownFreshNotice: async () => {
+        throw new Error("unknown dialog cannot be dismissed");
+      },
+    },
+    new ExistingReadinessPolicy({
+      frameStableObservations: 1,
+      focusStableObservations: 1,
+    }),
+    new FreshReadinessPolicy({
+      frameStableObservations: 1,
+      focusStableObservations: 1,
+      clock: () => time,
+    }),
+    {
+      sleep: async (ms) => {
+        time += observations === 3 ? 700 : ms;
+      },
+    },
+  );
+  await controller.waitForFreshRoute(runtime.getCurrentRuntimeLease());
+  assert.equal(
+    inputs,
+    2,
+    "focus proof must be rebuilt after the blocked observation",
+  );
+  assert.ok(
+    time - clearedAt >= 500,
+    "pre-dialog stability time must not count after the dialog disappears",
+  );
+});
+
+test("project focus staleness preserves the original fresh policy and its full stability guard", async () => {
+  const runtime = new RuntimeGenerationTracker();
+  runtime.observe({ pid: 42, creationTime: "A" });
+  let time = 0;
+  let focusCalls = 0;
+  const controller = new ReadinessController(
+    {
+      getReadinessSnapshot: async () => ({
+        mainFrame: { frameId: "main", loaderId: "loader", expectedRoute: true },
+        eligibleEditables: [{ backendDOMNodeId: 101, focused: true }],
+        backendActivity: { activeCount: 0, activityEpoch: 0 },
+        blockingNotice: { kind: "ABSENT" as const },
+      }),
+      focusBackendNode: async () => {
+        focusCalls++;
+        if (focusCalls === 1) throw new ReadinessCandidateChangedError();
+      },
+    },
+    new ExistingReadinessPolicy({
+      frameStableObservations: 1,
+      focusStableObservations: 1,
+    }),
+    new FreshReadinessPolicy({
+      frameStableObservations: 1,
+      focusStableObservations: 1,
+      clock: () => time,
+    }),
+    {
+      sleep: async (ms) => {
+        time += ms;
+      },
+    },
+  );
+  await controller.waitForProjectRoute(
+    createProjectLocator(
+      "https://chatgpt.com/g/g-p-00000000000000000000000000000002/project",
+    ),
+    runtime.getCurrentRuntimeLease(),
+  );
+  assert.equal(focusCalls, 2);
+  assert.ok(
+    time >= 700,
+    "stale project focus must not downgrade the fresh wait to existing-route readiness",
   );
 });
