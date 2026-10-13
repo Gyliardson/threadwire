@@ -29,6 +29,12 @@ import { ExistingReadinessPolicy } from "../../src/readiness/ExistingReadinessPo
 import { FreshReadinessPolicy } from "../../src/readiness/FreshReadinessPolicy.js";
 import { loadConfig } from "../../src/config/ControllerConfig.js";
 import { createProjectLocator } from "../../src/domain/ProjectIdentity.js";
+import {
+  createThreadwireControllerWithM2PublicCdpDiagnostic,
+  M2PublicCdpReadinessDiagnostic,
+  wrapM2PublicCdpReadinessDiagnostics,
+} from "../../src/diagnostics/M2PublicCdpReadinessDiagnostic.js";
+import { CdpSessionManager } from "../../src/cdp/CdpSessionManager.js";
 
 type AxNode = Awaited<
   ReturnType<CriClient["Accessibility"]["getFullAXTree"]>
@@ -686,5 +692,103 @@ test("project focus staleness preserves the original fresh policy and its full s
   assert.ok(
     time >= 700,
     "stale project focus must not downgrade the fresh wait to existing-route readiness",
+  );
+});
+
+test("actual diagnostic and normal factory selection both validate configured notice intent", () => {
+  for (const environment of [
+    {},
+    { THREADWIRE_M2_PUBLIC_CDP_DIAGNOSTIC: "1" },
+  ]) {
+    assert.throws(() =>
+      createThreadwireControllerWithM2PublicCdpDiagnostic(
+        {
+          cdpHost: "127.0.0.1",
+          cdpPort: 9223,
+          classicPolicy: "BOUND_EXISTING",
+          knownFreshNoticeIntent: "invalid-intent",
+        },
+        environment,
+      ),
+    );
+    assert.throws(() =>
+      createThreadwireControllerWithM2PublicCdpDiagnostic(
+        {
+          cdpHost: "127.0.0.1",
+          cdpPort: 9223,
+          classicPolicy: "MANAGED",
+          knownFreshNoticeIntent: randomUUID(),
+        },
+        environment,
+      ),
+    );
+  }
+});
+
+test("production diagnostic wrapper retains no terminal failure for recovered pre-input focus staleness", async () => {
+  const runtime = new RuntimeGenerationTracker();
+  runtime.observe({ pid: 42, creationTime: "A" });
+  const client = new NoticeClient();
+  const focusedComposer = {
+    ...composer,
+    properties: [
+      ...composer.properties!,
+      {
+        name: "focused" as const,
+        value: { type: "boolean" as const, value: true },
+      },
+    ],
+  };
+  client.nodes = [focusedComposer];
+  let provenanceCalls = 0;
+  const session = await connected(client, async () => {
+    provenanceCalls++;
+    if (provenanceCalls === 1)
+      client.nodes = [{ ...focusedComposer, backendDOMNodeId: 102 }];
+  });
+  const raw = new CdpSessionManager(
+    { cdpHost: "127.0.0.1", cdpPort: 9223 },
+    runtime,
+    {
+      discovery: { findPrimaryTarget: async () => target },
+      transport: { connect: async () => session },
+    },
+  );
+  const events: unknown[] = [];
+  const wrapped = wrapM2PublicCdpReadinessDiagnostics(
+    raw,
+    new M2PublicCdpReadinessDiagnostic((event) => events.push(event)),
+  );
+  await wrapped.connect();
+  let time = 0;
+  const readiness = new ReadinessController(
+    wrapped,
+    new ExistingReadinessPolicy({
+      frameStableObservations: 1,
+      focusStableObservations: 1,
+    }),
+    new FreshReadinessPolicy({
+      frameStableObservations: 1,
+      focusStableObservations: 1,
+      clock: () => time,
+    }),
+    {
+      sleep: async (ms) => {
+        time += ms;
+      },
+    },
+  );
+  await readiness.waitForFreshRoute(runtime.getCurrentRuntimeLease());
+  assert.equal(provenanceCalls, 2);
+  assert.equal(
+    client.events.filter((e) => e === "focus").length,
+    1,
+    "first semantic rejection occurs before raw focus",
+  );
+  assert.ok(time >= 700);
+  assert.deepEqual(
+    events,
+    [],
+    "a recovered pre-input candidate must not contradict eventual terminal PASS evidence",
   );
 });

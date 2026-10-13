@@ -1,6 +1,8 @@
 import { BoundCdpSessionManager } from "../cdp/BoundCdpSessionManager.js";
 import { CdpSessionManager } from "../cdp/CdpSessionManager.js";
 import { CdpTransportSession } from "../cdp/CdpTransport.js";
+import { ReadinessCandidateChangedError } from "../cdp/KnownFreshNotice.js";
+import { createFreshNoticeCdpOptions } from "../controller/FreshNoticeCdpOptions.js";
 import { ControllerConfig } from "../config/ControllerConfig.js";
 import {
   ThreadwireController,
@@ -78,6 +80,9 @@ function classifyFailure(
   stage: M2CdpDiagnosticStage,
   error: unknown,
 ): ClassifiedFailure | null {
+  // This private discriminator proves rejection before raw input and is handled
+  // by bounded readiness observation. It is not a dispatched focus failure.
+  if (stage === "FRESH_READINESS_FOCUS" && error instanceof ReadinessCandidateChangedError) return null;
   if (error instanceof RuntimeProvenanceUnverifiedError) {
     return {
       stage: "BOUND_RUNTIME_CURRENTNESS",
@@ -275,6 +280,7 @@ export function createM2PublicCdpDiagnosticThreadwireController(
   const supervisor = new ClassicSupervisor(config);
   const registry = new ThreadRegistry();
   const scheduler = new OperationScheduler(supervisor);
+  const cdpOptions = createFreshNoticeCdpOptions(config, scheduler);
   const rawCdp = classicPolicy === "BOUND_EXISTING"
     ? new BoundCdpSessionManager(
         config,
@@ -283,8 +289,9 @@ export function createM2PublicCdpDiagnosticThreadwireController(
           supervisor,
           new WindowsCdpEndpointProvenance(config),
         ),
+        cdpOptions,
       )
-    : new CdpSessionManager(config, supervisor);
+    : new CdpSessionManager(config, supervisor, cdpOptions);
   const cdp = wrapM2PublicCdpReadinessDiagnostics(rawCdp, diagnostic);
   const readiness = new ReadinessController(cdp);
   const router = new ConversationRouter(registry, scheduler, cdp, readiness);
