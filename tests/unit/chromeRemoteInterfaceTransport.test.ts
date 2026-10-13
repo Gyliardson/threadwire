@@ -212,6 +212,7 @@ test("Accessibility classification requires exactly the narrow multiline editabl
 
 test("typed mutation surface exposes focus and reload but not a generic send primitive", async () => {
   const { client, session } = await createSession(); await session.initializeReadinessObservation();
+  await session.getReadinessSnapshot({ kind: "THREAD", locator: expected });
   await session.focusBackendNode(101);
   assert.deepEqual(client.focusIds, [101]);
   assert.equal("send" in session, false);

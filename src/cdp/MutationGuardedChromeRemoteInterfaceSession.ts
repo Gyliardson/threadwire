@@ -6,12 +6,16 @@ import { throwIfAborted } from "../utils/timeout.js";
 import { CdpBeforeMutationHook } from "./CdpTransport.js";
 import type { CriClient } from "./ChromeRemoteInterfaceTransport.js";
 import { ChromeRemoteInterfaceSession } from "./ChromeRemoteInterfaceSession.js";
+import { NoticeMouseCommand, NoticeMouseGuard } from "./KnownFreshNotice.js";
 
 type MutationScope = Readonly<{
   signal?: AbortSignal;
   pageNavigate?: boolean;
   pageReload?: boolean;
   domFocus?: boolean;
+  focusSemanticGuard?: () => Promise<void>;
+  inputDispatchMouseEvent?: boolean;
+  noticeMouseGuard?: NoticeMouseGuard;
   inputInsertText?: boolean;
   inputDispatchKeyEvent?: boolean;
   runtimeEvaluate?: boolean;
@@ -35,6 +39,7 @@ function shouldGuard(
   }
   if (domain === "Input") {
     return (method === "insertText" && scope.inputInsertText === true) ||
+      (method === "dispatchMouseEvent" && scope.inputDispatchMouseEvent === true) ||
       (method === "dispatchKeyEvent" && scope.inputDispatchKeyEvent === true);
   }
   return (method === "evaluate" && scope.runtimeEvaluate === true) ||
@@ -60,6 +65,7 @@ function guardDomain<T extends object>(
           "focus",
           "insertText",
           "dispatchKeyEvent",
+          "dispatchMouseEvent",
           "evaluate",
           "callFunctionOn",
         ].includes(String(property))
@@ -73,6 +79,16 @@ function guardDomain<T extends object>(
           throwIfAborted(signal);
           await beforeMutation(signal);
           throwIfAborted(signal);
+          if (domainName === "DOM" && property === "focus" && scope?.focusSemanticGuard) {
+            await scope.focusSemanticGuard();
+            throwIfAborted(signal);
+          }
+          if (domainName === "Input" && property === "dispatchMouseEvent") {
+            if (!scope?.noticeMouseGuard) throw new Error("Known-notice mouse guard is unavailable.");
+            await scope.noticeMouseGuard.validate();
+            throwIfAborted(signal);
+            scope.noticeMouseGuard.onPossibleInput();
+          }
         }
         return await Reflect.apply(value, target, args);
       };
@@ -136,14 +152,20 @@ export class MutationGuardedChromeRemoteInterfaceSession extends ChromeRemoteInt
     );
   }
 
-  public override async focusBackendNode(
+  protected override async dispatchComposerFocus(
     backendDOMNodeId: number,
+    validate: () => Promise<void>,
     signal?: AbortSignal,
   ): Promise<void> {
     await this.withMutationScope(
-      { domFocus: true, ...(signal ? { signal } : {}) },
-      () => super.focusBackendNode(backendDOMNodeId),
+      { domFocus: true, focusSemanticGuard: validate, ...(signal ? { signal } : {}) },
+      async () => { await this.client.DOM.focus({ backendNodeId: backendDOMNodeId }); },
     );
+  }
+
+  protected override async dispatchNoticeMouse(command: NoticeMouseCommand, guard: NoticeMouseGuard, signal?: AbortSignal): Promise<void> {
+    await this.withMutationScope({ inputDispatchMouseEvent: true, noticeMouseGuard: guard, ...(signal ? { signal } : {}) },
+      async () => { await this.client.Input.dispatchMouseEvent(command); });
   }
 
   public override async insertText(text: string, signal?: AbortSignal): Promise<void> {

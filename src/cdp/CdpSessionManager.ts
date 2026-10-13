@@ -19,6 +19,7 @@ import {
   RuntimeProvenanceUnverifiedError,
   ResponseStreamUnavailableError,
   ThreadwireError,
+  TurnStateUncertainError,
 } from "../domain/errors.js";
 import { ExistingReadinessSnapshot, RouteExpectation } from "../readiness/types.js";
 import { NormalizedResponseStreamEvent } from "../response/types.js";
@@ -40,6 +41,7 @@ import {
   CdpTurnTransportSession,
 } from "./CdpTransport.js";
 import { CdpTargetInfo } from "./types.js";
+import { FreshNoticeConsumption } from "../readiness/FreshNoticeBudget.js";
 
 const DEFAULT_ATTACH_TIMEOUT_MS = 5000;
 const DEFAULT_NAVIGATION_SETTLEMENT_TIMEOUT_MS = 15000;
@@ -49,6 +51,8 @@ export interface CdpTargetDiscoveryLike {
 }
 
 export interface CdpSessionManagerOptions {
+  readonly freshNoticeBudget?: FreshNoticeConsumption;
+  readonly onReadinessMutationUncertain?: (lease: RuntimeLease) => void;
   readonly discovery?: CdpTargetDiscoveryLike;
   readonly transport?: CdpTransport;
   readonly attachTimeoutMs?: number;
@@ -114,6 +118,8 @@ export class CdpSessionManager {
   private readonly transport: CdpTransport;
   private readonly attachTimeoutMs: number;
   private readonly navigationSettlementTimeoutMs: number;
+  private readonly freshNoticeBudget: FreshNoticeConsumption | undefined;
+  private readonly onReadinessMutationUncertain: ((lease: RuntimeLease) => void) | undefined;
 
   public constructor(
     private readonly config: ControllerConfig,
@@ -121,6 +127,8 @@ export class CdpSessionManager {
     options: CdpSessionManagerOptions = {},
   ) {
     this.discovery = options.discovery ?? new CdpTargetDiscovery(config);
+    this.freshNoticeBudget = options.freshNoticeBudget;
+    this.onReadinessMutationUncertain = options.onReadinessMutationUncertain;
     this.transport = options.transport ?? new ChromeRemoteInterfaceTransport();
     this.attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
     this.navigationSettlementTimeoutMs =
@@ -363,6 +371,27 @@ export class CdpSessionManager {
         signal,
       );
     } catch (error) {
+      this.rethrowReadinessLifecycleError(error, session, lease, signal);
+    }
+  }
+
+  public async dismissKnownFreshNotice(snapshot: ExistingReadinessSnapshot, lease: RuntimeLease, signal?: AbortSignal): Promise<void> {
+    const session = this.requireSessionForLease(lease);
+    const budget = this.freshNoticeBudget;
+    if (!budget || !this.onReadinessMutationUncertain || !session.dismissKnownFreshNotice || !signal) {
+      throw new CdpReadinessFailedError("Known FRESH notice dismissal is not authorized.");
+    }
+    let possibleInput = false;
+    try {
+      await this.runReadinessSessionOperation(session, lease,
+        () => session.dismissKnownFreshNotice!(snapshot,
+          () => budget.consume(lease, snapshot.mainFrame),
+          () => { possibleInput = true; }, this.rawMutationSignal(signal)), signal);
+    } catch (error) {
+      if (possibleInput) {
+        this.onReadinessMutationUncertain(lease);
+        throw new TurnStateUncertainError("Known-notice input did not settle authoritatively.");
+      }
       this.rethrowReadinessLifecycleError(error, session, lease, signal);
     }
   }

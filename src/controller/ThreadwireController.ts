@@ -13,6 +13,7 @@ import {
 import { ProjectCreator } from "../project/ProjectCreator.js";
 import { ProjectRegistry } from "../project/ProjectRegistry.js";
 import { ReadinessController } from "../readiness/ReadinessController.js";
+import { createFreshNoticeCdpOptions } from "./FreshNoticeCdpOptions.js";
 import { ResponseStreamEvent } from "../response/types.js";
 import { ConversationRouter } from "../routing/ConversationRouter.js";
 import { OperationScheduler } from "../routing/OperationScheduler.js";
@@ -390,6 +391,7 @@ export function createThreadwireController(
   const supervisor = new ClassicSupervisor(config);
   const registry = new ThreadRegistry();
   const scheduler = new OperationScheduler(supervisor);
+  const cdpOptions = createFreshNoticeCdpOptions(config, scheduler);
   const cdp = classicPolicy === "BOUND_EXISTING"
     ? new BoundCdpSessionManager(
         config,
@@ -398,8 +400,9 @@ export function createThreadwireController(
           supervisor,
           new WindowsCdpEndpointProvenance(config),
         ),
+        cdpOptions,
       )
-    : new CdpSessionManager(config, supervisor);
+    : new CdpSessionManager(config, supervisor, cdpOptions);
   const readiness = new ReadinessController(cdp);
   const router = new ConversationRouter(registry, scheduler, cdp, readiness);
   const executor = new TurnExecutor(registry, scheduler, readiness, cdp);
